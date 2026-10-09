@@ -2,8 +2,7 @@
 
 Decorator-driven [NATS](https://nats.io) integration for [NestJS](https://nestjs.com): core subscriptions, JetStream consumers and NATS services as plain Nest providers, with pipes, guards, interceptors and exception filters working the way they do for HTTP controllers.
 
-> [!WARNING]
-> **Status: 0.x, under active development, not production-ready yet.**
+> **Warning:** 0.x, under active development, not production-ready yet.
 > The API may change between minor versions until 1.0. See [Known limitations](#known-limitations).
 
 ## Features
