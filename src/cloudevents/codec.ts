@@ -9,7 +9,13 @@ type CeMessage = { data: Uint8Array; headers?: MsgHdrs };
 const CE_PREFIX = 'ce-';
 const REQUIRED = ['id', 'source', 'type', 'specversion'] as const;
 const OPTIONAL = ['time', 'subject', 'dataschema', 'datacontenttype'] as const;
-const KNOWN = new Set<string>([...REQUIRED, ...OPTIONAL, 'data', 'data_base64']);
+const RESERVED = new Set<string>([...REQUIRED, ...OPTIONAL, 'data', 'data_base64']);
+const KNOWN = RESERVED;
+const EXTENSION_NAME = /^[a-z0-9]+$/;
+
+function isValidExtensionName(name: string): boolean {
+  return EXTENSION_NAME.test(name) && !RESERVED.has(name);
+}
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -72,7 +78,7 @@ function binaryParts(h: MsgHdrs): {
       name === 'dataschema'
     ) {
       attrs[name] = value;
-    } else if (name !== 'datacontenttype') {
+    } else if (name !== 'datacontenttype' && name !== 'data' && name !== 'data_base64') {
       ext[name] = value;
     }
   }
@@ -174,9 +180,22 @@ export function resolveCloudEvent(
       'CloudEvent source is required: set cloudEvent.source or NatsModule cloudEvents.source',
     );
   }
+  if (!init.type) throw new NatsConfigError('CloudEvent type is required');
+  for (const name of Object.keys(init.extensions ?? {})) {
+    if (!isValidExtensionName(name)) {
+      throw new NatsConfigError(
+        `Invalid CloudEvent extension name "${name}": must match [a-z0-9]+ and not be a reserved attribute`,
+      );
+    }
+  }
+  const id = init.id ?? (gen.id ?? randomUUID)();
+  if (!id) throw new NatsConfigError('CloudEvent id must not be empty');
   const time = init.time ?? (gen.now ?? (() => new Date()))();
+  if (time instanceof Date && Number.isNaN(time.getTime())) {
+    throw new NatsConfigError('CloudEvent time is an invalid Date');
+  }
   const meta: CloudEventMeta = {
-    id: init.id ?? (gen.id ?? randomUUID)(),
+    id,
     source,
     type: init.type,
     specversion: '1.0',
@@ -196,9 +215,10 @@ export function writeCloudEvent(
   mode: 'binary' | 'structured',
   headers: MsgHdrs,
 ): Uint8Array {
-  const body = encodePayload(codec, data);
+  const extensions = Object.entries(meta.extensions).filter(([name]) => isValidExtensionName(name));
   if (mode === 'binary') {
-    for (const [name, value] of Object.entries(meta.extensions)) {
+    const body = encodePayload(codec, data);
+    for (const [name, value] of extensions) {
       headers.set(`${CE_PREFIX}${name}`, value);
     }
     headers.set('ce-specversion', meta.specversion);
@@ -211,7 +231,7 @@ export function writeCloudEvent(
     if (meta.datacontenttype !== undefined) headers.set('Content-Type', meta.datacontenttype);
     return body;
   }
-  const env: Record<string, unknown> = { ...meta.extensions };
+  const env: Record<string, unknown> = Object.fromEntries(extensions);
   env.specversion = meta.specversion;
   env.id = meta.id;
   env.source = meta.source;
@@ -223,8 +243,9 @@ export function writeCloudEvent(
   if (data !== undefined) {
     if (codec.contentType === 'application/json' && !(data instanceof Uint8Array)) {
       env.data = data;
-    } else if (body.length > 0) {
-      env.data_base64 = Buffer.from(body).toString('base64');
+    } else {
+      const body = encodePayload(codec, data);
+      if (body.length > 0) env.data_base64 = Buffer.from(body).toString('base64');
     }
   }
   headers.set('Content-Type', CE_STRUCTURED_CONTENT_TYPE);
