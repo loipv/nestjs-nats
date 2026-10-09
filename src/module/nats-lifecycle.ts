@@ -7,6 +7,7 @@ import {
 import { DiscoveryService } from '@nestjs/core';
 import type { HandlerAdapter } from '../adapters/adapter.js';
 import { CoreSubscriptionAdapter } from '../adapters/core-subscription.adapter.js';
+import { JetStreamConsumerAdapter } from '../adapters/jetstream-consumer.adapter.js';
 import { NatsConnectionManager } from '../connection/connection-manager.js';
 import type { HandlerDefinition } from '../discovery/handler-explorer.js';
 import { HandlerExplorer } from '../discovery/handler-explorer.js';
@@ -91,8 +92,10 @@ export class NatsLifecycle
     switch (def.kind) {
       case 'subscribe':
         return new CoreSubscriptionAdapter(def, entry);
+      case 'consume':
+        return new JetStreamConsumerAdapter(def, entry, new NatsStreamManager(entry));
       default:
-        // `consume` and `service-endpoint` adapters are added by later tasks.
+        // The `service-endpoint` adapter is added by a later task.
         return undefined;
     }
   }
