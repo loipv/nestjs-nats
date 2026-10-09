@@ -104,7 +104,7 @@ describe('buildDlqHeaders', () => {
   });
   it('stringifies non-Error values', () =>
     expect(buildDlqHeaders(coreMsg(), 'oops', 1, new Date()).get('Nats-DLQ-Error')).toBe('oops'));
-  it('strips JetStream publish directives but keeps Nats-Msg-Id', () => {
+  it('strips every original Nats-* header, keeping the other user headers', () => {
     const h = buildDlqHeaders(
       jsMsg({
         stream: 'ORD',
@@ -114,23 +114,68 @@ describe('buildDlqHeaders', () => {
           'Nats-Expected-Stream': 'ORD',
           'nats-expected-last-sequence': '6',
           'NATS-EXPECTED-LAST-MSG-ID': 'm0',
-          'Nats-Expected-Last-Subject-Sequence': '3',
           'Nats-Rollup': 'sub',
           'nats-ttl': '1m',
-          'Nats-Msg-Id': 'm1',
+          'Nats-Incr': '1',
+          'Nats-Schedule': '@at 2026-01-01T00:00:00Z',
+          'Nats-Schedule-Target': 'x',
+          'Nats-Batch-Id': 'b1',
+          'Nats-DLQ-Error': 'stale',
           'x-keep': 'yes',
+          'Content-Type': 'application/json',
         },
       }),
       new Error('x'),
       1,
       new Date(),
     );
-    const keys = h.keys().map((k) => k.toLowerCase());
-    expect(keys.filter((k) => k.startsWith('nats-expected-'))).toEqual([]);
-    expect(keys).not.toContain('nats-rollup');
-    expect(keys).not.toContain('nats-ttl');
-    expect(h.get('Nats-Msg-Id')).toBe('m1');
+    const original = h
+      .keys()
+      .map((k) => k.toLowerCase())
+      .filter((k) => k.startsWith('nats-') && !k.startsWith('nats-dlq-') && k !== 'nats-msg-id');
+    expect(original).toEqual([]);
+    expect(h.get('Nats-DLQ-Error')).toBe('x');
+    expect(h.values('Nats-DLQ-Error')).toEqual(['x']);
     expect(h.get('x-keep')).toBe('yes');
+    expect(h.get('Content-Type')).toBe('application/json');
+  });
+
+  it('gives a JetStream dead letter its own Nats-Msg-Id and keeps the original as Nats-DLQ-Msg-Id', () => {
+    const h = buildDlqHeaders(
+      jsMsg({
+        stream: 'ORD',
+        consumer: 'bill',
+        streamSequence: 7,
+        headers: { 'nats-msg-id': 'm1' },
+      }),
+      new Error('x'),
+      1,
+      new Date(),
+    );
+    expect(h.values('Nats-Msg-Id')).toEqual(['dlq:ORD:bill:7']);
+    expect(h.keys().filter((k) => k.toLowerCase() === 'nats-msg-id')).toEqual(['Nats-Msg-Id']);
+    expect(h.get(DLQ_HEADERS.msgId)).toBe('m1');
+    expect(DLQ_HEADERS.msgId).toBe('Nats-DLQ-Msg-Id');
+  });
+
+  it('sets no Nats-DLQ-Msg-Id when the original has no Nats-Msg-Id', () => {
+    const h = buildDlqHeaders(
+      jsMsg({ stream: 'ORD', consumer: 'bill', streamSequence: 7 }),
+      new Error('x'),
+      1,
+      new Date(),
+    );
+    expect(h.get('Nats-Msg-Id')).toBe('dlq:ORD:bill:7');
+    expect(h.has(DLQ_HEADERS.msgId)).toBe(false);
+  });
+
+  it('sets no Nats-Msg-Id on a dead letter of a core message', () => {
+    const m = coreMsg();
+    const hs = headers();
+    hs.set('Nats-Msg-Id', 'c1');
+    const h = buildDlqHeaders({ ...m, headers: hs }, new Error('x'), 1, new Date());
+    expect(h.has('Nats-Msg-Id')).toBe(false);
+    expect(h.get(DLQ_HEADERS.msgId)).toBe('c1');
   });
 });
 

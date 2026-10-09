@@ -23,18 +23,21 @@ export const DLQ_HEADERS = {
   deliveries: 'Nats-DLQ-Deliveries',
   error: 'Nats-DLQ-Error',
   timestamp: 'Nats-DLQ-Timestamp',
+  /** The original `Nats-Msg-Id`, if any. */
+  msgId: 'Nats-DLQ-Msg-Id',
 } as const;
 
 const MAX_ERROR_LENGTH = 1024;
 
 /**
- * JetStream publish directives of the original message (expectations, rollup, TTL): they
- * were meant for the original stream and would make the DLQ publish fail or misbehave.
- * `Nats-Msg-Id` is kept so that a re-sent dead letter is deduplicated by the DLQ stream.
+ * Headers reserved by NATS (`Nats-Msg-Id`, `Nats-Expected-*`, `Nats-Rollup`, `Nats-TTL`,
+ * `Nats-Incr`, `Nats-Schedule*`, `Nats-Batch-*`, ...): they were directives for the original
+ * publish and would make the DLQ publish fail or misbehave (a copied `Nats-Msg-Id` makes
+ * the DLQ stream drop the dead letters of every other consumer of the same message as
+ * duplicates). None of them is copied to a dead letter.
  */
-function isPublishDirective(key: string): boolean {
-  const k = key.toLowerCase();
-  return k.startsWith('nats-expected-') || k === 'nats-rollup' || k === 'nats-ttl';
+function isNatsHeader(key: string): boolean {
+  return key.toLowerCase().startsWith('nats-');
 }
 
 function defaultSubject(info: HandlerInfo, msg: InboundMessage): string {
@@ -74,8 +77,12 @@ function isJsMsg(raw: InboundMessage['raw']): raw is JsMsg {
 }
 
 /**
- * Headers for a dead-lettered message: the originals (without JetStream publish
- * directives) plus the `Nats-DLQ-*` diagnostics.
+ * Headers for a dead-lettered message: the original user headers (every `Nats-*` header
+ * left out) plus the `Nats-DLQ-*` diagnostics. The original `Nats-Msg-Id` is kept as
+ * `Nats-DLQ-Msg-Id`. A dead letter of a JetStream message gets its own deterministic
+ * `Nats-Msg-Id` (`dlq:<stream>:<consumer>:<stream sequence>`), so a re-sent dead letter is
+ * deduplicated by the DLQ stream while each consumer's dead letter is kept; a dead letter
+ * of a core message has none.
  */
 export function buildDlqHeaders(
   msg: InboundMessage,
@@ -84,9 +91,15 @@ export function buildDlqHeaders(
   now: Date,
 ): MsgHdrs {
   const out = headers();
+  let originalMsgId: string | undefined;
   if (msg.headers) {
     for (const key of msg.headers.keys()) {
-      if (isPublishDirective(key)) continue;
+      if (isNatsHeader(key)) {
+        if (originalMsgId === undefined && key.toLowerCase() === 'nats-msg-id') {
+          originalMsgId = msg.headers.get(key);
+        }
+        continue;
+      }
       for (const value of msg.headers.values(key)) out.append(key, value);
     }
   }
@@ -96,7 +109,9 @@ export function buildDlqHeaders(
     out.set(DLQ_HEADERS.stream, info.stream);
     out.set(DLQ_HEADERS.consumer, info.consumer);
     out.set(DLQ_HEADERS.seq, String(info.streamSequence));
+    out.set('Nats-Msg-Id', `dlq:${info.stream}:${info.consumer}:${info.streamSequence}`);
   }
+  if (originalMsgId) out.set(DLQ_HEADERS.msgId, originalMsgId);
   out.set(DLQ_HEADERS.deliveries, String(deliveries));
   const text = err instanceof Error ? err.message : String(err);
   out.set(DLQ_HEADERS.error, text.replace(/[\r\n]+/g, ' ').slice(0, MAX_ERROR_LENGTH));
@@ -130,6 +145,8 @@ export async function sendToDlq(
     return;
   }
   try {
+    // A `duplicate` PubAck means this very dead letter (same stream, consumer and stream
+    // sequence) is already stored: the message is dead-lettered either way.
     await entry.js().publish(subject, msg.data, { headers: h });
   } catch (pubErr) {
     if (isNoResponders(pubErr)) {
@@ -143,8 +160,8 @@ export async function sendToDlq(
 }
 
 /**
- * Publishes a failed message to its DLQ subject, with the original body and headers plus
- * the `Nats-DLQ-*` headers. Bypasses the outbound plugins. In `'jetstream'` mode it waits
+ * Publishes a failed message to its DLQ subject, with the original body and user headers
+ * plus the `Nats-DLQ-*` headers (see `buildDlqHeaders`). Bypasses the outbound plugins. In `'jetstream'` mode it waits
  * for the PubAck and fails when no stream captures the subject.
  */
 export async function publishToDlq(
