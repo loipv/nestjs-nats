@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { expect, expectTypeOf, it } from 'vitest';
 import type {
+  Batcher,
   BatchOptions,
   ClaimResult,
   Delivery,
@@ -20,7 +21,6 @@ import * as api from '../../src/index.js';
 it('exports the runtime API', () =>
   expect(Object.keys(api).sort()).toEqual(
     [
-      'Batcher',
       'Consume',
       'Ctx',
       'DEFAULT_CONNECTION',
@@ -102,6 +102,10 @@ it('exports the reliability types', () => {
   expectTypeOf<BatchOptions>().toHaveProperty('maxSize');
   expectTypeOf<JetStreamPublishOptions>().not.toBeAny();
   expectTypeOf<PublishManyResult>().toHaveProperty('ok');
+  // A type only: instances come from JetStreamClient.batcher().
+  expectTypeOf<Batcher>().toHaveProperty('add');
+  expectTypeOf<Batcher>().toHaveProperty('flush');
+  expectTypeOf<Batcher>().toHaveProperty('close');
 });
 
 it('does not export internals', () => {

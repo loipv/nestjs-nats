@@ -1,4 +1,4 @@
-export { Batcher } from './batch/batcher.js';
+export type { Batcher } from './batch/batcher.js';
 export type { BatchOptions } from './batch/collector.js';
 export { NatsClient } from './client/nats-client.js';
 export type { Codec } from './codec/codec.js';
