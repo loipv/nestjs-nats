@@ -1,13 +1,31 @@
-import type { JetStreamPublishOptions, PubAck, StreamExpectations } from '@nats-io/jetstream';
+import type {
+  JetStreamPublishOptions as NatsPublishOptions,
+  PubAck,
+  StreamExpectations,
+} from '@nats-io/jetstream';
+import { Batcher, DEFAULT_BATCHER_MAX_SIZE, DEFAULT_BATCHER_MAX_WAIT } from '../batch/batcher.js';
 import { type Codec, encodePayload } from '../codec/codec.js';
 import type { HeadersInit } from '../codec/headers.js';
 import type { ConnectionEntry } from '../connection/connection-manager.js';
-import { NatsModuleError } from '../errors/errors.js';
+import { NatsConfigError, NatsModuleError } from '../errors/errors.js';
 import { compose } from '../pipeline/compose.js';
 import { createOutgoingMessage, outboundMiddlewares } from '../pipeline/outbound.js';
 
 /** JetStream's de-duplication header, set from the `msgId` publish option. */
 const MSG_ID_HEADER = 'Nats-Msg-Id';
+
+/** Default cap of publishes awaiting their PubAck at once in `publishMany`. */
+const DEFAULT_PUBLISH_WINDOW = 256;
+
+export type JetStreamPublishOptions = {
+  msgId?: string;
+  expect?: Partial<StreamExpectations>;
+  headers?: HeadersInit;
+  codec?: Codec;
+  timeout?: number;
+};
+
+export type PublishManyResult = { ok: true; ack: PubAck } | { ok: false; error: Error };
 
 export class JetStreamClient {
   constructor(private readonly entry: ConnectionEntry) {}
@@ -15,20 +33,14 @@ export class JetStreamClient {
   async publish(
     subject: string,
     data?: unknown,
-    opts: {
-      msgId?: string;
-      expect?: Partial<StreamExpectations>;
-      headers?: HeadersInit;
-      codec?: Codec;
-      timeout?: number;
-    } = {},
+    opts: JetStreamPublishOptions = {},
   ): Promise<PubAck> {
     const message = createOutgoingMessage(this.entry, 'jetstream', subject, data, opts);
     // As a header (rather than the `msgID` publish option) so outbound plugins see it.
     if (opts.msgId !== undefined) message.headers.set(MSG_ID_HEADER, opts.msgId);
     let ack: PubAck | undefined;
     const run = compose(outboundMiddlewares(this.entry), async (m) => {
-      const publishOpts: Partial<JetStreamPublishOptions> = {};
+      const publishOpts: Partial<NatsPublishOptions> = {};
       if (m.headers.keys().length > 0) publishOpts.headers = m.headers;
       if (opts.expect !== undefined) publishOpts.expect = opts.expect;
       if (opts.timeout !== undefined) publishOpts.timeout = opts.timeout;
@@ -39,5 +51,53 @@ export class JetStreamClient {
       throw new NatsModuleError(`JetStream publish to "${subject}" produced no acknowledgement`);
     }
     return ack;
+  }
+
+  /**
+   * Publishes `items` with at most `window` publishes awaiting their PubAck at once. Each item
+   * goes through `publish()`, so outbound plugins apply. Results are in input order and an
+   * item's failure is its result, never a rejection.
+   */
+  async publishMany(
+    items: ReadonlyArray<{ subject: string; data?: unknown; opts?: JetStreamPublishOptions }>,
+    opts: { window?: number } = {},
+  ): Promise<PublishManyResult[]> {
+    const window = opts.window ?? DEFAULT_PUBLISH_WINDOW;
+    if (!(window >= 1)) throw new NatsConfigError('publishMany window must be >= 1');
+    const results = new Array<PublishManyResult>(items.length);
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < items.length) {
+        const i = next++;
+        const item = items[i];
+        if (!item) continue;
+        try {
+          results[i] = { ok: true, ack: await this.publish(item.subject, item.data, item.opts) };
+        } catch (err) {
+          results[i] = { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(Math.ceil(window), items.length) }, worker));
+    return results;
+  }
+
+  /**
+   * A batcher that groups publishes and flushes them through `publishMany`. It is flushed
+   * and closed when the connection closes.
+   */
+  batcher(opts: { maxSize?: number; maxWait?: number; window?: number } = {}): Batcher {
+    let off: (() => void) | undefined;
+    const batcher = new Batcher(
+      (items, o) => this.publishMany(items, o),
+      {
+        maxSize: opts.maxSize ?? DEFAULT_BATCHER_MAX_SIZE,
+        maxWait: opts.maxWait ?? DEFAULT_BATCHER_MAX_WAIT,
+        window: opts.window,
+      },
+      () => off?.(),
+    );
+    off = this.entry.onClose(() => batcher.close());
+    return batcher;
   }
 }

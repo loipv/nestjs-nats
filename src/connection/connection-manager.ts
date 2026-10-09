@@ -12,6 +12,7 @@ import { type IdempotencyStore, InMemoryIdempotencyStore } from '../idempotency/
 import { createNatsLogger } from '../module/logger.js';
 import type { NatsModuleOptions } from '../module/options.js';
 import { DEFAULT_CONNECTION } from '../module/tokens.js';
+import { errorMessage } from '../util/errors.js';
 import { redactServers, redactText } from './redact.js';
 
 export type NatsConnectionState = 'connected' | 'reconnecting' | 'draining' | 'closed';
@@ -34,6 +35,11 @@ export interface ConnectionEntry {
    * default in-memory store created on first use and shared by the connection's handlers.
    */
   idempotencyStore(): IdempotencyStore;
+  /**
+   * Registers a hook run when the connection is being closed, before it drains (to flush
+   * what is buffered). Returns a function that unregisters it.
+   */
+  onClose(hook: () => Promise<void>): () => void;
 }
 
 /** An idempotency store handed to a connection's handlers. */
@@ -44,10 +50,16 @@ export interface UsedIdempotencyStore {
   owned: boolean;
 }
 
+interface CloseHookRun {
+  entry: ConnectionEntry;
+  hook: () => Promise<void>;
+}
+
 interface InternalEntry {
   entry: ConnectionEntry;
   reconnecting: boolean;
   usedStores: UsedIdempotencyStore[];
+  closeHooks: Set<() => Promise<void>>;
 }
 
 const LOGGED_EVENTS = new Set<Status['type']>([
@@ -87,6 +99,7 @@ export class NatsConnectionManager {
       let js: JetStreamClient | undefined;
       let jsm: Promise<JetStreamManager> | undefined;
       let idempotency: UsedIdempotencyStore | undefined;
+      const closeHooks = new Set<() => Promise<void>>();
       const entry: ConnectionEntry = {
         name,
         options,
@@ -116,8 +129,16 @@ export class NatsConnectionManager {
           }
           return idempotency.store;
         },
+        onClose(hook) {
+          // Wrapped so registering the same function twice yields two independent hooks.
+          const registered = () => hook();
+          closeHooks.add(registered);
+          return () => {
+            closeHooks.delete(registered);
+          };
+        },
       };
-      const internal: InternalEntry = { entry, reconnecting: false, usedStores: [] };
+      const internal: InternalEntry = { entry, reconnecting: false, usedStores: [], closeHooks };
       this.entries.set(name, internal);
       void this.watchStatus(internal);
       return entry;
@@ -168,6 +189,9 @@ export class NatsConnectionManager {
   }
 
   async closeAll(): Promise<void> {
+    // Awaited only when there are hooks, so a hook-less close starts draining synchronously.
+    const hooks = this.collectCloseHooks();
+    if (hooks.length > 0) await this.runCloseHooks(hooks);
     const open = [...this.entries.values()].filter(({ entry }) => !entry.nc.isClosed());
     const results = await Promise.allSettled(
       open.map(async ({ entry }) => {
@@ -183,6 +207,26 @@ export class NatsConnectionManager {
           result.reason instanceof Error ? result.reason.message : String(result.reason),
         );
         entry.logger.error(`NATS connection "${entry.name}" failed to close cleanly: ${reason}`);
+      }
+    });
+  }
+
+  private collectCloseHooks(): CloseHookRun[] {
+    return [...this.entries.values()].flatMap(({ entry, closeHooks }) =>
+      // Copied: hooks unregister themselves while they run.
+      [...closeHooks].map((hook) => ({ entry, hook })),
+    );
+  }
+
+  /** Runs the given close hooks together; a failing hook is logged, never thrown. */
+  private async runCloseHooks(runs: CloseHookRun[]): Promise<void> {
+    const results = await Promise.allSettled(runs.map(({ hook }) => hook()));
+    results.forEach((result, i) => {
+      if (result.status === 'rejected') {
+        const { entry } = runs[i] as (typeof runs)[number];
+        entry.logger.error(
+          `NATS connection "${entry.name}" close hook failed: ${redactText(errorMessage(result.reason))}`,
+        );
       }
     });
   }
