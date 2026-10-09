@@ -13,6 +13,7 @@ import { createNatsLogger } from '../module/logger.js';
 import type { NatsModuleOptions } from '../module/options.js';
 import { DEFAULT_CONNECTION } from '../module/tokens.js';
 import { errorMessage } from '../util/errors.js';
+import { settlesWithin } from '../util/timeout.js';
 import { redactServers, redactText } from './redact.js';
 
 export type NatsConnectionState = 'connected' | 'reconnecting' | 'draining' | 'closed';
@@ -61,6 +62,8 @@ interface InternalEntry {
   usedStores: UsedIdempotencyStore[];
   closeHooks: Set<() => Promise<void>>;
 }
+
+const DEFAULT_CLOSE_TIMEOUT = 10_000;
 
 const LOGGED_EVENTS = new Set<Status['type']>([
   'disconnect',
@@ -188,34 +191,58 @@ export class NatsConnectionManager {
     );
   }
 
-  async closeAll(): Promise<void> {
-    // Awaited only when there are hooks, so a hook-less close starts draining synchronously.
-    const hooks = this.collectCloseHooks();
-    if (hooks.length > 0) await this.runCloseHooks(hooks);
-    const open = [...this.entries.values()].filter(({ entry }) => !entry.nc.isClosed());
-    const results = await Promise.allSettled(
-      open.map(async ({ entry }) => {
-        if (!entry.nc.isDraining()) return entry.nc.drain();
-        const err = await entry.nc.closed();
-        if (err instanceof Error) throw err;
-      }),
-    );
-    results.forEach((result, i) => {
-      if (result.status === 'rejected') {
-        const { entry } = open[i];
-        const reason = redactText(
-          result.reason instanceof Error ? result.reason.message : String(result.reason),
-        );
-        entry.logger.error(`NATS connection "${entry.name}" failed to close cleanly: ${reason}`);
-      }
-    });
+  /**
+   * Closes every connection: runs its close hooks, then drains it. Hooks and drain together
+   * get at most `timeoutMs` (default 10_000) per connection, after which the connection is
+   * closed without draining. Never rejects; failures are logged.
+   */
+  closeAll({ timeoutMs = DEFAULT_CLOSE_TIMEOUT }: { timeoutMs?: number } = {}): Promise<void> {
+    // Each close starts synchronously: a connection without hooks is draining on return.
+    return Promise.all(
+      [...this.entries.values()].map((internal) => this.close(internal, timeoutMs)),
+    ).then(() => undefined);
   }
 
-  private collectCloseHooks(): CloseHookRun[] {
-    return [...this.entries.values()].flatMap(({ entry, closeHooks }) =>
-      // Copied: hooks unregister themselves while they run.
-      [...closeHooks].map((hook) => ({ entry, hook })),
+  private async close(internal: InternalEntry, timeoutMs: number): Promise<void> {
+    const { entry } = internal;
+    if (entry.nc.isClosed()) return;
+    let forced = false;
+    const graceful = this.closeGracefully(internal, () => forced);
+    if (await settlesWithin(graceful, timeoutMs)) return;
+    forced = true;
+    entry.logger.warn(
+      `NATS connection "${entry.name}" did not drain within ${timeoutMs}ms; closed forcefully`,
     );
+    try {
+      await entry.nc.close();
+    } catch (err) {
+      entry.logger.error(
+        `NATS connection "${entry.name}" failed to close: ${redactText(errorMessage(err))}`,
+      );
+    }
+  }
+
+  /** Runs the connection's close hooks, then drains it (or waits for a drain in progress). */
+  private async closeGracefully(internal: InternalEntry, forced: () => boolean): Promise<void> {
+    const { entry } = internal;
+    // Awaited only when there are hooks, so a hook-less close starts draining synchronously.
+    const hooks = [...internal.closeHooks].map((hook) => ({ entry, hook }));
+    if (hooks.length > 0) await this.runCloseHooks(hooks);
+    try {
+      if (entry.nc.isClosed()) return;
+      if (!entry.nc.isDraining()) {
+        await entry.nc.drain();
+        return;
+      }
+      const err = await entry.nc.closed();
+      if (err instanceof Error) throw err;
+    } catch (err) {
+      // A drain abandoned for a forced close may fail afterwards: that is expected.
+      if (forced()) return;
+      entry.logger.error(
+        `NATS connection "${entry.name}" failed to close cleanly: ${redactText(errorMessage(err))}`,
+      );
+    }
   }
 
   /** Runs the given close hooks together; a failing hook is logged, never thrown. */

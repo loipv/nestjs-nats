@@ -168,4 +168,65 @@ describe('NatsConnectionManager close hooks', () => {
     );
     expect(e.nc.isClosed()).toBe(true);
   });
+
+  it('closes forcefully when close hooks and drain outlast timeoutMs', async () => {
+    const warnings: string[] = [];
+    const logger = {
+      log() {},
+      error() {},
+      debug() {},
+      verbose() {},
+      warn: (m: string) => warnings.push(m),
+    };
+    const m = new NatsConnectionManager();
+    const e = await m.connect('stuck', { connection: { servers: srv.url }, logger });
+    e.onClose(() => new Promise<void>(() => {}));
+    const t0 = Date.now();
+    await expect(m.closeAll({ timeoutMs: 200 })).resolves.toBeUndefined();
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(190);
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(e.nc.isClosed()).toBe(true);
+    expect(warnings).toEqual([
+      'NATS connection "stuck" did not drain within 200ms; closed forcefully',
+    ]);
+  });
+
+  it('closes forcefully when the server is gone', async () => {
+    const gone = await startNats();
+    const warnings: string[] = [];
+    const errors: string[] = [];
+    const logger = {
+      log() {},
+      debug() {},
+      verbose() {},
+      error: (m: string) => errors.push(m),
+      warn: (m: string) => warnings.push(m),
+    };
+    const m = new NatsConnectionManager();
+    const e = await m.connect('gone', { connection: { servers: gone.url }, logger });
+    const sub = e.nc.subscribe('gone.>');
+    const loop = (async () => {
+      for await (const _ of sub) {
+        // nothing is published
+      }
+    })();
+    await e.nc.flush();
+    await gone.stop();
+    await vi.waitFor(() => expect(m.status('gone').state).toBe('reconnecting'), {
+      timeout: 5000,
+    });
+    const t0 = Date.now();
+    await expect(m.closeAll({ timeoutMs: 300 })).resolves.toBeUndefined();
+    expect(Date.now() - t0).toBeLessThan(1500);
+    expect(e.nc.isClosed()).toBe(true);
+    // The subscription's iterator ends, so nothing keeps waiting on it.
+    await expect(loop).resolves.toBeUndefined();
+    expect(sub.isClosed()).toBe(true);
+    expect(warnings).toContain(
+      'NATS connection "gone" did not drain within 300ms; closed forcefully',
+    );
+    // The abandoned drain must not surface as a failure.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(errors).toEqual([]);
+  });
 });
