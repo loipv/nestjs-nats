@@ -16,6 +16,10 @@
     "./otel": {
       "types": "./dist/otel/index.d.ts",
       "default": "./dist/otel/index.js"
+    },
+    "./health": {
+      "types": "./dist/health/index.d.ts",
+      "default": "./dist/health/index.js"
     }
   },
   "files": [
@@ -37,11 +41,15 @@
     "@nats-io/transport-node": "^3.0.0",
     "@nestjs/common": "^11.0.0 || ^12.0.0",
     "@nestjs/core": "^11.0.0 || ^12.0.0",
+    "@nestjs/terminus": "^11.0.0 || ^12.0.0",
     "@opentelemetry/api": "^1.9.0",
     "reflect-metadata": "^0.2.0",
     "rxjs": "^7.1.0"
   },
   "peerDependenciesMeta": {
+    "@nestjs/terminus": {
+      "optional": true
+    },
     "@opentelemetry/api": {
       "optional": true
     }
@@ -54,6 +62,7 @@
     "@nats-io/transport-node": "^3.4.0",
     "@nestjs/common": "^12.1.2",
     "@nestjs/core": "^12.1.2",
+    "@nestjs/terminus": "^12.1.0",
     "@nestjs/testing": "^12.1.2",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/context-async-hooks": "^2.11.0",
