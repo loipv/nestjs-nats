@@ -14,6 +14,11 @@ export interface InboundMessage {
   data: Uint8Array;
   headers?: MsgHdrs;
   raw: Msg | JsMsg;
+  /**
+   * 1-based delivery attempt: the server's delivery count for JetStream messages; for
+   * core messages 1, increased by in-process retries.
+   */
+  attempt: number;
 }
 
 interface HandlerInfoBase {

@@ -14,20 +14,17 @@ import {
 } from '../pipeline/delivery.js';
 import { invokeHandler } from '../pipeline/invoker.js';
 import { toServiceError } from '../pipeline/reply.js';
-import type { HandlerAdapter } from './adapter.js';
-import { createLimiter, type Limiter } from './limiter.js';
+import { errorTrace } from '../util/errors.js';
+import type { ForceStopResult, HandlerAdapter } from './adapter.js';
+import { Dispatcher, type DispatchItem } from './dispatcher.js';
 
 type SubscribeDefinition = HandlerDefinition & { kind: 'subscribe' };
 
 const EMPTY = new Uint8Array(0);
 
-function errorTrace(err: unknown): string {
-  return err instanceof Error ? (err.stack ?? err.message) : String(err);
-}
-
 /** Runs a `@Subscribe` handler on a core NATS subscription (optionally in a queue group). */
 export class CoreSubscriptionAdapter implements HandlerAdapter {
-  private readonly limiter: Limiter;
+  private readonly dispatcher: Dispatcher<Msg>;
   private readonly codec: Codec;
   private readonly run: (d: InternalDelivery) => Promise<void>;
   private readonly info: HandlerInfo;
@@ -39,7 +36,6 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
     private readonly def: SubscribeDefinition,
     private readonly entry: ConnectionEntry,
   ) {
-    this.limiter = createLimiter(def.options.concurrency ?? 1);
     this.codec = def.options.codec ?? entry.options.codec ?? jsonCodec();
     this.info = toHandlerInfo(def);
     this.run = buildInboundPipeline(
@@ -47,6 +43,12 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
       invokeHandler,
     );
     this.label = `${def.className}.${def.methodName} on "${def.subject}"`;
+    this.dispatcher = new Dispatcher<Msg>({
+      concurrency: def.options.concurrency ?? 1,
+      process: (items) => this.process(items),
+      logger: entry.logger,
+      label: this.label,
+    });
   }
 
   async start(): Promise<void> {
@@ -72,30 +74,35 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
   async idle(): Promise<void> {
     // The loop ends once the drained subscription has yielded its buffered messages.
     await this.loop;
-    await this.limiter.idle();
+    await this.dispatcher.idle();
+  }
+
+  forceStop(): ForceStopResult {
+    // Core messages cannot be handed back to the server; only pending retries are left.
+    return { nakked: 0, cancelledRetries: this.dispatcher.cancelRetries() };
   }
 
   private async consume(sub: Subscription): Promise<void> {
     try {
-      for await (const msg of sub) {
-        await this.limiter.acquire();
-        void this.handle(msg)
-          .catch((err: unknown) =>
-            this.entry.logger.error(`Failed to process message for ${this.label}`, errorTrace(err)),
-          )
-          .finally(() => this.limiter.release());
-      }
+      for await (const msg of sub) await this.dispatcher.push(msg);
     } catch (err) {
       this.entry.logger.error(`Subscription of ${this.label} failed`, errorTrace(err));
+    } finally {
+      // The subscription has yielded its last message; nothing more will be pushed.
+      this.dispatcher.stop();
     }
   }
 
-  private async handle(msg: Msg): Promise<void> {
+  private async process(items: DispatchItem<Msg>[]): Promise<void> {
+    for (const item of items) await this.handle(item);
+  }
+
+  private async handle({ msg, attempt }: DispatchItem<Msg>): Promise<void> {
     const context = new NatsContext({ kind: 'core', connection: this.entry.name, raw: msg });
     const d: InternalDelivery = {
       handler: this.info,
       [HANDLER_DEFINITION]: this.def,
-      messages: [{ subject: msg.subject, data: msg.data, headers: msg.headers, raw: msg }],
+      messages: [{ subject: msg.subject, data: msg.data, headers: msg.headers, raw: msg, attempt }],
       context,
       codec: this.codec,
       logger: this.entry.logger,

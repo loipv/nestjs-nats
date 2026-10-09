@@ -103,6 +103,33 @@ describe('NatsJetStreamContext', () => {
     expect(ctx.settled).toBe(true);
   });
 
+  it('stays unsettled when raw ack throws', () => {
+    raw.ack.mockImplementation(() => {
+      throw new Error('closed');
+    });
+    expect(() => ctx.ack()).toThrow('closed');
+    expect(ctx.settled).toBe(false);
+  });
+
+  it('stays unsettled when raw nak throws, and can be settled later', () => {
+    raw.nak.mockImplementationOnce(() => {
+      throw new Error('closed');
+    });
+    expect(() => ctx.nak(100)).toThrow('closed');
+    expect(ctx.settled).toBe(false);
+    ctx.nak();
+    expect(ctx.settled).toBe(true);
+    expect(raw.nak).toHaveBeenCalledTimes(2);
+  });
+
+  it('stays unsettled when raw term throws', () => {
+    raw.term.mockImplementation(() => {
+      throw new Error('closed');
+    });
+    expect(() => ctx.term('bad')).toThrow('closed');
+    expect(ctx.settled).toBe(false);
+  });
+
   it('working() does not settle and can repeat', () => {
     ctx.working();
     ctx.working();

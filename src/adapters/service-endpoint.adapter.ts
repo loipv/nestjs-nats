@@ -16,14 +16,11 @@ import {
 } from '../pipeline/delivery.js';
 import { invokeHandler } from '../pipeline/invoker.js';
 import { toServiceError } from '../pipeline/reply.js';
-import type { HandlerAdapter } from './adapter.js';
+import { errorMessage, errorTrace } from '../util/errors.js';
+import type { ForceStopResult, HandlerAdapter } from './adapter.js';
 import { createLimiter, type Limiter } from './limiter.js';
 
 export type ServiceEndpointDefinition = HandlerDefinition & { kind: 'service-endpoint' };
-
-function errorTrace(err: unknown): string {
-  return err instanceof Error ? (err.stack ?? err.message) : String(err);
-}
 
 interface EndpointRuntime {
   def: ServiceEndpointDefinition;
@@ -93,7 +90,7 @@ export class NatsServiceAdapter implements HandlerAdapter {
         // `this.service` is set, so the bootstrap cleanup stops the service.
         const { className, methodName } = endpoint.def;
         throw new NatsConfigError(
-          `Invalid @ServiceEndpoint ${className}.${methodName} ("${endpoint.def.endpoint}") of service "${name}": ${err instanceof Error ? err.message : String(err)}`,
+          `Invalid @ServiceEndpoint ${className}.${methodName} ("${endpoint.def.endpoint}") of service "${name}": ${errorMessage(err)}`,
           { cause: err },
         );
       }
@@ -114,6 +111,11 @@ export class NatsServiceAdapter implements HandlerAdapter {
     // Loops end once the stopped service's subscriptions have yielded their buffered messages.
     await Promise.all(this.loops);
     await Promise.all(this.endpoints.map((e) => e.limiter.idle()));
+  }
+
+  forceStop(): ForceStopResult {
+    // Requests are not redelivered and are never retried in-process: nothing to force.
+    return { nakked: 0, cancelledRetries: 0 };
   }
 
   private async stopService(service: Service): Promise<void> {
@@ -158,7 +160,9 @@ export class NatsServiceAdapter implements HandlerAdapter {
     const d: InternalDelivery = {
       handler: endpoint.info,
       [HANDLER_DEFINITION]: endpoint.def,
-      messages: [{ subject: msg.subject, data: msg.data, headers: msg.headers, raw: msg }],
+      messages: [
+        { subject: msg.subject, data: msg.data, headers: msg.headers, raw: msg, attempt: 1 },
+      ],
       context,
       codec: endpoint.codec,
       logger: this.entry.logger,

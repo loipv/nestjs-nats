@@ -242,4 +242,12 @@ describe('NatsServiceAdapter', () => {
     await adapter.stop();
     await adapter.idle();
   });
+  it('forceStop has nothing to force', async () => {
+    const { entry, endpoint } = setup();
+    const adapter = new NatsServiceAdapter({ name: 'svc', version: '1' }, [endpoint('a')], entry);
+    await adapter.start();
+    await adapter.stop();
+    await adapter.idle();
+    expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0 });
+  });
 });

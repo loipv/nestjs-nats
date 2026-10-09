@@ -20,20 +20,17 @@ import {
   toHandlerInfo,
 } from '../pipeline/delivery.js';
 import { invokeHandler } from '../pipeline/invoker.js';
-import type { HandlerAdapter } from './adapter.js';
-import { createLimiter, type Limiter } from './limiter.js';
+import { errorTrace } from '../util/errors.js';
+import type { ForceStopResult, HandlerAdapter } from './adapter.js';
+import { Dispatcher, type DispatchItem } from './dispatcher.js';
 
 type ConsumeDefinition = HandlerDefinition & { kind: 'consume' };
-
-function errorTrace(err: unknown): string {
-  return err instanceof Error ? (err.stack ?? err.message) : String(err);
-}
 
 const isPowerOfTwo = (n: number): boolean => n >= 1 && (n & (n - 1)) === 0;
 
 /** Runs a `@Consume` handler on a JetStream pull consumer (`consumer.consume()`). */
 export class JetStreamConsumerAdapter implements HandlerAdapter {
-  private readonly limiter: Limiter;
+  private readonly dispatcher: Dispatcher<JsMsg>;
   private readonly codec: Codec;
   private readonly run: (d: InternalDelivery) => Promise<void>;
   private readonly info: HandlerInfo;
@@ -42,6 +39,8 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
   private messages?: ConsumerMessages;
   private loop?: Promise<void>;
   private stopping = false;
+  /** Contexts of the messages being processed. */
+  private readonly inFlight = new Set<NatsJetStreamContext>();
 
   constructor(
     private readonly def: ConsumeDefinition,
@@ -49,7 +48,6 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     private readonly streams: NatsStreamManager,
   ) {
     this.concurrency = def.options.concurrency ?? 1;
-    this.limiter = createLimiter(this.concurrency);
     this.codec = def.options.codec ?? entry.options.codec ?? jsonCodec();
     this.info = toHandlerInfo(def);
     this.run = buildInboundPipeline(
@@ -57,6 +55,14 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
       invokeHandler,
     );
     this.label = `${def.className}.${def.methodName} on "${def.options.stream}/${def.options.durable}"`;
+    this.dispatcher = new Dispatcher<JsMsg>({
+      concurrency: this.concurrency,
+      process: (items) => this.process(items),
+      logger: entry.logger,
+      label: this.label,
+      // Received but never started: hand it back for immediate redelivery.
+      onRejected: (msg) => this.nak(msg),
+    });
   }
 
   async start(): Promise<void> {
@@ -77,6 +83,7 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
 
   stop(): Promise<void> {
     this.stopping = true;
+    this.dispatcher.stop();
     const messages = this.messages;
     if (!messages) return Promise.resolve();
     // `close()` resolves only after every buffered message has been yielded, which waits
@@ -91,7 +98,21 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
 
   async idle(): Promise<void> {
     await this.loop;
-    await this.limiter.idle();
+    await this.dispatcher.idle();
+  }
+
+  forceStop(): ForceStopResult {
+    let nakked = 0;
+    for (const context of this.inFlight) {
+      if (context.settled) continue;
+      try {
+        context.nak();
+        nakked++;
+      } catch (err) {
+        this.entry.logger.error(`Failed to nak message for ${this.label}`, errorTrace(err));
+      }
+    }
+    return { nakked, cancelledRetries: this.dispatcher.cancelRetries() };
   }
 
   private async getConsumer(stream: string, durable: string, configDeclared: boolean) {
@@ -116,20 +137,7 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
 
   private async consume(messages: ConsumerMessages): Promise<void> {
     try {
-      for await (const msg of messages) {
-        await this.limiter.acquire();
-        if (this.stopping) {
-          // Received but never started: hand it back for immediate redelivery.
-          this.limiter.release();
-          this.nak(msg);
-          continue;
-        }
-        void this.handle(msg)
-          .catch((err: unknown) =>
-            this.entry.logger.error(`Failed to process message for ${this.label}`, errorTrace(err)),
-          )
-          .finally(() => this.limiter.release());
-      }
+      for await (const msg of messages) await this.dispatcher.push(msg, msg.info.deliveryCount);
     } catch (err) {
       if (!this.stopping) {
         this.entry.logger.error(`Consumer of ${this.label} failed`, errorTrace(err));
@@ -182,7 +190,11 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     }
   }
 
-  private async handle(msg: JsMsg): Promise<void> {
+  private async process(items: DispatchItem<JsMsg>[]): Promise<void> {
+    for (const item of items) await this.handle(item);
+  }
+
+  private async handle({ msg, attempt }: DispatchItem<JsMsg>): Promise<void> {
     const context = new NatsJetStreamContext({
       kind: 'jetstream',
       connection: this.entry.name,
@@ -191,11 +203,12 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     const d: InternalDelivery = {
       handler: this.info,
       [HANDLER_DEFINITION]: this.def,
-      messages: [{ subject: msg.subject, data: msg.data, headers: msg.headers, raw: msg }],
+      messages: [{ subject: msg.subject, data: msg.data, headers: msg.headers, raw: msg, attempt }],
       context,
       codec: this.codec,
       logger: this.entry.logger,
     };
+    this.inFlight.add(context);
     try {
       await this.run(d);
     } catch (err) {
@@ -208,6 +221,8 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
           this.entry.logger.error(`Failed to nak message for ${this.label}`, errorTrace(nakErr));
         }
       }
+    } finally {
+      this.inFlight.delete(context);
     }
   }
 }

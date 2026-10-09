@@ -55,12 +55,12 @@ function fakeMessages() {
   };
 }
 
-function fakeMsg(id: number) {
+function fakeMsg(id: number, deliveryCount = 1) {
   const msg = {
     subject: 'ord.x',
     data: new TextEncoder().encode(JSON.stringify(id)),
     headers: undefined,
-    info: { stream: 'ORD', streamSequence: id, deliveryCount: 1 },
+    info: { stream: 'ORD', streamSequence: id, deliveryCount },
     ack: vi.fn(),
     nak: vi.fn(),
     term: vi.fn(),
@@ -249,5 +249,70 @@ describe('JetStreamConsumerAdapter', () => {
     expect(msg.ack).toHaveBeenCalledTimes(1);
     await adapter.stop();
     await adapter.idle();
+  });
+  it('passes the delivery count as the message attempt', async () => {
+    const attempts: unknown[] = [];
+    const plugin = {
+      inbound: {
+        async handle(d: { messages: Array<{ attempt: number }> }, next: () => Promise<void>) {
+          attempts.push(d.messages.map((m) => m.attempt));
+          await next();
+        },
+      },
+    };
+    const { adapter, fake } = setup(() => Promise.resolve(), { plugins: [plugin] });
+    await adapter.start();
+    fake.push(fakeMsg(1, 4) as unknown as JsMsg);
+    await tick();
+    await tick();
+    expect(attempts).toEqual([[4]]);
+    await adapter.stop();
+    await adapter.idle();
+  });
+
+  it('forceStop naks in-flight unsettled messages only', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const { adapter, fake } = setup(
+      async (payload) => {
+        if (payload === 2) await gate;
+      },
+      { concurrency: 2 },
+    );
+    await adapter.start();
+    const [a, b] = [fakeMsg(1), fakeMsg(2)];
+    fake.push(a as unknown as JsMsg);
+    fake.push(b as unknown as JsMsg);
+    await tick();
+    await tick();
+    expect(a.ack).toHaveBeenCalledTimes(1);
+
+    await adapter.stop();
+    expect(adapter.forceStop()).toEqual({ nakked: 1, cancelledRetries: 0 });
+    expect(b.nak).toHaveBeenCalledTimes(1);
+    expect(a.nak).not.toHaveBeenCalled();
+
+    release();
+    await adapter.idle();
+    // Already settled by forceStop: the handler finishing does not ack it.
+    expect(b.ack).not.toHaveBeenCalled();
+    expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0 });
+  });
+
+  it('forceStop survives a nak that throws and does not count it', async () => {
+    const { adapter, fake, logger } = setup(() => new Promise<void>(() => {}));
+    await adapter.start();
+    const m = fakeMsg(1);
+    m.nak.mockImplementation(() => {
+      throw new Error('closed');
+    });
+    fake.push(m as unknown as JsMsg);
+    await tick();
+    await adapter.stop();
+    expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0 });
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringMatching(/Failed to nak/),
+      expect.stringContaining('closed'),
+    );
   });
 });
