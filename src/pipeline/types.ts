@@ -1,5 +1,8 @@
 import type { MsgHdrs } from '@nats-io/transport-node';
 import type { Codec } from '../codec/codec.js';
+import type { Delivery } from './delivery.js';
+
+export type { Delivery } from './delivery.js';
 
 export type Next = () => Promise<void>;
 
@@ -15,9 +18,6 @@ export interface OutgoingMessage {
 export interface OutboundMiddleware {
   handle(m: OutgoingMessage, next: Next): Promise<void>;
 }
-
-/** Placeholder until the inbound pipeline defines the real delivery type. */
-export type Delivery = unknown;
 
 export interface InboundMiddleware {
   stage?: 'outer' | 'inner';

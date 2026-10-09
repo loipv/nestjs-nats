@@ -1,6 +1,7 @@
 import { Global, Injectable, Module, type OnApplicationShutdown } from '@nestjs/common';
 import { DiscoveryModule } from '@nestjs/core';
 import { NatsConnectionManager } from '../connection/connection-manager.js';
+import { HandlerExplorer } from '../discovery/handler-explorer.js';
 import { NatsLifecycle } from './nats-lifecycle.js';
 
 /** Temporary shutdown hook; replaced by NatsLifecycle. */
@@ -16,7 +17,7 @@ export class NatsShutdown implements OnApplicationShutdown {
 @Global()
 @Module({
   imports: [DiscoveryModule],
-  providers: [NatsConnectionManager, NatsLifecycle, NatsShutdown],
+  providers: [NatsConnectionManager, NatsLifecycle, NatsShutdown, HandlerExplorer],
   exports: [NatsConnectionManager],
 })
 export class NatsCoreModule {}
