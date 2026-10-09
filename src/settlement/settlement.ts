@@ -41,6 +41,14 @@ function label(d: Delivery, msg: InboundMessage): string {
   return `${d.handler.className}.${d.handler.methodName} on "${msg.subject}"`;
 }
 
+const MAX_TERM_REASON_LENGTH = 256;
+
+/** The reason sent with `term()`: the error message on one line, bounded. */
+const termReason = (err: unknown): string =>
+  errorMessage(err)
+    .replace(/[\r\n]+/g, ' ')
+    .slice(0, MAX_TERM_REASON_LENGTH);
+
 const attempts = (n: number) => `${n} attempt${n === 1 ? '' : 's'}`;
 
 function jsTargets(d: Delivery): JsTarget[] {
@@ -152,7 +160,7 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
         d.logger.error(
           `${label(d, msg)} failed, gave up after ${attempts(msg.attempt)}: ${errorMessage(err)}`,
         );
-        settle(d, msg, 'term', () => ctx.term(errorMessage(err)));
+        settle(d, msg, 'term', () => ctx.term(termReason(err)));
         return;
     }
   }
