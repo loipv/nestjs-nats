@@ -282,8 +282,9 @@ batcher(opts?: { maxSize?: number /* 100 */; maxWait?: number /* 50ms */; window
 
 - Phiên bản spec: CloudEvents 1.0, NATS protocol binding.
 - **Đọc:** binary mode (có header `ce-specversion`; attribute từ header `ce-*`, `datacontenttype` từ `Content-Type`) và structured mode (`Content-Type: application/cloudevents+json`; envelope JSON). Thiếu attribute bắt buộc (`id`, `source`, `type`, `specversion`) → `NatsDecodeError` (non-retryable).
-- **Ghi:** option `cloudEvent: { type; source?; subject?; id?; time?; dataschema?; extensions?; mode?: 'binary' | 'structured' }` trên `publish`. Lib tự điền `id` (`crypto.randomUUID()`), `time` (ISO 8601), `specversion: '1.0'`, `datacontenttype` (từ codec), `source` (từ `cloudEvents.source` của module; thiếu cả hai → `NatsConfigError`). Mặc định `mode: 'binary'`.
-- JetStream: nếu không truyền `msgId`, lib đặt `Nats-Msg-Id = ce.id` → dedupe phía server.
+  - Payload: nếu event khai báo `datacontenttype` không phải JSON (`application/json`, `text/json` hoặc hậu tố `+json`) và khác content type của codec → handler nhận `Uint8Array` thô; ngược lại giải mã bằng codec của handler.
+- **Ghi:** option `cloudEvent: { type; source?; subject?; id?; time?; dataschema?; extensions?; mode?: 'binary' | 'structured' }` trên `publish`. Lib tự điền `id` (`crypto.randomUUID()`), `time` (ISO 8601), `specversion: '1.0'`, `datacontenttype` (lấy từ `cloudEvent.datacontenttype` nếu có, mặc định theo content type của codec, và bỏ qua khi data là `Uint8Array` không khai báo), `source` (từ `cloudEvents.source` của module; thiếu cả hai → `NatsConfigError`). Mặc định `mode: 'binary'`.
+- JetStream: `Nats-Msg-Id` ưu tiên `msgId` > header `Nats-Msg-Id` của caller > `ce.id` → dedupe phía server.
 
 ## 10. Idempotency
 

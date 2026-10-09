@@ -1,0 +1,126 @@
+# Testing
+
+[Back to the README](../README.md)
+
+`@loipv/nestjs-nats/testing` lets you test code that uses the library without a NATS server. It needs nothing beyond the library itself, and works with any test runner. The examples use `@nestjs/testing` and `node:assert`.
+
+## Mock clients
+
+`createMockNatsClient()` and `createMockJetStreamClient()` return a real `NatsClient` and `JetStreamClient` that run on a fake connection. Outbound plugins and CloudEvents work as in production. Everything published is recorded in `published`.
+
+```ts
+import assert from 'node:assert/strict';
+import { NatsRequestError } from '@loipv/nestjs-nats';
+import { createMockJetStreamClient, createMockNatsClient } from '@loipv/nestjs-nats/testing';
+
+const nats = createMockNatsClient({ cloudEvents: { source: 'urn:test' } });
+
+nats.publish('orders.created', { id: 'o1' }, { cloudEvent: { type: 'order.created' } });
+await nats.flush(); // publishes are asynchronous: flush before you assert
+assert.equal(nats.published[0]?.subject, 'orders.created');
+assert.deepEqual(nats.published[0]?.data, { id: 'o1' });
+assert.equal(nats.published[0]?.cloudEvent?.type, 'order.created');
+
+// Requests are answered from stubs. With no stub, request() rejects with code 'no_responders'.
+nats.whenRequest('orders.get').reply({ id: 'o1', total: 10 });
+assert.deepEqual(await nats.request('orders.get', { id: 'o1' }), { id: 'o1', total: 10 });
+nats.whenRequest('orders.cancel').fail({ code: 409, description: 'already shipped' });
+await assert.rejects(
+  nats.request('orders.cancel', { id: 'o1' }),
+  (err) => err instanceof NatsRequestError && err.code === 'service_error',
+);
+
+const js = createMockJetStreamClient();
+await js.publish('orders.created', { id: 'o1' }, { msgId: 'o1' });
+const again = await js.publish('orders.created', { id: 'o1' }, { msgId: 'o1' });
+assert.equal(again.duplicate, true); // acked by a stream called 'mock'
+assert.equal(js.published.length, 2);
+```
+
+| Member | Description |
+|---|---|
+| `published` | The recorded messages, in order. Each has `subject`, `data` (decoded with the codec, the event's data for a CloudEvent), `raw` (the bytes), `headers`, `cloudEvent` (when the message is one) and `reply` (for a request). On the core client, requests are included |
+| `whenRequest(subject).reply(value)` | Answers requests to `subject` (a NATS subject pattern) with `value`. The latest matching stub wins |
+| `whenRequest(subject).fail({ code, description })` | Answers with a service error |
+
+Options: `codec`, `plugins` and `cloudEvents` (`{ source? }`). The JetStream mock acks with `{ stream: 'mock', seq, duplicate }`, where `duplicate` is `true` for a repeated `Nats-Msg-Id`. A standalone mock is never closed, so a `batcher()` of a mock is not flushed for you: call its `flush()` yourself.
+
+## `NatsTestingModule` and `NatsTestHarness`
+
+`NatsTestingModule.forRoot(options?)` replaces `NatsModule.forRoot()` in a test. It takes the same options except `connection`: `name`, `codec`, `plugins`, `retry`, `dlq`, `idempotency`, `cloudEvents` and so on. It never connects, syncs streams or subscribes. It provides the same injectable clients (`NatsClient` and `JetStreamClient` are the mocks above), `NatsConnectionManager` and `NatsTestHarness`. `NatsStreamManager` and the raw connection are provided too, but JetStream management is not available and subscriptions are refused.
+
+Messages reach your handlers through `NatsTestHarness.dispatch()`. It runs a fake message through the handler's real inbound pipeline: your plugins, retry decisions, dead-letter queue, idempotency, and Nest's guards, pipes, interceptors and exception filters. The harness never waits for a delay and never runs a retry again; it only reports the outcome.
+
+```ts
+import assert from 'node:assert/strict';
+import { Injectable } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
+import { Consume, NatsClient, NonRetryableError, Payload } from '@loipv/nestjs-nats';
+import { NatsTestHarness, NatsTestingModule } from '@loipv/nestjs-nats/testing';
+
+@Injectable()
+class BillingHandlers {
+  constructor(private readonly nats: NatsClient) {}
+
+  @Consume({ stream: 'ORDERS', durable: 'billing', dlq: true })
+  async bill(@Payload() order: { id: string; total: number }) {
+    if (order.total <= 0) throw new NonRetryableError('empty order');
+    this.nats.publish('orders.billed', { id: order.id });
+    return { billed: true };
+  }
+}
+
+const app = await Test.createTestingModule({
+  imports: [NatsTestingModule.forRoot()],
+  providers: [BillingHandlers],
+}).compile();
+await app.init();
+const harness = NatsTestHarness.create(app);
+
+const ok = await harness.dispatch(
+  { handler: 'BillingHandlers.bill' },
+  { id: 'o1', total: 10 },
+  { subject: 'orders.created' },
+);
+assert.equal(ok.settlement, 'ack');
+assert.deepEqual(ok.result, { billed: true });
+
+const bad = await harness.dispatch({ handler: 'BillingHandlers.bill' }, { id: 'o2', total: 0 });
+assert.equal(bad.settlement, 'dlq');
+assert.equal(bad.dlq[0]?.subject, 'dlq.ORDERS.billing');
+```
+
+`dispatch(target, payload, options?)` takes a target and returns a `DispatchResult`:
+
+| Target | Selects |
+|---|---|
+| `{ handler: 'Class.method' }` | A handler by class and method name. For a CloudEvent router it is `'Class.@CloudEventRouter'` |
+| `{ subject: '...' }` | The one handler that receives from that subject. For `@Consume` the subject is matched against the consumer's `filter_subject`(s) |
+
+It rejects with a `NatsConfigError` when the handlers are misconfigured (as bootstrap would report), or when the target matches no handler or several. For a batch handler, `payload` is a non-empty array with one message per entry.
+
+| Option | Description |
+|---|---|
+| `headers` | Message headers |
+| `subject` | The message's actual subject. Defaults to the target's subject, else to the handler's own: its subject pattern (which can be a wildcard), its first `filter_subject`, or the stream name for a `@Consume` without a filter. Pass it for realistic values in `@Subject()` and `ctx.subject` |
+| `deliveryCount` | JetStream delivery count (default `1`); above `1` the message counts as redelivered |
+| `attempt` | Core delivery attempt (default `1`), as after in-process retries |
+| `request` | Core subscriptions: the message is a request, with a reply subject |
+| `cloudEvent` | Sends the payload as a [CloudEvent](./cloudevents.md), with the same options as publishing |
+
+| `DispatchResult` field | Description |
+|---|---|
+| `result` | What the handler returned (never set for a batch) |
+| `settlement` | What became of the first message: `'ack'`, `'nak'` (a JetStream retry), `'retry'` (a core retry), `'term'`, `'dlq'`, `'drop'`, `'skipped'`, `'replied'` or `'none'` |
+| `outcomes` | The [`MessageOutcome`](./plugins.md#observing-outcomes) of every message, aligned with the payloads |
+| `nakDelay` | The redelivery delay in ms when `settlement` is `'nak'` |
+| `reply` | For a request or service endpoint: `{ data }`, or `{ error: { code, description } }` |
+| `dlq` | The dead letters published while the messages were processed |
+
+Notes:
+
+- Idempotency stores keep their state across the dispatches of one application, so dispatching the same message twice shows a duplicate.
+- Dead-letter publishes, and requests sent by your handlers, also appear in the `published` of the mock clients of the testing module.
+- A dispatched message is a fake message, so `ctx.raw` is a stand-in that records what you call on it. It is not a real `Msg` or `JsMsg`.
+- The fake JetStream accepts every publish: there are no streams, `expect` and `timeout` are ignored, and only a repeated `Nats-Msg-Id` is reported as a `duplicate`. In particular a dead letter of a handler with a JetStream-mode DLQ is published successfully in the harness even when no stream would capture its subject.
+- Await each `dispatch()` before starting the next one. The `dlq` of a result lists the dead letters published while that dispatch ran, so concurrent dispatches can see each other's.

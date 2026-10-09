@@ -61,6 +61,7 @@
     "test": "vitest run --project unit",
     "test:int": "vitest run --project integration",
     "lint": "biome check .",
+    "docs:check": "npm run build && node scripts/check-docs.mjs",
     "check:pack": "node scripts/check-pack.mjs",
     "check:pkg": "publint && attw --pack . --profile esm-only",
     "prepublishOnly": "npm run build && npm run check:pack && npm run check:pkg && npm run typecheck && npm test"
