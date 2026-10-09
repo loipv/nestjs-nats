@@ -6,7 +6,7 @@ import type {
   InboundMessage,
   InternalDelivery,
 } from '../pipeline/delivery.js';
-import { SKIPPED } from '../pipeline/delivery.js';
+import { FAILURES, messageContexts, SKIPPED } from '../pipeline/delivery.js';
 import type { InboundMiddleware, Next } from '../pipeline/types.js';
 import type { RetryPolicy } from '../settlement/retry.js';
 import { errorMessage, errorTrace } from '../util/errors.js';
@@ -55,8 +55,10 @@ function scopeOf(h: HandlerInfo): string {
     : `${h.kind}:${h.className}.${h.methodName}`;
 }
 
-const label = (d: Delivery): string =>
-  `${d.handler.className}.${d.handler.methodName} on "${d.context.subject}"`;
+const keysOf = (claims: Array<{ key: string }>): string[] => claims.map((c) => c.key);
+
+const label = (d: Delivery, msg: InboundMessage): string =>
+  `${d.handler.className}.${d.handler.methodName} on "${msg.subject}"`;
 
 /**
  * Builds the idempotency middleware of a handler, or `undefined` when it did not enable
@@ -81,23 +83,23 @@ export function resolveIdempotency(
 /**
  * Inbound middleware (placed right after settlement) that claims each message's key
  * before the handler runs: duplicates and messages being processed elsewhere are left out
- * of the delivery (`SKIPPED`) and, for JetStream, acked / nak'd here so settlement sees
- * them as settled. Claims of messages that succeed are completed, those of failed ones
- * released. A failing `claim` is rethrown, so settlement retries the message.
+ * of the delivery (`SKIPPED`) and, for JetStream, acked / nak'd here. Claims of messages
+ * that succeed are completed, those of failed ones (the whole delivery when the handler
+ * throws, else the batch messages recorded in `FAILURES`) released. A failing `claim` is
+ * rethrown, so settlement retries the message.
  */
 export function createIdempotency(cfg: IdempotencyConfig): InboundMiddleware {
   const { store, ttl, keyExtractor, inProgressNakMs } = cfg;
 
-  /** Settles a JetStream message through its context; failures are only logged. */
+  /** Settles a JetStream message through its own context; failures are only logged. */
   function settleJs(d: Delivery, msg: InboundMessage, op: 'ack' | 'nak'): void {
-    const { context } = d;
-    // Single-message deliveries only: the context settles the first message.
-    if (!(context instanceof NatsJetStreamContext) || msg !== d.messages[0]) return;
+    const context = messageContexts(d)[d.messages.indexOf(msg)];
+    if (!(context instanceof NatsJetStreamContext)) return;
     try {
       if (op === 'ack') context.ack();
       else context.nak(inProgressNakMs);
     } catch (err) {
-      d.logger.error(`Failed to ${op} message for ${label(d)}`, errorTrace(err));
+      d.logger.error(`Failed to ${op} message for ${label(d, msg)}`, errorTrace(err));
     }
   }
 
@@ -125,7 +127,7 @@ export function createIdempotency(cfg: IdempotencyConfig): InboundMiddleware {
     async handle(d: Delivery, next: Next): Promise<void> {
       const skipped = (d as InternalDelivery)[SKIPPED];
       const scope = scopeOf(d.handler);
-      const claimed: string[] = [];
+      const claimed: Array<{ key: string; msg: InboundMessage }> = [];
       for (const msg of d.messages) {
         let result: Awaited<ReturnType<IdempotencyStore['claim']>>;
         let key: string | undefined;
@@ -139,24 +141,24 @@ export function createIdempotency(cfg: IdempotencyConfig): InboundMiddleware {
           result = await store.claim(key, ttl);
         } catch (err) {
           // Not processed: free what this delivery claimed and let settlement retry it.
-          await release(d, claimed);
+          await release(d, keysOf(claimed));
           throw err;
         }
         switch (result) {
           case 'claimed':
-            claimed.push(key);
+            claimed.push({ key, msg });
             break;
           case 'duplicate':
             skipped.add(msg);
             d.logger.debug?.(
-              `Skipping duplicate message on "${msg.subject}" (key "${key}") for ${label(d)}`,
+              `Skipping duplicate message on "${msg.subject}" (key "${key}") for ${label(d, msg)}`,
             );
             settleJs(d, msg, 'ack');
             break;
           case 'in-progress':
             skipped.add(msg);
             d.logger.debug?.(
-              `Message on "${msg.subject}" (key "${key}") is being processed elsewhere for ${label(d)}`,
+              `Message on "${msg.subject}" (key "${key}") is being processed elsewhere for ${label(d, msg)}`,
             );
             settleJs(d, msg, 'nak');
             break;
@@ -167,10 +169,15 @@ export function createIdempotency(cfg: IdempotencyConfig): InboundMiddleware {
       try {
         await next();
       } catch (err) {
-        await release(d, claimed);
+        await release(d, keysOf(claimed));
         throw err;
       }
-      await complete(d, claimed);
+      // Messages of a batch that failed on their own are retried: free their keys.
+      const failures = (d as Partial<InternalDelivery>)[FAILURES];
+      const succeeded: string[] = [];
+      const failed: string[] = [];
+      for (const { key, msg } of claimed) (failures?.has(msg) ? failed : succeeded).push(key);
+      await Promise.all([complete(d, succeeded), release(d, failed)]);
     },
   };
 }

@@ -316,6 +316,29 @@ describe('createSettlement — consume', () => {
     expect(raw.ack).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps heartbeating until settlement completes, including the DLQ publish', async () => {
+    vi.useFakeTimers();
+    let resolvePublish!: () => void;
+    const { entry } = fakeEntry({
+      jsPublish: () =>
+        new Promise((resolve) => {
+          resolvePublish = () => resolve({ stream: 'DLQ', seq: 1 });
+        }),
+    });
+    const { d, raw } = consumeDelivery(6);
+    const s = createSettlement({ entry, retry, dlq: consumeDlq, heartbeatMs: 100 });
+    const done = s.handle(d, nextWith(new Error('x')));
+    // The handler failed at once; the slow PubAck must not let the ack deadline lapse.
+    await vi.advanceTimersByTimeAsync(250);
+    expect(raw.working).toHaveBeenCalledTimes(2);
+    expect(raw.term).not.toHaveBeenCalled();
+    resolvePublish();
+    await done;
+    expect(raw.term).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(raw.working).toHaveBeenCalledTimes(2);
+  });
+
   it('stops heartbeating a message the handler already settled', async () => {
     vi.useFakeTimers();
     const { entry } = fakeEntry();

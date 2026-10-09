@@ -2,6 +2,7 @@ import type { JsMsg } from '@nats-io/jetstream';
 import type { Msg, MsgHdrs } from '@nats-io/transport-node';
 import type { LoggerService } from '@nestjs/common';
 import type { Codec } from '../codec/codec.js';
+import { NatsBatchContext } from '../context/nats-batch-context.js';
 import type { NatsContext } from '../context/nats-context.js';
 import type { NatsServiceOptions } from '../decorators/handler.decorators.js';
 import type { HandlerDefinition } from '../discovery/handler-explorer.js';
@@ -47,11 +48,15 @@ export type HandlerInfo =
       readonly subject: string;
     });
 
-/** One unit of inbound work flowing through the inbound pipeline. */
+/**
+ * One unit of inbound work flowing through the inbound pipeline: one message, or the
+ * messages of a batch (`context` is then a `NatsBatchContext` whose `messages[i]` is the
+ * context of `messages[i]`).
+ */
 export interface Delivery {
   readonly handler: HandlerInfo;
   readonly messages: InboundMessage[];
-  readonly context: NatsContext;
+  readonly context: NatsContext | NatsBatchContext;
   readonly codec: Codec;
   readonly logger: LoggerService;
   result?: unknown;
@@ -66,13 +71,81 @@ export const RETRY_SCHEDULER: unique symbol = Symbol('nats.retryScheduler');
 /** Internal: key of the set of messages the handler must not process (idempotency). */
 export const SKIPPED: unique symbol = Symbol('nats.skipped');
 
+/** Internal: key of the messages of a batch that failed while the others succeeded. */
+export const FAILURES: unique symbol = Symbol('nats.failures');
+
 /** Internal: a delivery as built by the adapters, carrying the full handler definition. */
 export interface InternalDelivery extends Delivery {
   readonly [HANDLER_DEFINITION]: HandlerDefinition;
   /** Messages the invoker leaves out (e.g. duplicates); the adapter starts it empty. */
   readonly [SKIPPED]: Set<InboundMessage>;
+  /**
+   * Messages of a batch that failed on their own (undecodable, `ctx.fail()`, returned as
+   * `failed`) with their error; settled as failures even when the handler succeeds.
+   */
+  readonly [FAILURES]: Map<InboundMessage, unknown>;
   /** Processes `msg` again (as the next attempt) after `delayMs`; set by the core adapter. */
   readonly [RETRY_SCHEDULER]?: (msg: InboundMessage, delayMs: number) => void;
+}
+
+/** One message of a delivery together with its own context. */
+export interface DeliveryPart {
+  message: InboundMessage;
+  context: NatsContext;
+}
+
+export interface DeliveryInit {
+  definition: HandlerDefinition;
+  /** Defaults to `toHandlerInfo(definition)`. */
+  handler?: HandlerInfo;
+  connection: string;
+  /** Exactly one part unless `batch`. */
+  parts: DeliveryPart[];
+  /** Whether the handler receives the messages as a batch. */
+  batch: boolean;
+  codec: Codec;
+  logger: LoggerService;
+  retry?: (msg: InboundMessage, delayMs: number) => void;
+}
+
+/** Internal: builds the delivery of one message, or of a batch of messages. */
+export function createDelivery(init: DeliveryInit): InternalDelivery {
+  const { parts } = init;
+  const failures = new Map<InboundMessage, unknown>();
+  let context: NatsContext | NatsBatchContext;
+  if (init.batch) {
+    const byContext = new Map(parts.map((p) => [p.context, p.message]));
+    context = new NatsBatchContext({
+      connection: init.connection,
+      messages: parts.map((p) => p.context),
+      onFail: (ctx, error) => {
+        const message = byContext.get(ctx);
+        if (message) failures.set(message, error);
+      },
+    });
+  } else {
+    const [part] = parts;
+    if (!part || parts.length > 1) {
+      throw new NatsModuleError(`A delivery holds one message, got ${parts.length}`);
+    }
+    context = part.context;
+  }
+  return {
+    handler: init.handler ?? toHandlerInfo(init.definition),
+    [HANDLER_DEFINITION]: init.definition,
+    [SKIPPED]: new Set(),
+    [FAILURES]: failures,
+    ...(init.retry ? { [RETRY_SCHEDULER]: init.retry } : {}),
+    messages: parts.map((p) => p.message),
+    context,
+    codec: init.codec,
+    logger: init.logger,
+  };
+}
+
+/** The context of each message of `d`, index-aligned with `d.messages`. */
+export function messageContexts(d: Delivery): ReadonlyArray<NatsContext> {
+  return d.context instanceof NatsBatchContext ? d.context.messages : [d.context];
 }
 
 /** Internal: the full definition behind a delivery built by an adapter. */

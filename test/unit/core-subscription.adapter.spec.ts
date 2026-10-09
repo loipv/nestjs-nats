@@ -46,9 +46,10 @@ function fakeMsg(payload: unknown) {
 }
 
 function setup(
-  invoke: (payload: unknown) => Promise<unknown>,
+  invoke: (payload: unknown, ctx?: unknown) => Promise<unknown>,
   plugins: unknown[] = [],
   moduleOptions: Record<string, unknown> = {},
+  handlerOptions: Record<string, unknown> = {},
 ) {
   const fake = fakeSubscription();
   const logger = { log: vi.fn(), error: vi.fn(), warn: vi.fn() };
@@ -68,7 +69,7 @@ function setup(
     className: 'C',
     methodName: 'm',
     subject: 'a.b',
-    options: {},
+    options: handlerOptions,
     invoke,
   } as unknown as HandlerDefinition & { kind: 'subscribe' };
   return { adapter: new CoreSubscriptionAdapter(def, entry), fake, logger };
@@ -221,5 +222,95 @@ describe('CoreSubscriptionAdapter', () => {
     await adapter.stop();
     await adapter.idle();
     expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0 });
+  });
+
+  describe('batch', () => {
+    it('delivers batches of maxSize and never replies', async () => {
+      const batches: unknown[] = [];
+      const { adapter, fake } = setup(
+        async (payload) => {
+          batches.push(payload);
+          return 'reply';
+        },
+        [],
+        {},
+        { batch: { maxSize: 2, maxWait: 60_000 } },
+      );
+      await adapter.start();
+      const msgs = [1, 2, 3, 4].map((n) => ({ ...fakeMsg(n), reply: `_INBOX.${n}` }));
+      for (const m of msgs) fake.push(m);
+      await tick();
+      await tick();
+      expect(batches).toEqual([
+        [1, 2],
+        [3, 4],
+      ]);
+      for (const m of msgs) expect(m.respond).not.toHaveBeenCalled();
+      await adapter.stop();
+      await adapter.idle();
+    });
+
+    it('flushes the pending batch when the subscription drains', async () => {
+      const batches: unknown[] = [];
+      const { adapter, fake } = setup(
+        async (payload) => {
+          batches.push(payload);
+        },
+        [],
+        {},
+        { batch: { maxSize: 10, maxWait: 60_000 } },
+      );
+      await adapter.start();
+      fake.push(fakeMsg(1));
+      fake.push(fakeMsg(2));
+      await tick();
+      expect(batches).toEqual([]);
+      await adapter.stop();
+      await adapter.idle();
+      expect(batches).toEqual([[1, 2]]);
+    });
+
+    it('retries a failed item in a later batch with the next attempt', async () => {
+      const seen: Array<Array<[unknown, number]>> = [];
+      const plugin = {
+        inbound: {
+          async handle(
+            d: { messages: Array<{ attempt: number; data: Uint8Array }> },
+            next: () => Promise<void>,
+          ) {
+            seen.push(
+              d.messages.map((m) => [JSON.parse(new TextDecoder().decode(m.data)), m.attempt]),
+            );
+            await next();
+          },
+        },
+      };
+      let first = true;
+      const { adapter, fake } = setup(
+        async (_payload, ctx) => {
+          if (first) {
+            first = false;
+            (ctx as { fail(i: number, e: unknown): void }).fail(1, new Error('x'));
+          }
+        },
+        [plugin],
+        { retry: { initialDelay: 10, jitter: 0 } },
+        { batch: { maxSize: 2, maxWait: 30 } },
+      );
+      await adapter.start();
+      fake.push(fakeMsg(1));
+      fake.push(fakeMsg(2));
+      await vi.waitFor(() =>
+        expect(seen).toEqual([
+          [
+            [1, 1],
+            [2, 1],
+          ],
+          [[2, 2]],
+        ]),
+      );
+      await adapter.stop();
+      await adapter.idle();
+    });
   });
 });

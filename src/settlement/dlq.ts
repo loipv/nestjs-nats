@@ -104,10 +104,13 @@ export function buildDlqHeaders(
   return out;
 }
 
-/** Whether `err` (or one of its causes) says nobody answered the request. */
-function isNoResponders(err: unknown): boolean {
+/**
+ * Whether `err` (or one of its causes) says nobody answered the request. Also matches by
+ * name, for errors thrown by another copy of the NATS library.
+ */
+export function isNoResponders(err: unknown): boolean {
   for (let e = err, depth = 0; e instanceof Error && depth < 5; e = e.cause, depth++) {
-    if (e instanceof NoRespondersError) return true;
+    if (e instanceof NoRespondersError || e.name === 'NoRespondersError') return true;
   }
   return false;
 }

@@ -8,10 +8,9 @@ import type { HandlerDefinition } from '../discovery/handler-explorer.js';
 import { NatsConfigError } from '../errors/errors.js';
 import {
   buildInboundPipeline,
-  HANDLER_DEFINITION,
+  createDelivery,
   type HandlerInfo,
   type InternalDelivery,
-  SKIPPED,
   toHandlerInfo,
 } from '../pipeline/delivery.js';
 import { invokeHandler } from '../pipeline/invoker.js';
@@ -162,17 +161,26 @@ export class NatsServiceAdapter implements HandlerAdapter {
 
   private async handle(msg: ServiceMsg, endpoint: EndpointRuntime): Promise<void> {
     const context = new NatsContext({ kind: 'service', connection: this.entry.name, raw: msg });
-    const d: InternalDelivery = {
+    const d = createDelivery({
+      definition: endpoint.def,
       handler: endpoint.info,
-      [HANDLER_DEFINITION]: endpoint.def,
-      [SKIPPED]: new Set(),
-      messages: [
-        { subject: msg.subject, data: msg.data, headers: msg.headers, raw: msg, attempt: 1 },
+      connection: this.entry.name,
+      batch: false,
+      parts: [
+        {
+          message: {
+            subject: msg.subject,
+            data: msg.data,
+            headers: msg.headers,
+            raw: msg,
+            attempt: 1,
+          },
+          context,
+        },
       ],
-      context,
       codec: endpoint.codec,
       logger: this.entry.logger,
-    };
+    });
     try {
       await this.run(d);
     } catch (err) {

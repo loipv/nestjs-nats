@@ -1,5 +1,6 @@
 import { ServiceErrorCodeHeader, ServiceErrorHeader } from '@nats-io/services';
 import { headers, type Msg, type Subscription } from '@nats-io/transport-node';
+import { type ResolvedBatchOptions, resolveBatchOptions } from '../batch/collector.js';
 import { type Codec, encodePayload, jsonCodec } from '../codec/codec.js';
 import type { ConnectionEntry } from '../connection/connection-manager.js';
 import { NatsContext } from '../context/nats-context.js';
@@ -7,11 +8,11 @@ import type { HandlerDefinition } from '../discovery/handler-explorer.js';
 import { resolveIdempotency } from '../idempotency/idempotency.js';
 import {
   buildInboundPipeline,
-  HANDLER_DEFINITION,
+  createDelivery,
+  type DeliveryPart,
   type HandlerInfo,
+  type InboundMessage,
   type InternalDelivery,
-  RETRY_SCHEDULER,
-  SKIPPED,
   toHandlerInfo,
 } from '../pipeline/delivery.js';
 import { invokeHandler } from '../pipeline/invoker.js';
@@ -34,6 +35,7 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
   private readonly run: (d: InternalDelivery) => Promise<void>;
   private readonly info: HandlerInfo;
   private readonly label: string;
+  private readonly batch?: ResolvedBatchOptions;
   private sub?: Subscription;
   private loop?: Promise<void>;
 
@@ -58,8 +60,10 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
       invokeHandler,
     );
     this.label = `${def.className}.${def.methodName} on "${def.subject}"`;
+    this.batch = resolveBatchOptions(def.options.batch);
     this.dispatcher = new Dispatcher<Msg>({
       concurrency: def.options.concurrency ?? 1,
+      ...(this.batch ? { batch: this.batch } : {}),
       process: (items) => this.process(items),
       logger: entry.logger,
       label: this.label,
@@ -108,28 +112,54 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
     } catch (err) {
       this.entry.logger.error(`Subscription of ${this.label} failed`, errorTrace(err));
     } finally {
-      // The subscription has yielded its last message; nothing more will be pushed.
-      this.dispatcher.stop();
+      // The subscription has yielded its last message; nothing more will be pushed. The
+      // batch being collected is handed to the handler; `idle()` waits for it.
+      void this.dispatcher.stop();
     }
   }
 
   private async process(items: DispatchItem<Msg>[]): Promise<void> {
+    if (this.batch) return this.handleBatch(items);
     for (const item of items) await this.handle(item);
   }
 
-  private async handle(item: DispatchItem<Msg>): Promise<void> {
-    const { msg, attempt } = item;
-    const context = new NatsContext({ kind: 'core', connection: this.entry.name, raw: msg });
-    const d: InternalDelivery = {
+  private part({ msg, attempt }: DispatchItem<Msg>): DeliveryPart {
+    return {
+      message: { subject: msg.subject, data: msg.data, headers: msg.headers, raw: msg, attempt },
+      context: new NatsContext({ kind: 'core', connection: this.entry.name, raw: msg }),
+    };
+  }
+
+  private delivery(parts: DeliveryPart[], batch: boolean): InternalDelivery {
+    return createDelivery({
+      definition: this.def,
       handler: this.info,
-      [HANDLER_DEFINITION]: this.def,
-      [SKIPPED]: new Set(),
-      [RETRY_SCHEDULER]: (_msg, delayMs) => this.dispatcher.scheduleRetry(item, delayMs),
-      messages: [{ subject: msg.subject, data: msg.data, headers: msg.headers, raw: msg, attempt }],
-      context,
+      connection: this.entry.name,
+      batch,
+      parts,
       codec: this.codec,
       logger: this.entry.logger,
-    };
+      retry: (msg: InboundMessage, delayMs: number) =>
+        this.dispatcher.scheduleRetry({ msg: msg.raw as Msg, attempt: msg.attempt }, delayMs),
+    });
+  }
+
+  /** A batch never replies, even to requests. */
+  private async handleBatch(items: DispatchItem<Msg>[]): Promise<void> {
+    const parts = items.map((item) => this.part(item));
+    try {
+      await this.run(this.delivery(parts, true));
+    } catch (err) {
+      // Reached only when the pipeline failed outside settlement (e.g. a plugin threw).
+      this.entry.logger.error(`Handler ${this.label} failed`, errorTrace(err));
+    }
+  }
+
+  private async handle(item: DispatchItem<Msg>): Promise<void> {
+    const { msg } = item;
+    const part = this.part(item);
+    const { context } = part;
+    const d = this.delivery([part], false);
     try {
       await this.run(d);
     } catch (err) {

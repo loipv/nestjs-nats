@@ -3,9 +3,12 @@ import { NatsJetStreamContext } from '../context/nats-context.js';
 import {
   type Delivery,
   definitionOf,
+  FAILURES,
   type InboundMessage,
   type InternalDelivery,
+  messageContexts,
   RETRY_SCHEDULER,
+  SKIPPED,
 } from '../pipeline/delivery.js';
 import { isReplyDelivery } from '../pipeline/reply.js';
 import type { InboundMiddleware, Next } from '../pipeline/types.js';
@@ -18,7 +21,7 @@ export interface SettlementConfig {
   entry: ConnectionEntry;
   retry: RetryPolicy | false;
   dlq: DlqPolicy | false;
-  /** Interval of `working()` calls on JetStream messages while the handler runs. */
+  /** Interval of `working()` calls on JetStream messages until they are settled. */
   heartbeatMs?: number;
   /** Source of randomness for the backoff jitter (tests). */
   random?: () => number;
@@ -32,33 +35,44 @@ interface JsTarget {
 
 type SettleOp = 'ack' | 'nak' | 'term';
 
-function label(d: Delivery): string {
-  return `${d.handler.className}.${d.handler.methodName} on "${d.context.subject}"`;
+/** What happened to one message of a delivery: `undefined` when it succeeded. */
+type Outcome = { err: unknown } | undefined;
+
+function label(d: Delivery, msg: InboundMessage): string {
+  return `${d.handler.className}.${d.handler.methodName} on "${msg.subject}"`;
 }
 
 const attempts = (n: number) => `${n} attempt${n === 1 ? '' : 's'}`;
 
 function jsTargets(d: Delivery): JsTarget[] {
-  const [msg] = d.messages;
-  return msg && d.context instanceof NatsJetStreamContext ? [{ msg, ctx: d.context }] : [];
+  const contexts = messageContexts(d);
+  const out: JsTarget[] = [];
+  d.messages.forEach((msg, i) => {
+    const ctx = contexts[i];
+    if (ctx instanceof NatsJetStreamContext) out.push({ msg, ctx });
+  });
+  return out;
 }
 
 /** Settles through the context (which marks it settled only on success); logs failures. */
-function settle(d: Delivery, op: SettleOp, fn: () => void): void {
+function settle(d: Delivery, msg: InboundMessage, op: SettleOp, fn: () => void): void {
   try {
     fn();
   } catch (err) {
-    d.logger.error(`Failed to ${op} message for ${label(d)}`, errorTrace(err));
+    d.logger.error(`Failed to ${op} message for ${label(d, msg)}`, errorTrace(err));
   }
 }
 
 /**
- * Inbound middleware deciding the fate of each delivery: acks successful JetStream
- * messages (auto ack), retries failures with exponential backoff (`nak(delay)` for
- * JetStream, an in-process timer for core subscriptions), then dead-letters or drops
- * them; rethrows for deliveries expecting a reply. Heartbeats JetStream messages while
- * the handler runs. Handler errors are already logged by Nest: this logs one line per
- * settlement decision, without the stack.
+ * Inbound middleware deciding the fate of each message of a delivery: acks successful
+ * JetStream messages (auto ack), retries failures with exponential backoff (`nak(delay)`
+ * for JetStream, an in-process timer for core subscriptions), then dead-letters or drops
+ * them; rethrows for deliveries expecting a reply. A batch is settled message by message,
+ * each with its own attempt: the messages recorded in `FAILURES` fail with their own
+ * error; when the handler throws, every other message fails with its error. Messages left out of the delivery
+ * (`SKIPPED`) are not settled here. JetStream messages are heartbeated until settlement
+ * completes. Handler errors are already logged by Nest: this logs one line per settlement
+ * decision, without the stack.
  */
 export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
   const { entry, retry, dlq, heartbeatMs, random } = cfg;
@@ -67,20 +81,20 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
     if (!heartbeatMs || heartbeatMs <= 0 || d.handler.kind !== 'consume') return () => {};
     const targets = jsTargets(d);
     const timer = setInterval(() => {
-      for (const { ctx } of targets) {
+      for (const { msg, ctx } of targets) {
         if (ctx.settled) continue;
         try {
           ctx.working();
         } catch (err) {
-          d.logger.error(`Failed to extend ack deadline for ${label(d)}`, errorTrace(err));
+          d.logger.error(`Failed to extend ack deadline for ${label(d, msg)}`, errorTrace(err));
         }
       }
     }, heartbeatMs);
     return () => clearInterval(timer);
   };
 
-  const retryLine = (d: Delivery, attempt: number, delayMs: number, err: unknown): string =>
-    `${label(d)} failed (attempt ${attempt}/${retry ? retry.maxRetries + 1 : 1}), retrying in ${delayMs}ms: ${errorMessage(err)}`;
+  const retryLine = (d: Delivery, msg: InboundMessage, delayMs: number, err: unknown): string =>
+    `${label(d, msg)} failed (attempt ${msg.attempt}/${retry ? retry.maxRetries + 1 : 1}), retrying in ${delayMs}ms: ${errorMessage(err)}`;
 
   /** Publishes `msg` to its DLQ; reports the subject and the error, if any (never throws). */
   async function deadLetter(
@@ -100,98 +114,125 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
     }
   }
 
-  async function failConsume(d: Delivery, err: unknown): Promise<void> {
-    for (const { msg, ctx } of jsTargets(d)) {
-      // The handler settled it itself (e.g. `ctx.nak(delay)` before throwing).
-      if (ctx.settled) continue;
-      const decision = decide(err, msg.attempt, retry, dlq, random);
-      switch (decision.action) {
-        case 'retry':
-          d.logger.warn(retryLine(d, msg.attempt, decision.delayMs, err));
-          settle(d, 'nak', () => ctx.nak(decision.delayMs));
-          break;
-        case 'dlq': {
-          const { subject, error } = await deadLetter(d, msg, err);
-          if (error === undefined) {
-            d.logger.error(
-              `${label(d)} failed, sent to DLQ ${subject} after ${attempts(msg.attempt)}: ${errorMessage(err)}`,
-            );
-            settle(d, 'term', () => ctx.term());
-            break;
-          }
-          // Not dead-lettered: hand it back so it is not lost.
-          const delayMs = backoffDelay(retry || DEFAULT_RETRY, msg.attempt, random);
+  async function failConsume(d: Delivery, { msg, ctx }: JsTarget, err: unknown): Promise<void> {
+    // The handler settled it itself (e.g. `ctx.nak(delay)` before throwing).
+    if (ctx.settled) return;
+    const decision = decide(err, msg.attempt, retry, dlq, random);
+    switch (decision.action) {
+      case 'retry':
+        d.logger.warn(retryLine(d, msg, decision.delayMs, err));
+        settle(d, msg, 'nak', () => ctx.nak(decision.delayMs));
+        return;
+      case 'dlq': {
+        const { subject, error } = await deadLetter(d, msg, err);
+        if (error === undefined) {
           d.logger.error(
-            `${label(d)} failed and could not be sent to DLQ ${subject}, retrying in ${delayMs}ms: ${errorMessage(error)}`,
-            errorTrace(error),
+            `${label(d, msg)} failed, sent to DLQ ${subject} after ${attempts(msg.attempt)}: ${errorMessage(err)}`,
           );
-          settle(d, 'nak', () => ctx.nak(delayMs));
-          break;
+          settle(d, msg, 'term', () => ctx.term());
+          return;
         }
-        case 'drop':
-          d.logger.error(
-            `${label(d)} failed, gave up after ${attempts(msg.attempt)}: ${errorMessage(err)}`,
-          );
-          settle(d, 'term', () => ctx.term(errorMessage(err)));
-          break;
+        // Not dead-lettered: hand it back so it is not lost.
+        const delayMs = backoffDelay(retry || DEFAULT_RETRY, msg.attempt, random);
+        d.logger.error(
+          `${label(d, msg)} failed and could not be sent to DLQ ${subject}, retrying in ${delayMs}ms: ${errorMessage(error)}`,
+          errorTrace(error),
+        );
+        settle(d, msg, 'nak', () => ctx.nak(delayMs));
+        return;
       }
+      case 'drop':
+        d.logger.error(
+          `${label(d, msg)} failed, gave up after ${attempts(msg.attempt)}: ${errorMessage(err)}`,
+        );
+        settle(d, msg, 'term', () => ctx.term(errorMessage(err)));
+        return;
     }
   }
 
-  async function failSubscribe(d: Delivery, err: unknown): Promise<void> {
+  async function failSubscribe(d: Delivery, msg: InboundMessage, err: unknown): Promise<void> {
     const schedule = (d as Partial<InternalDelivery>)[RETRY_SCHEDULER];
-    for (const msg of d.messages) {
-      const decision = decide(err, msg.attempt, schedule ? retry : false, dlq, random);
-      switch (decision.action) {
-        case 'retry':
-          d.logger.warn(retryLine(d, msg.attempt, decision.delayMs, err));
-          schedule?.(msg, decision.delayMs);
-          break;
-        case 'dlq': {
-          const { subject, error } = await deadLetter(d, msg, err);
-          if (error === undefined) {
-            d.logger.error(
-              `${label(d)} failed, sent to DLQ ${subject} after ${attempts(msg.attempt)}: ${errorMessage(err)}`,
-            );
-          } else {
-            d.logger.error(
-              `${label(d)} failed after ${attempts(msg.attempt)} and could not be sent to DLQ ${subject}: ${errorMessage(error)}`,
-              errorTrace(error),
-            );
-          }
-          break;
-        }
-        case 'drop':
+    const decision = decide(err, msg.attempt, schedule ? retry : false, dlq, random);
+    switch (decision.action) {
+      case 'retry':
+        d.logger.warn(retryLine(d, msg, decision.delayMs, err));
+        schedule?.(msg, decision.delayMs);
+        return;
+      case 'dlq': {
+        const { subject, error } = await deadLetter(d, msg, err);
+        if (error === undefined) {
           d.logger.error(
-            `${label(d)} failed, gave up after ${attempts(msg.attempt)}: ${errorMessage(err)}`,
+            `${label(d, msg)} failed, sent to DLQ ${subject} after ${attempts(msg.attempt)}: ${errorMessage(err)}`,
           );
-          break;
+        } else {
+          d.logger.error(
+            `${label(d, msg)} failed after ${attempts(msg.attempt)} and could not be sent to DLQ ${subject}: ${errorMessage(error)}`,
+            errorTrace(error),
+          );
+        }
+        return;
       }
+      case 'drop':
+        d.logger.error(
+          `${label(d, msg)} failed, gave up after ${attempts(msg.attempt)}: ${errorMessage(err)}`,
+        );
+        return;
+    }
+  }
+
+  /**
+   * The outcome of `msg`: its own recorded failure (e.g. undecodable), else the error of
+   * the handler, if it threw.
+   */
+  function outcomeOf(d: Delivery, msg: InboundMessage, failure: Outcome): Outcome {
+    const failures = (d as Partial<InternalDelivery>)[FAILURES];
+    return failures?.has(msg) ? { err: failures.get(msg) } : failure;
+  }
+
+  async function settleConsume(d: Delivery, failure: Outcome): Promise<void> {
+    const skipped = (d as Partial<InternalDelivery>)[SKIPPED];
+    let autoAck: boolean | undefined;
+    for (const target of jsTargets(d)) {
+      if (skipped?.has(target.msg)) continue;
+      const outcome = outcomeOf(d, target.msg, failure);
+      if (outcome) {
+        await failConsume(d, target, outcome.err);
+        continue;
+      }
+      if (autoAck === undefined) {
+        const def = definitionOf(d);
+        autoAck = def.kind === 'consume' && (def.options.ack ?? 'auto') === 'auto';
+      }
+      const { ctx } = target;
+      if (autoAck && !ctx.settled) settle(d, target.msg, 'ack', () => ctx.ack());
+    }
+  }
+
+  async function settleSubscribe(d: Delivery, failure: Outcome): Promise<void> {
+    const skipped = (d as Partial<InternalDelivery>)[SKIPPED];
+    for (const msg of d.messages) {
+      if (skipped?.has(msg)) continue;
+      const outcome = outcomeOf(d, msg, failure);
+      if (outcome) await failSubscribe(d, msg, outcome.err);
     }
   }
 
   return {
     async handle(d: Delivery, next: Next): Promise<void> {
-      let failure: { err: unknown } | undefined;
+      // Heartbeat until settled: a slow DLQ PubAck must not let the ack deadline lapse.
       const stopHeartbeat = startHeartbeat(d);
       try {
-        await next();
-      } catch (err) {
-        failure = { err };
+        let failure: Outcome;
+        try {
+          await next();
+        } catch (err) {
+          failure = { err };
+        }
+        if (failure && isReplyDelivery(d)) throw failure.err;
+        if (d.handler.kind === 'consume') await settleConsume(d, failure);
+        else await settleSubscribe(d, failure);
       } finally {
         stopHeartbeat();
-      }
-      if (failure) {
-        if (isReplyDelivery(d)) throw failure.err;
-        if (d.handler.kind === 'consume') await failConsume(d, failure.err);
-        else await failSubscribe(d, failure.err);
-        return;
-      }
-      if (d.handler.kind !== 'consume') return;
-      const def = definitionOf(d);
-      if (def.kind !== 'consume' || (def.options.ack ?? 'auto') !== 'auto') return;
-      for (const { ctx } of jsTargets(d)) {
-        if (!ctx.settled) settle(d, 'ack', () => ctx.ack());
       }
     },
   };

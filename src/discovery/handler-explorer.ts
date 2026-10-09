@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ROUTE_ARGS_METADATA } from '@nestjs/common/constants.js';
 import { DiscoveryService, ExternalContextCreator, MetadataScanner } from '@nestjs/core';
 import type { InstanceWrapper } from '@nestjs/core/injector/instance-wrapper.js';
+import type { NatsBatchContext } from '../context/nats-batch-context.js';
 import type { NatsContext } from '../context/nats-context.js';
 import {
   NATS_CONSUME_METADATA,
@@ -27,7 +28,7 @@ interface HandlerBase {
   instance: object;
   wrapper: InstanceWrapper;
   /** Calls the handler through Nest guards, pipes, interceptors and exception filters. */
-  invoke: (payload: unknown, ctx: NatsContext) => Promise<unknown>;
+  invoke: (payload: unknown, ctx: NatsContext | NatsBatchContext) => Promise<unknown>;
 }
 
 type HandlerSpec =
@@ -126,7 +127,7 @@ export class HandlerExplorer {
       undefined,
       { guards: true, interceptors: true, filters: true },
       'nats',
-    ) as (payload: unknown, ctx: NatsContext) => Promise<unknown>;
+    ) as HandlerBase['invoke'];
     const connection =
       ('connection' in spec.options ? spec.options.connection : undefined) ??
       service?.connection ??

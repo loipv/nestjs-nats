@@ -1,5 +1,6 @@
 import type { ConsumerConfig } from '@nats-io/jetstream';
 import { SetMetadata } from '@nestjs/common';
+import type { BatchOptions } from '../batch/collector.js';
 import type { Codec } from '../codec/codec.js';
 import type { IdempotencyOptions } from '../idempotency/idempotency.js';
 import type { DlqOptions } from '../settlement/dlq.js';
@@ -19,6 +20,11 @@ export interface SubscribeOptions {
   retry?: RetryOptions | false;
   dlq?: DlqOptions | boolean;
   idempotency?: boolean | IdempotencyOptions;
+  /**
+   * Hands the handler messages in batches (`@Payload() items: T[]`,
+   * `@Ctx() ctx: NatsBatchContext`); a batch never replies.
+   */
+  batch?: BatchOptions;
 }
 
 export interface ConsumeOptions {
@@ -32,6 +38,11 @@ export interface ConsumeOptions {
   retry?: RetryOptions | false;
   dlq?: DlqOptions | boolean;
   idempotency?: boolean | IdempotencyOptions;
+  /**
+   * Hands the handler messages in batches (`@Payload() items: T[]`,
+   * `@Ctx() ctx: NatsBatchContext`). Not allowed with `ack: 'manual'`.
+   */
+  batch?: BatchOptions;
 }
 
 export interface NatsServiceOptions {
