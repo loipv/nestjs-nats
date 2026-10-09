@@ -4,6 +4,7 @@ import type { ConnectionEntry } from '../../src/connection/connection-manager.js
 import { NatsContext, NatsJetStreamContext } from '../../src/context/nats-context.js';
 import {
   createIdempotency,
+  IdempotencyStoreError,
   idempotencyKey,
   resolveIdempotency,
 } from '../../src/idempotency/idempotency.js';
@@ -230,14 +231,33 @@ describe('createIdempotency', () => {
     expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('store down'));
   });
 
-  it('rethrows claim failures so settlement retries', async () => {
+  it('wraps claim failures in an IdempotencyStoreError so settlement retries', async () => {
     const err = new Error('claim failed');
     const store = fakeStore(err);
     const { d } = jsDelivery();
     const next = vi.fn(async () => {});
-    await expect(createIdempotency(cfg(store)).handle(d, next)).rejects.toBe(err);
+    const p = createIdempotency(cfg(store)).handle(d, next);
+    await expect(p).rejects.toBeInstanceOf(IdempotencyStoreError);
+    await expect(p).rejects.toMatchObject({
+      cause: err,
+      message: expect.stringContaining('claim failed'),
+    });
     expect(next).not.toHaveBeenCalled();
     expect(d[SKIPPED].size).toBe(0);
+  });
+
+  it('rethrows a failing key extractor as is (not a store failure)', async () => {
+    const err = new Error('bad extractor');
+    const store = fakeStore();
+    const { d } = coreDelivery({});
+    const p = createIdempotency(
+      cfg(store, {
+        keyExtractor: () => {
+          throw err;
+        },
+      }),
+    ).handle(d, async () => {});
+    await expect(p).rejects.toBe(err);
   });
 
   it('processes messages without a key and logs at debug', async () => {
@@ -350,6 +370,7 @@ describe('ordering with settlement', () => {
     await run(d, fakeStore(new Error('store down')), async () => {});
     expect(raw.nak).toHaveBeenCalledExactlyOnceWith(50);
     expect(raw.ack).not.toHaveBeenCalled();
+    expect(raw.term).not.toHaveBeenCalled();
   });
 });
 

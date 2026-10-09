@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ConnectionEntry } from '../../src/connection/connection-manager.js';
 import { NatsContext, NatsJetStreamContext } from '../../src/context/nats-context.js';
 import { NatsDecodeError, NatsModuleError, NonRetryableError } from '../../src/errors/errors.js';
+import { IdempotencyStoreError } from '../../src/idempotency/idempotency.js';
 import {
   type Delivery,
   HANDLER_DEFINITION,
@@ -407,6 +408,105 @@ describe('createSettlement — subscribe', () => {
     expect(schedule).not.toHaveBeenCalled();
     expect(log.error).not.toHaveBeenCalled();
     expect(log.warn).not.toHaveBeenCalled();
+  });
+});
+
+describe('createSettlement — idempotency store unavailable', () => {
+  const storeDown = () => new IdempotencyStoreError(new Error('redis down'));
+  const never = vi.fn(() => false);
+  const strict = resolveRetryPolicy({
+    initialDelay: 100,
+    maxDelay: 1000,
+    jitter: 0,
+    maxRetries: 5,
+    isRetryable: never,
+  }) as RetryPolicy;
+
+  it('naks with the backoff even when isRetryable says false, without consulting it', async () => {
+    const { entry, jsPublish } = fakeEntry();
+    const { d, raw, log } = consumeDelivery(2);
+    never.mockClear();
+    await createSettlement({ entry, retry: strict, dlq: consumeDlq }).handle(
+      d,
+      nextWith(storeDown()),
+    );
+    expect(settled(raw)).toEqual({ nak: [200] });
+    expect(never).not.toHaveBeenCalled();
+    expect(jsPublish).not.toHaveBeenCalled();
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /H\.on on "ord\.created".*idempotency store unavailable.*redis down.*retrying in 200ms/,
+      ),
+    );
+  });
+
+  it('still naks (never dead-letters or terms) once the attempts are exhausted', async () => {
+    const { entry, jsPublish } = fakeEntry();
+    const { d, raw } = consumeDelivery(20);
+    await createSettlement({ entry, retry: strict, dlq: consumeDlq }).handle(
+      d,
+      nextWith(storeDown()),
+    );
+    // Capped at maxDelay.
+    expect(settled(raw)).toEqual({ nak: [1000] });
+    expect(jsPublish).not.toHaveBeenCalled();
+  });
+
+  it('caps the jittered delay at maxDelay', async () => {
+    const { entry } = fakeEntry();
+    const { d, raw } = consumeDelivery(20);
+    const jittery = resolveRetryPolicy({
+      initialDelay: 100,
+      maxDelay: 1000,
+      jitter: 0.5,
+    }) as RetryPolicy;
+    await createSettlement({ entry, retry: jittery, dlq: false, random: () => 1 }).handle(
+      d,
+      nextWith(storeDown()),
+    );
+    expect(settled(raw)).toEqual({ nak: [1000] });
+  });
+
+  it('uses the default backoff when retries are off', async () => {
+    const { entry } = fakeEntry();
+    const { d, raw } = consumeDelivery(1);
+    await createSettlement({ entry, retry: false, dlq: false, random: () => 0.5 }).handle(
+      d,
+      nextWith(storeDown()),
+    );
+    expect(settled(raw)).toEqual({ nak: [1000] });
+  });
+
+  it('reschedules core messages with the backoff and no attempt cap', async () => {
+    const { entry, ncPublish } = fakeEntry();
+    const { d, schedule, msg, log } = coreDelivery({ attempt: 30 });
+    never.mockClear();
+    await createSettlement({ entry, retry: strict, dlq: coreDlq }).handle(d, nextWith(storeDown()));
+    expect(schedule).toHaveBeenCalledExactlyOnceWith(msg, 1000);
+    expect(never).not.toHaveBeenCalled();
+    expect(ncPublish).not.toHaveBeenCalled();
+    expect(log.warn).toHaveBeenCalledWith(expect.stringMatching(/idempotency store unavailable/));
+    expect(log.error).not.toHaveBeenCalled();
+  });
+
+  it('reschedules core messages even when retries are off', async () => {
+    const { entry } = fakeEntry();
+    const { d, schedule, msg } = coreDelivery({ attempt: 1 });
+    await createSettlement({ entry, retry: false, dlq: false, random: () => 0.5 }).handle(
+      d,
+      nextWith(storeDown()),
+    );
+    expect(schedule).toHaveBeenCalledExactlyOnceWith(msg, 1000);
+  });
+
+  it('still rethrows for reply deliveries', async () => {
+    const { entry } = fakeEntry();
+    const { d, schedule } = coreDelivery({ reply: '_INBOX.1' });
+    const err = storeDown();
+    await expect(
+      createSettlement({ entry, retry, dlq: false }).handle(d, nextWith(err)),
+    ).rejects.toBe(err);
+    expect(schedule).not.toHaveBeenCalled();
   });
 });
 

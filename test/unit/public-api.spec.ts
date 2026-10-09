@@ -113,6 +113,7 @@ it('does not export internals', () => {
     'decide',
     'backoffDelay',
     'publishToDlq',
+    'IdempotencyStoreError',
   ])
     expect(api).not.toHaveProperty(name);
 });
