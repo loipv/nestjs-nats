@@ -81,6 +81,13 @@ class BadService {
   x() {}
 }
 
+@NatsService({ name: 'badep', version: '1.0.0' })
+@Injectable()
+class InvalidEndpoint {
+  @ServiceEndpoint('bad name')
+  x() {}
+}
+
 async function infos(nc: NatsConnection, name: string): Promise<ServiceInfo[]> {
   const out: ServiceInfo[] = [];
   for await (const info of await new Svcm(nc).client().info(name)) out.push(info);
@@ -201,6 +208,23 @@ describe('@NatsService / @ServiceEndpoint', () => {
     const mgr = moduleRef.get(NatsConnectionManager);
     await expect(moduleRef.init()).rejects.toThrow(NatsConfigError);
     expect(mgr.names().map((n) => mgr.status(n).state)).toEqual(['closed']);
+  });
+
+  it('fails bootstrap with NatsConfigError for an invalid endpoint name and cleans up', async () => {
+    const moduleRef = await Test.createTestingModule({
+      imports: [nats()],
+      providers: [InvalidEndpoint],
+    }).compile();
+    const mgr = moduleRef.get(NatsConnectionManager);
+    const err = await moduleRef.init().then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(NatsConfigError);
+    expect((err as Error).message).toMatch(/InvalidEndpoint\.x/);
+    expect(mgr.names().map((n) => mgr.status(n).state)).toEqual(['closed']);
+    // The service registered before the failing endpoint was stopped again.
+    await expect(infos(rawNc, 'badep')).rejects.toThrow(/no responders/);
   });
 
   it('answers in-flight requests before closing', async () => {

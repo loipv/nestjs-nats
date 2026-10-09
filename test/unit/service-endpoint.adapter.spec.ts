@@ -4,6 +4,7 @@ import {
   type ServiceEndpointDefinition,
 } from '../../src/adapters/service-endpoint.adapter.js';
 import type { ConnectionEntry } from '../../src/connection/connection-manager.js';
+import { NatsConfigError } from '../../src/errors/errors.js';
 
 const svcm = vi.hoisted(() => ({ add: vi.fn() }));
 vi.mock('@nats-io/services', () => ({
@@ -193,7 +194,13 @@ describe('NatsServiceAdapter', () => {
       throw new Error('invalid endpoint');
     });
     const adapter = new NatsServiceAdapter({ name: 'svc', version: '1' }, [endpoint('a')], entry);
-    await expect(adapter.start()).rejects.toThrow('invalid endpoint');
+    const err = await adapter.start().then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(NatsConfigError);
+    expect((err as Error).message).toMatch(/S\.a.*"a".*svc.*invalid endpoint/);
+    expect((err as Error).cause).toBeInstanceOf(Error);
     await adapter.stop();
     expect(service.stop).toHaveBeenCalledTimes(1);
   });
