@@ -141,6 +141,27 @@ describe('idempotencyKey', () => {
       '7',
     ));
 
+  it('falls back to the CloudEvent source|id before the extractor', () => {
+    const ce = msgWith({
+      'ce-specversion': '1.0',
+      'ce-id': '7',
+      'ce-source': 'svc',
+      'ce-type': 't',
+    });
+    expect(idempotencyKey(ce, () => 'x')).toBe('svc|7');
+  });
+
+  it('prefers Nats-Msg-Id over the CloudEvent key', () => {
+    const ce = msgWith({
+      'Nats-Msg-Id': 'm1',
+      'ce-specversion': '1.0',
+      'ce-id': '7',
+      'ce-source': 'svc',
+      'ce-type': 't',
+    });
+    expect(idempotencyKey(ce)).toBe('m1');
+  });
+
   it('is undefined without header and extractor result', () => {
     expect(idempotencyKey(msgWith({}))).toBeUndefined();
     expect(idempotencyKey(msgWith({}), () => undefined)).toBeUndefined();

@@ -28,6 +28,8 @@ export class NatsParamsFactory implements ParamsFactory {
         return ctx.raw;
       case NatsParamType.CONTEXT:
         return ctx;
+      case NatsParamType.CLOUD_EVENT:
+        return ctx.cloudEvent;
       default:
         return undefined;
     }
@@ -51,6 +53,8 @@ function batchValue(
       return ctx.messages.map((m) => m.raw);
     case NatsParamType.CONTEXT:
       return ctx;
+    case NatsParamType.CLOUD_EVENT:
+      return ctx.messages.map((m) => m.cloudEvent);
     default:
       return undefined;
   }

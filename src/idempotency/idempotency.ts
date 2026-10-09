@@ -1,3 +1,4 @@
+import { cloudEventKey } from '../cloudevents/codec.js';
 import type { ConnectionEntry } from '../connection/connection-manager.js';
 import { NatsJetStreamContext } from '../context/nats-context.js';
 import { NatsModuleError } from '../errors/errors.js';
@@ -16,7 +17,7 @@ import type { IdempotencyStore } from './store.js';
 export interface IdempotencyOptions {
   /** How long a processed message is remembered, in ms (default: the module's, else 300_000). */
   ttl?: number;
-  /** Derives the key when the message has no `Nats-Msg-Id` header. */
+  /** Derives the key when the message has neither a `Nats-Msg-Id` header nor CloudEvent attributes. */
   keyExtractor?: (msg: InboundMessage) => string | undefined;
 }
 
@@ -36,8 +37,8 @@ export class IdempotencyStoreError extends NatsModuleError {
 const DEFAULT_IN_PROGRESS_NAK_MS = 1000;
 
 /**
- * The idempotency key of a message: its `Nats-Msg-Id` header, else (Plan 3: the
- * CloudEvent `source|id`), else what `extractor` returns. `undefined` when there is none.
+ * The idempotency key of a message: its `Nats-Msg-Id` header, else the CloudEvent
+ * `source|id`, else what `extractor` returns. `undefined` when there is none.
  */
 export function idempotencyKey(
   msg: InboundMessage,
@@ -45,6 +46,8 @@ export function idempotencyKey(
 ): string | undefined {
   const msgId = msg.headers?.get('Nats-Msg-Id');
   if (msgId) return msgId;
+  const ceKey = cloudEventKey(msg);
+  if (ceKey) return ceKey;
   return extractor?.(msg) || undefined;
 }
 

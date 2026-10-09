@@ -21,6 +21,7 @@ import * as api from '../../src/index.js';
 it('exports the runtime API', () =>
   expect(Object.keys(api).sort()).toEqual(
     [
+      'CloudEvent',
       'Consume',
       'Ctx',
       'DEFAULT_CONNECTION',

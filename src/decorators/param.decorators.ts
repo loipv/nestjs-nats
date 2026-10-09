@@ -64,3 +64,11 @@ export function Msg(): ParameterDecorator {
 export function Ctx(): ParameterDecorator {
   return createNatsParamDecorator(NatsParamType.CONTEXT);
 }
+
+/**
+ * The CloudEvent attributes of the message (`CloudEventMeta`, `undefined` if it is not a
+ * CloudEvent); in a batch handler, an array aligned with the payloads.
+ */
+export function CloudEvent(): ParameterDecorator {
+  return createNatsParamDecorator(NatsParamType.CLOUD_EVENT);
+}

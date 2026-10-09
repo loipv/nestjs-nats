@@ -4,13 +4,18 @@ import {
   type PublishOptions,
   TimeoutError,
 } from '@nats-io/transport-node';
-import { type Codec, decodePayload, encodePayload } from '../codec/codec.js';
+import type { CloudEventInit } from '../cloudevents/types.js';
+import { type Codec, decodePayload } from '../codec/codec.js';
 import type { HeadersInit } from '../codec/headers.js';
 import type { ConnectionEntry } from '../connection/connection-manager.js';
 import { redactText } from '../connection/redact.js';
 import { NatsModuleError, NatsRequestError } from '../errors/errors.js';
 import { compose } from '../pipeline/compose.js';
-import { createOutgoingMessage, outboundMiddlewares } from '../pipeline/outbound.js';
+import {
+  createOutgoingMessage,
+  encodeOutgoing,
+  outboundMiddlewares,
+} from '../pipeline/outbound.js';
 
 const DEFAULT_REQUEST_TIMEOUT = 5000;
 const SERVICE_ERROR_CODE_HEADER = 'Nats-Service-Error-Code';
@@ -30,11 +35,17 @@ export class NatsClient {
   publish(
     subject: string,
     data?: unknown,
-    opts: { headers?: HeadersInit; codec?: Codec; reply?: string } = {},
+    opts: {
+      headers?: HeadersInit;
+      codec?: Codec;
+      reply?: string;
+      /** Publishes a CloudEvent: its attributes go in `ce-*` headers or a JSON envelope. */
+      cloudEvent?: CloudEventInit;
+    } = {},
   ): void {
     const message = createOutgoingMessage(this.entry, 'publish', subject, data, opts);
     const run = compose(outboundMiddlewares(this.entry), async (m) => {
-      const payload = encodePayload(m.codec, m.data);
+      const payload = encodeOutgoing(m);
       const publishOpts: PublishOptions = {};
       if (m.headers.keys().length > 0) publishOpts.headers = m.headers;
       if (opts.reply !== undefined) publishOpts.reply = opts.reply;
@@ -56,7 +67,7 @@ export class NatsClient {
     const message = createOutgoingMessage(this.entry, 'request', subject, data, opts);
     let result: { value: unknown } | undefined;
     const run = compose(outboundMiddlewares(this.entry), async (m) => {
-      const payload = encodePayload(m.codec, m.data);
+      const payload = encodeOutgoing(m);
       let reply: Msg;
       try {
         reply = await this.entry.nc.request(m.subject, payload, {
