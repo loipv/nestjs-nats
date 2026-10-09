@@ -61,7 +61,7 @@ export {
   getNatsClientToken,
   getStreamManagerToken,
 } from './module/tokens.js';
-export type { InboundMessage } from './pipeline/delivery.js';
+export type { HandlerInfo, InboundMessage } from './pipeline/delivery.js';
 // Pipeline
 export type {
   Delivery,

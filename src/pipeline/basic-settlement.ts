@@ -1,7 +1,7 @@
 import { HttpException } from '@nestjs/common';
 import { NatsJetStreamContext } from '../context/nats-context.js';
 import { NatsDecodeError, NonRetryableError } from '../errors/errors.js';
-import type { Delivery } from './delivery.js';
+import { type Delivery, definitionOf } from './delivery.js';
 import { isReplyDelivery } from './reply.js';
 import type { InboundMiddleware, Next } from './types.js';
 
@@ -56,7 +56,9 @@ export const basicSettlement: InboundMiddleware = {
       d.logger.error(`Handler ${label(d)} failed`, errorTrace(err));
       return;
     }
-    if (d.handler.kind === 'consume' && (d.handler.options.ack ?? 'auto') === 'auto') {
+    if (d.handler.kind !== 'consume') return;
+    const def = definitionOf(d);
+    if (def.kind === 'consume' && (def.options.ack ?? 'auto') === 'auto') {
       if (ctx && !ctx.settled) settle(d, 'ack', () => ctx.ack());
     }
   },

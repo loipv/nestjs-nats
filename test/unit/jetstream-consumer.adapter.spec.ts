@@ -216,4 +216,38 @@ describe('JetStreamConsumerAdapter', () => {
     await tick();
     await expect(adapter.stop()).resolves.toBeUndefined();
   });
+
+  it('hands plugins a narrow handler description', async () => {
+    const seen: unknown[] = [];
+    const plugin = {
+      name: 'p',
+      inbound: {
+        async handle(d: { handler: unknown }, next: () => Promise<void>) {
+          seen.push(d.handler);
+          await next();
+        },
+      },
+    };
+    const invoke = vi.fn(() => Promise.resolve());
+    const { adapter, fake } = setup(invoke, { plugins: [plugin] });
+    await adapter.start();
+    const msg = fakeMsg(1);
+    fake.push(msg as unknown as JsMsg);
+    await tick();
+    await tick();
+    expect(seen).toStrictEqual([
+      {
+        kind: 'consume',
+        connection: 'default',
+        className: 'C',
+        methodName: 'm',
+        stream: 'ORD',
+        durable: 'd',
+      },
+    ]);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(msg.ack).toHaveBeenCalledTimes(1);
+    await adapter.stop();
+    await adapter.idle();
+  });
 });

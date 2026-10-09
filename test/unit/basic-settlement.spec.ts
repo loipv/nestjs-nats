@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { NatsContext, NatsJetStreamContext } from '../../src/context/nats-context.js';
 import { NatsDecodeError, NonRetryableError } from '../../src/errors/errors.js';
 import { basicSettlement } from '../../src/pipeline/basic-settlement.js';
-import type { Delivery } from '../../src/pipeline/delivery.js';
+import { type Delivery, HANDLER_DEFINITION } from '../../src/pipeline/delivery.js';
 
 function fakeJsMsg() {
   return {
@@ -30,13 +30,10 @@ function consumeDelivery(ack?: 'auto' | 'manual') {
     connection: 'default',
     raw: raw as never,
   });
+  const handler = { kind: 'consume', stream: 'S', durable: 'd', className: 'H', methodName: 'on' };
   const d = {
-    handler: {
-      kind: 'consume',
-      options: { stream: 'S', durable: 'd', ack },
-      className: 'H',
-      methodName: 'on',
-    },
+    handler,
+    [HANDLER_DEFINITION]: { ...handler, options: { stream: 'S', durable: 'd', ack } },
     messages: [],
     context,
     logger: log,

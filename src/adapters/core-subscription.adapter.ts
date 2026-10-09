@@ -5,7 +5,13 @@ import type { ConnectionEntry } from '../connection/connection-manager.js';
 import { NatsContext } from '../context/nats-context.js';
 import type { HandlerDefinition } from '../discovery/handler-explorer.js';
 import { basicSettlement } from '../pipeline/basic-settlement.js';
-import { buildInboundPipeline, type Delivery } from '../pipeline/delivery.js';
+import {
+  buildInboundPipeline,
+  HANDLER_DEFINITION,
+  type HandlerInfo,
+  type InternalDelivery,
+  toHandlerInfo,
+} from '../pipeline/delivery.js';
 import { invokeHandler } from '../pipeline/invoker.js';
 import { toServiceError } from '../pipeline/reply.js';
 import type { HandlerAdapter } from './adapter.js';
@@ -23,7 +29,8 @@ function errorTrace(err: unknown): string {
 export class CoreSubscriptionAdapter implements HandlerAdapter {
   private readonly limiter: Limiter;
   private readonly codec: Codec;
-  private readonly run: (d: Delivery) => Promise<void>;
+  private readonly run: (d: InternalDelivery) => Promise<void>;
+  private readonly info: HandlerInfo;
   private readonly label: string;
   private sub?: Subscription;
   private loop?: Promise<void>;
@@ -34,6 +41,7 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
   ) {
     this.limiter = createLimiter(def.options.concurrency ?? 1);
     this.codec = def.options.codec ?? entry.options.codec ?? jsonCodec();
+    this.info = toHandlerInfo(def);
     this.run = buildInboundPipeline(
       { plugins: entry.options.plugins ?? [], core: [basicSettlement] },
       invokeHandler,
@@ -84,8 +92,9 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
 
   private async handle(msg: Msg): Promise<void> {
     const context = new NatsContext({ kind: 'core', connection: this.entry.name, raw: msg });
-    const d: Delivery = {
-      handler: this.def,
+    const d: InternalDelivery = {
+      handler: this.info,
+      [HANDLER_DEFINITION]: this.def,
       messages: [{ subject: msg.subject, data: msg.data, headers: msg.headers, raw: msg }],
       context,
       codec: this.codec,

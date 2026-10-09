@@ -53,7 +53,10 @@ function fakeMsg(payload: unknown) {
   };
 }
 
-function setup(invoke: (payload: unknown) => Promise<unknown> = () => Promise.resolve()) {
+function setup(
+  invoke: (payload: unknown) => Promise<unknown> = () => Promise.resolve(),
+  plugins: unknown[] = [],
+) {
   const iterators = new Map<string, ReturnType<typeof fakeIterator>>();
   const service = {
     addEndpoint: vi.fn((name: string) => {
@@ -71,7 +74,7 @@ function setup(invoke: (payload: unknown) => Promise<unknown> = () => Promise.re
   const logger = { log: vi.fn(), error: vi.fn(), warn: vi.fn() };
   const entry = {
     name: 'default',
-    options: {},
+    options: { plugins },
     logger,
     nc: { flush: () => Promise.resolve(), isClosed: () => false },
   } as unknown as ConnectionEntry;
@@ -193,5 +196,43 @@ describe('NatsServiceAdapter', () => {
     await expect(adapter.start()).rejects.toThrow('invalid endpoint');
     await adapter.stop();
     expect(service.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('hands plugins a narrow handler description', async () => {
+    const seen: unknown[] = [];
+    const plugin = {
+      name: 'p',
+      inbound: {
+        async handle(d: { handler: unknown }, next: () => Promise<void>) {
+          seen.push(d.handler);
+          await next();
+        },
+      },
+    };
+    const { iterators, entry, endpoint } = setup(() => Promise.resolve('ok'), [plugin]);
+    const adapter = new NatsServiceAdapter(
+      { name: 'svc', version: '1.0.0', description: 'd' },
+      [endpoint('a', { subject: 'svc.a' })],
+      entry,
+    );
+    await adapter.start();
+    const msg = fakeMsg('x');
+    iterators.get('a')?.push(msg);
+    await tick();
+    await tick();
+    expect(seen).toStrictEqual([
+      {
+        kind: 'service-endpoint',
+        connection: 'default',
+        className: 'S',
+        methodName: 'a',
+        service: { name: 'svc', version: '1.0.0' },
+        endpoint: 'a',
+        subject: 'svc.a',
+      },
+    ]);
+    expect(msg.respond).toHaveBeenCalledTimes(1);
+    await adapter.stop();
+    await adapter.idle();
   });
 });

@@ -3,8 +3,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { jsonCodec } from '../../src/codec/codec.js';
 import { NatsContext } from '../../src/context/nats-context.js';
 import { NatsDecodeError } from '../../src/errors/errors.js';
-import type { Delivery } from '../../src/pipeline/delivery.js';
-import { buildInboundPipeline } from '../../src/pipeline/delivery.js';
+import {
+  buildInboundPipeline,
+  type Delivery,
+  HANDLER_DEFINITION,
+  type InternalDelivery,
+} from '../../src/pipeline/delivery.js';
 import { invokeHandler } from '../../src/pipeline/invoker.js';
 import type { InboundMiddleware, NatsPlugin, Next } from '../../src/pipeline/types.js';
 
@@ -16,21 +20,21 @@ function delivery(opts: {
 }) {
   const raw = { subject: 'a.b', reply: '', headers: undefined, data: opts.data };
   const context = new NatsContext({ kind: 'core', connection: 'default', raw: raw as never });
+  const handler = {
+    kind: 'subscribe',
+    subject: 'a.b',
+    connection: 'default',
+    className: 'H',
+    methodName: 'on',
+  };
   return {
-    handler: {
-      kind: 'subscribe',
-      subject: 'a.b',
-      options: {},
-      connection: 'default',
-      className: 'H',
-      methodName: 'on',
-      invoke: opts.invoke,
-    },
+    handler,
+    [HANDLER_DEFINITION]: { ...handler, options: {}, invoke: opts.invoke },
     messages: [{ subject: 'a.b', data: opts.data ?? enc.encode('{"a":1}'), raw }],
     context,
     codec: jsonCodec(),
     logger: { log() {}, error() {}, warn() {} },
-  } as unknown as Delivery;
+  } as unknown as InternalDelivery;
 }
 
 describe('buildInboundPipeline', () => {
