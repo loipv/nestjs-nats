@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { NatsConnectionManager } from '../../src/connection/connection-manager.js';
 import { NatsConfigError, NatsConnectionError } from '../../src/errors/errors.js';
 import { type NatsTestServer, startNats } from './support/nats-server.js';
@@ -44,12 +44,11 @@ describe('NatsConnectionManager', () => {
       connection: { servers: auth.url, user: 'app', pass: 'wrong-s3cr3t' },
       logger: false,
     });
-    await expect(p).rejects.toThrow(NatsConnectionError);
-    await expect(p).rejects.not.toThrow(/s3cr3t/);
     const err = (await p.then(
       () => undefined,
       (e: unknown) => e,
     )) as NatsConnectionError;
+    expect(err).toBeInstanceOf(NatsConnectionError);
     expect(err.connection).toBe('bad');
     expect(JSON.stringify({ ...err, message: err.message })).not.toMatch(/s3cr3t/);
     expect(mgr.has('bad')).toBe(false);
@@ -65,6 +64,58 @@ describe('NatsConnectionManager', () => {
   it('throws NatsConfigError for unknown connection', () => {
     expect(() => mgr.get('nope')).toThrow(NatsConfigError);
     expect(() => mgr.status('nope')).toThrow(NatsConfigError);
+  });
+
+  it('closeAll closes multiple live connections and tolerates concurrent calls', async () => {
+    const m = new NatsConnectionManager();
+    const a = await m.connect('a', { connection: { servers: srv.url }, logger: false });
+    const b = await m.connect('b', { connection: { servers: srv.url }, logger: false });
+    await expect(Promise.all([m.closeAll(), m.closeAll()])).resolves.toBeDefined();
+    expect(a.nc.isClosed()).toBe(true);
+    expect(b.nc.isClosed()).toBe(true);
+    expect(m.status('a').state).toBe('closed');
+    expect(m.status('b').state).toBe('closed');
+    await expect(m.closeAll()).resolves.toBeUndefined();
+  });
+
+  it('status$ emits events and status() follows the lifecycle', async () => {
+    const m = new NatsConnectionManager();
+    const e = await m.connect('s', { connection: { servers: srv.url }, logger: false });
+    const events: string[] = [];
+    const sub = m.status$('s').subscribe((ev) => events.push(`${ev.connection}:${ev.type}`));
+    const other = m.status$('other');
+    const otherEvents: unknown[] = [];
+    const otherSub = other.subscribe((ev) => otherEvents.push(ev));
+    const closing = m.closeAll();
+    expect(['draining', 'closed']).toContain(m.status('s').state);
+    await closing;
+    await e.nc.closed();
+    await vi.waitFor(() => expect(events.length).toBeGreaterThan(0));
+    expect(events.every((ev) => ev.startsWith('s:'))).toBe(true);
+    expect(otherEvents).toEqual([]);
+    expect(m.status('s').state).toBe('closed');
+    sub.unsubscribe();
+    otherSub.unsubscribe();
+  });
+
+  it('logs disconnects without leaking credentials and reports reconnecting', async () => {
+    const auth = await startNats(['--user', 'app', '--pass', 'pw-s3cr3t']);
+    const m = new NatsConnectionManager();
+    const lines: string[] = [];
+    const record = (msg: unknown) => lines.push(String(msg));
+    const e = await m.connect('r', {
+      connection: { servers: auth.url, user: 'app', pass: 'pw-s3cr3t' },
+      logger: { log: record, warn: record, error: record },
+    });
+    const seen: string[] = [];
+    m.status$('r').subscribe((ev) => seen.push(ev.type));
+    await auth.stop();
+    await vi.waitFor(() => expect(seen).toContain('disconnect'));
+    expect(m.status('r').state).toBe('reconnecting');
+    expect(lines.some((l) => l.includes('disconnected'))).toBe(true);
+    expect(lines.join('\n')).not.toMatch(/s3cr3t/);
+    await e.nc.close();
+    await m.closeAll();
   });
 
   it('closeAll drains every connection', async () => {

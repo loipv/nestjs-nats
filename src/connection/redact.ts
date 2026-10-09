@@ -14,3 +14,14 @@ function redactServer(server: string): string {
     (_m, scheme?: string) => `${scheme ?? ''}***@`,
   );
 }
+
+/**
+ * Safety net for free text (e.g. error messages): masks URL userinfo and any known secrets.
+ */
+export function redactText(text: string, secrets: Array<string | undefined> = []): string {
+  let out = text.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/?#]*@/gi, '$1***@');
+  for (const secret of secrets) {
+    if (secret) out = out.split(secret).join('***');
+  }
+  return out;
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { redactServers } from '../../src/connection/redact.js';
+import { redactServers, redactText } from '../../src/connection/redact.js';
 
 describe('redactServers', () => {
   it('redacts userinfo', () =>
@@ -12,4 +12,12 @@ describe('redactServers', () => {
   });
   it('handles passwords containing @', () =>
     expect(redactServers('nats://u:p@ss@h:4222')).toEqual(['nats://***@h:4222']));
+});
+
+describe('redactText', () => {
+  it('masks url userinfo and known secrets', () => {
+    expect(redactText('failed nats://u:p@h:1 with pw hunter2', ['hunter2', undefined])).toBe(
+      'failed nats://***@h:1 with pw ***',
+    );
+  });
 });
