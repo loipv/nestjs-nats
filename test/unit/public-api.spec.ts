@@ -69,26 +69,49 @@ it('does not pull optional peers', async () => {
   expect(src).not.toMatch(/@opentelemetry|@nestjs\/terminus/);
 });
 
-it('does not pull optional peers or subpath entries, even transitively', async () => {
-  const srcRoot = new URL('../../src/', import.meta.url);
-  const seen = new Set<string>();
-  const pending = ['index.ts'];
-  const offenders: string[] = [];
+const srcRoot = new URL('../../src/', import.meta.url);
+
+/** Every source file `entry` imports, transitively, with the package specifiers it uses. */
+async function importGraph(entry: string): Promise<{ files: Set<string>; packages: string[] }> {
+  const files = new Set<string>();
+  const packages: string[] = [];
+  const pending = [entry];
   for (let file = pending.pop(); file !== undefined; file = pending.pop()) {
-    if (seen.has(file)) continue;
-    seen.add(file);
-    if (file.startsWith('otel/') || file.startsWith('health/')) offenders.push(file);
+    if (files.has(file)) continue;
+    files.add(file);
     const code = await readFile(new URL(file, srcRoot), 'utf8');
     for (const [, spec] of code.matchAll(/(?:from|import)\s*\(?\s*'([^']+)'/g)) {
       if (!spec) continue;
-      if (/^@opentelemetry\/|^@nestjs\/terminus/.test(spec)) offenders.push(`${file} -> ${spec}`);
       if (spec.startsWith('.')) {
         const target = new URL(spec.replace(/\.js$/, '.ts'), new URL(file, srcRoot));
         pending.push(target.pathname.slice(srcRoot.pathname.length));
+      } else {
+        packages.push(`${file} -> ${spec}`);
       }
     }
   }
-  expect(seen.size).toBeGreaterThan(20);
+  return { files, packages };
+}
+
+it('does not pull optional peers or subpath entries, even transitively', async () => {
+  const { files, packages } = await importGraph('index.ts');
+  const offenders = [
+    ...[...files].filter((f) => /^(otel|health|testing)\//.test(f)),
+    ...packages.filter((p) => / -> (@opentelemetry\/|@nestjs\/terminus|@nestjs\/testing)/.test(p)),
+  ];
+  expect(files.size).toBeGreaterThan(20);
+  expect(offenders).toEqual([]);
+});
+
+it('keeps the testing entry free of the network lifecycle and optional peers', async () => {
+  const { files, packages } = await importGraph('testing/index.ts');
+  const offenders = [
+    ...[...files].filter((f) =>
+      /^(otel|health)\/|^module\/(nats-core\.module|nats-lifecycle|nats\.module)\.ts$/.test(f),
+    ),
+    ...packages.filter((p) => / -> (@opentelemetry\/|@nestjs\/terminus|@nestjs\/testing)/.test(p)),
+  ];
+  expect(files).toContain('adapters/handler-pipeline.ts');
   expect(offenders).toEqual([]);
 });
 
