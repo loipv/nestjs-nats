@@ -441,7 +441,8 @@ git add -A && git commit -m "feat: declarative stream/consumer sync and JetStrea
   - `Consume(options: ConsumeOptions): MethodDecorator` → metadata `{ options }`
   - `NatsService(options: NatsServiceOptions): ClassDecorator`
   - `ServiceEndpoint(name: string, options?: ServiceEndpointOptions): MethodDecorator` → metadata `{ name, options }`
-  - `enum NatsParamType { PAYLOAD = 0, HEADERS = 1, SUBJECT = 2, MSG = 3, CONTEXT = 4, CLOUD_EVENT = 5 }`
+  - `enum NatsParamType { PAYLOAD = 3, HEADERS = 6, SUBJECT = 7, MSG = 8, CONTEXT = 9, CLOUD_EVENT = 10 }`
+    (Nest maps param type 3/4/5 to pipe type `'body'`/`'query'`/`'param'` and everything else to `'custom'`, which `ValidationPipe` skips; `PAYLOAD = 3` like Nest's `RpcParamtype.PAYLOAD` so payloads get validated, other types avoid 4/5 so context/headers never do.)
   - `Payload(property?: string, ...pipes: (Type<PipeTransform> | PipeTransform)[]): ParameterDecorator` và `Payload(...pipes)`; `Headers(name?: string)`, `Subject()`, `Msg()`, `Ctx()` — ghi vào `ROUTE_ARGS_METADATA` (từ `@nestjs/common`) với key `` `${type}:${index}` `` và value `{ index, data, pipes }` (cùng shape Nest dùng)
   - `class NatsContext` — `constructor(init: { kind: 'core' | 'jetstream' | 'service'; connection: string; raw: Msg | JsMsg })`; getter `kind`, `connection`, `subject` (= `raw.subject`), `headers` (`fromMsgHdrs(raw.headers)`, tính một lần), `replyTo` (`raw.reply` hoặc `undefined`), `raw`
   - `class NatsJetStreamContext extends NatsContext` — `raw: JsMsg`; getter `stream`, `seq`, `deliveryCount` (từ `raw.info`); `ack()`, `nak(delayMs?: number)`, `term(reason?: string)`, `working()`; getter `settled: boolean` — `true` sau `ack`/`nak`/`term` đầu tiên; gọi settle lần hai là no-op (không gọi xuống `raw`)

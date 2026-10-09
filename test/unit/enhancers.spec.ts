@@ -4,6 +4,7 @@ import {
   type CallHandler,
   type CanActivate,
   Catch,
+  Controller,
   createParamDecorator,
   type ExceptionFilter,
   type ExecutionContext,
@@ -139,6 +140,21 @@ class Scoped {
   on() {}
 }
 
+@Controller()
+class Ctrl {
+  @Subscribe('from.controller')
+  onCtrl(@Payload('v') v: number) {
+    return v * 2;
+  }
+}
+
+// Exposed under two tokens via factories returning the same instance.
+class Shared {
+  @Subscribe('shared')
+  onShared() {}
+}
+const shared = new Shared();
+
 function natsCtx(h: Record<string, string> = {}, subject = 'x') {
   const hdrs = natsHeaders();
   for (const [k, v] of Object.entries(h)) hdrs.set(k, v);
@@ -161,7 +177,21 @@ describe('HandlerExplorer', () => {
   beforeAll(async () => {
     moduleRef = await Test.createTestingModule({
       imports: [DiscoveryModule],
-      providers: [HandlerExplorer, H, G, I, Filtered, Svc, Orphan, Scoped, Piped],
+      controllers: [Ctrl],
+      providers: [
+        HandlerExplorer,
+        H,
+        G,
+        I,
+        Filtered,
+        Svc,
+        { provide: 'SVC_ALIAS', useExisting: Svc },
+        Orphan,
+        Scoped,
+        Piped,
+        { provide: 'SHARED_1', useFactory: () => shared },
+        { provide: 'SHARED_2', useFactory: () => shared },
+      ],
     }).compile();
     defs = moduleRef.get(HandlerExplorer).explore();
   });
@@ -186,8 +216,28 @@ describe('HandlerExplorer', () => {
         'subscribe:Svc.plain@svcconn',
         'subscribe:Scoped.on@default',
         'subscribe:Piped.piped@default',
+        'subscribe:Ctrl.onCtrl@default',
+        'subscribe:Shared.onShared@default',
       ].sort(),
     );
+  });
+
+  it('ignores useExisting aliases (one definition per handler)', () => {
+    expect(defs.filter((d) => d.className === 'Svc')).toHaveLength(2);
+    expect(defs.filter((d) => d.methodName === 'get')).toHaveLength(1);
+  });
+
+  it('dedupes the same instance exposed under several tokens', () => {
+    const found = defs.filter((d) => d.methodName === 'onShared');
+    expect(found).toHaveLength(1);
+    expect(found[0]?.instance).toBe(shared);
+  });
+
+  it('discovers and invokes handlers on controllers', async () => {
+    const ctrl = find('onCtrl');
+    expect(ctrl).toMatchObject({ kind: 'subscribe', subject: 'from.controller' });
+    expect(ctrl.instance).toBeInstanceOf(Ctrl);
+    await expect(ctrl.invoke({ v: 21 }, natsCtx())).resolves.toBe(42);
   });
 
   it('exposes handler metadata', () => {
