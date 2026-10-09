@@ -1,5 +1,6 @@
 import type { ConnectionEntry } from '../connection/connection-manager.js';
 import { NatsJetStreamContext } from '../context/nats-context.js';
+import { IdempotencyStoreError } from '../idempotency/idempotency.js';
 import {
   type Delivery,
   definitionOf,
@@ -75,6 +76,24 @@ function settle(d: Delivery, msg: InboundMessage, op: SettleOp, fn: () => void):
 export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
   const { entry, retry, dlq, random } = cfg;
 
+  /**
+   * Delay before handing back a message whose idempotency key could not be claimed: the
+   * retry backoff (the default one when retries are off), capped at `maxDelay`. There is
+   * no attempt limit and `isRetryable` is not consulted: the handler never ran.
+   */
+  const storeRetryDelay = (attempt: number): number => {
+    const policy = retry || DEFAULT_RETRY;
+    return Math.min(policy.maxDelay, backoffDelay(policy, attempt, random));
+  };
+
+  const storeLine = (
+    d: Delivery,
+    msg: InboundMessage,
+    delayMs: number,
+    err: IdempotencyStoreError,
+  ): string =>
+    `${label(d, msg)} not processed: idempotency store unavailable (${errorMessage(err.cause)}), retrying in ${delayMs}ms`;
+
   const retryLine = (d: Delivery, msg: InboundMessage, delayMs: number, err: unknown): string =>
     `${label(d, msg)} failed (attempt ${msg.attempt}/${retry ? retry.maxRetries + 1 : 1}), retrying in ${delayMs}ms: ${errorMessage(err)}`;
 
@@ -99,6 +118,12 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
   async function failConsume(d: Delivery, { msg, ctx }: JsTarget, err: unknown): Promise<void> {
     // The handler settled it itself (e.g. `ctx.nak(delay)` before throwing).
     if (ctx.settled) return;
+    if (err instanceof IdempotencyStoreError) {
+      const delayMs = storeRetryDelay(msg.attempt);
+      d.logger.warn(storeLine(d, msg, delayMs, err));
+      settle(d, msg, 'nak', () => ctx.nak(delayMs));
+      return;
+    }
     const decision = decide(err, msg.attempt, retry, dlq, random);
     switch (decision.action) {
       case 'retry':
@@ -134,6 +159,12 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
 
   async function failSubscribe(d: Delivery, msg: InboundMessage, err: unknown): Promise<void> {
     const schedule = (d as Partial<InternalDelivery>)[RETRY_SCHEDULER];
+    if (err instanceof IdempotencyStoreError && schedule) {
+      const delayMs = storeRetryDelay(msg.attempt);
+      d.logger.warn(storeLine(d, msg, delayMs, err));
+      schedule(msg, delayMs);
+      return;
+    }
     const decision = decide(err, msg.attempt, schedule ? retry : false, dlq, random);
     switch (decision.action) {
       case 'retry':

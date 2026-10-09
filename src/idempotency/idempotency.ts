@@ -1,5 +1,6 @@
 import type { ConnectionEntry } from '../connection/connection-manager.js';
 import { NatsJetStreamContext } from '../context/nats-context.js';
+import { NatsModuleError } from '../errors/errors.js';
 import type {
   Delivery,
   HandlerInfo,
@@ -20,6 +21,18 @@ export interface IdempotencyOptions {
 }
 
 export const DEFAULT_IDEMPOTENCY_TTL = 300_000;
+
+/**
+ * Internal: the idempotency store failed to claim a key, so the handler did not run.
+ * Settlement retries such messages with the backoff, regardless of `isRetryable` and of
+ * the attempts left: a store outage delays messages but never drops or dead-letters them.
+ */
+export class IdempotencyStoreError extends NatsModuleError {
+  constructor(cause: unknown) {
+    super(`Idempotency store unavailable: ${errorMessage(cause)}`, { cause });
+    this.name = 'IdempotencyStoreError';
+  }
+}
 const DEFAULT_IN_PROGRESS_NAK_MS = 1000;
 
 /**
@@ -86,7 +99,7 @@ export function resolveIdempotency(
  * of the delivery (`SKIPPED`) and, for JetStream, acked / nak'd here. Claims of messages
  * that succeed are completed, those of failed ones (the whole delivery when the handler
  * throws, else the batch messages recorded in `FAILURES`) released. A failing `claim` is
- * rethrown, so settlement retries the message.
+ * rethrown as an `IdempotencyStoreError`, which settlement retries.
  */
 export function createIdempotency(cfg: IdempotencyConfig): InboundMiddleware {
   const { store, ttl, keyExtractor, inProgressNakMs } = cfg;
@@ -138,7 +151,11 @@ export function createIdempotency(cfg: IdempotencyConfig): InboundMiddleware {
             continue;
           }
           key = `${scope}|${key}`;
-          result = await store.claim(key, ttl);
+          try {
+            result = await store.claim(key, ttl);
+          } catch (err) {
+            throw new IdempotencyStoreError(err);
+          }
         } catch (err) {
           // Not processed: free what this delivery claimed and let settlement retry it.
           await release(d, keysOf(claimed));
