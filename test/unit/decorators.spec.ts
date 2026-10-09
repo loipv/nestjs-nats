@@ -119,12 +119,12 @@ describe('param decorators', () => {
 
   it('defines the param type enum values', () => {
     expect(NatsParamType).toMatchObject({
-      PAYLOAD: 0,
-      HEADERS: 1,
-      SUBJECT: 2,
-      MSG: 3,
-      CONTEXT: 4,
-      CLOUD_EVENT: 5,
+      PAYLOAD: 3,
+      HEADERS: 6,
+      SUBJECT: 7,
+      MSG: 8,
+      CONTEXT: 9,
+      CLOUD_EVENT: 10,
     });
   });
 });

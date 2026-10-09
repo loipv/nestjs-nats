@@ -1,13 +1,20 @@
 import type { PipeTransform, Type } from '@nestjs/common';
 import { ROUTE_ARGS_METADATA } from '@nestjs/common/constants.js';
 
+/**
+ * Param types stored in `ROUTE_ARGS_METADATA` keys. Nest maps the numeric type to the
+ * `ArgumentMetadata.type` seen by pipes: 3 → `'body'`, 4 → `'query'`, 5 → `'param'`,
+ * anything else → `'custom'`. `PAYLOAD` is therefore 3 (like Nest's `RpcParamtype.PAYLOAD`)
+ * so `ValidationPipe` validates payloads, and the other types avoid 4/5 so pipes never try
+ * to validate headers, the raw message or the context.
+ */
 export enum NatsParamType {
-  PAYLOAD = 0,
-  HEADERS = 1,
-  SUBJECT = 2,
-  MSG = 3,
-  CONTEXT = 4,
-  CLOUD_EVENT = 5,
+  PAYLOAD = 3,
+  HEADERS = 6,
+  SUBJECT = 7,
+  MSG = 8,
+  CONTEXT = 9,
+  CLOUD_EVENT = 10,
 }
 
 type Pipe = Type<PipeTransform> | PipeTransform;
