@@ -33,7 +33,10 @@ export type JetStreamPublishOptions = {
   headers?: HeadersInit;
   codec?: Codec;
   timeout?: number;
-  /** Publishes a CloudEvent; without `msgId`, `Nats-Msg-Id` is its `id` (server-side dedupe). */
+  /**
+   * Publishes a CloudEvent; without `msgId` (or a `Nats-Msg-Id` header), `Nats-Msg-Id` is
+   * its `id` (server-side dedupe).
+   */
   cloudEvent?: CloudEventInit;
 };
 
@@ -48,9 +51,15 @@ export class JetStreamClient {
     opts: JetStreamPublishOptions = {},
   ): Promise<PubAck> {
     const message = createOutgoingMessage(this.entry, 'jetstream', subject, data, opts);
-    // As a header (rather than the `msgID` publish option) so outbound plugins see it.
-    const msgId = opts.msgId ?? message.cloudEvent?.meta.id;
-    if (msgId !== undefined) message.headers.set(MSG_ID_HEADER, msgId);
+    // As a header (rather than the `msgID` publish option) so outbound plugins see it. A
+    // `Nats-Msg-Id` header given by the caller wins over the CloudEvent id.
+    if (opts.msgId !== undefined) {
+      message.headers.delete(MSG_ID_HEADER, 'insensitive');
+      message.headers.set(MSG_ID_HEADER, opts.msgId);
+    } else if (!message.headers.has(MSG_ID_HEADER, 'insensitive')) {
+      const ceId = message.cloudEvent?.meta.id;
+      if (ceId !== undefined) message.headers.set(MSG_ID_HEADER, ceId);
+    }
     let ack: PubAck | undefined;
     const run = compose(outboundMiddlewares(this.entry), async (m) => {
       const payload = encodeOutgoing(m);

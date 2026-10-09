@@ -38,7 +38,9 @@ export function createOutgoingMessage(
     codec,
   };
   if (opts.cloudEvent) {
-    const defaults: { source?: string; contentType: string } = { contentType: codec.contentType };
+    const defaults: { source?: string; contentType?: string } = {};
+    // Bytes are sent as they are: the codec's content type would not describe them.
+    if (!(data instanceof Uint8Array)) defaults.contentType = codec.contentType;
     const source = entry.options.cloudEvents?.source;
     if (source !== undefined) defaults.source = source;
     message.cloudEvent = {

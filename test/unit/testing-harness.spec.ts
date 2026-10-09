@@ -246,6 +246,14 @@ describe('NatsTestHarness', () => {
     });
   });
 
+  it('hands non-JSON CloudEvent data to the route as bytes', async () => {
+    const bytes = new TextEncoder().encode('123');
+    const r = await h.dispatch({ handler: 'Events.@CloudEventRouter' }, bytes, {
+      cloudEvent: { type: 'o.created', source: 's', datacontenttype: 'text/plain' },
+    });
+    expect(r.result).toMatchObject({ type: 'o.created', p: bytes });
+  });
+
   it('skips idempotent duplicates across dispatches', async () => {
     calls.length = 0;
     const headers = { 'Nats-Msg-Id': 'm1' };

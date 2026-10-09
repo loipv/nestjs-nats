@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { type MsgHdrs } from '@nats-io/transport-node';
+import { headers as createHeaders, type MsgHdrs } from '@nats-io/transport-node';
 import { type Codec, decodePayload, encodePayload } from '../codec/codec.js';
 import { NatsConfigError, NatsDecodeError } from '../errors/errors.js';
 import { CE_STRUCTURED_CONTENT_TYPE, type CloudEventInit, type CloudEventMeta } from './types.js';
@@ -87,6 +87,38 @@ function binaryParts(h: MsgHdrs): {
   return { attrs, ext };
 }
 
+/** The media type of a content type, lowercased and without parameters. */
+function mediaType(contentType: string): string {
+  return (contentType.split(';')[0] ?? '').trim().toLowerCase();
+}
+
+function isJsonMediaType(type: string): boolean {
+  return type === 'application/json' || type === 'text/json' || type.endsWith('+json');
+}
+
+/**
+ * Decodes the data of a CloudEvent with `codec`, unless the event declares a non-JSON
+ * `datacontenttype` other than the codec's content type: such data is handed over as
+ * its raw bytes, since the codec cannot read it. The codec gets the declared content type
+ * as the `Content-Type` of `headers` (built when absent).
+ */
+function decodeData(
+  codec: Codec,
+  bytes: Uint8Array,
+  datacontenttype: string | undefined,
+  headers?: MsgHdrs,
+): unknown {
+  if (datacontenttype === undefined) return decodePayload(codec, bytes, headers);
+  const declared = mediaType(datacontenttype);
+  if (!isJsonMediaType(declared) && declared !== mediaType(codec.contentType)) return bytes;
+  let h = headers;
+  if (!h) {
+    h = createHeaders();
+    h.set('Content-Type', datacontenttype);
+  }
+  return decodePayload(codec, bytes, h);
+}
+
 function parseEnvelope(data: Uint8Array): Record<string, unknown> {
   let env: unknown;
   try {
@@ -154,9 +186,10 @@ export function parseCloudEvent(msg: CeMessage): {
     const absent = missing(attrs);
     if (absent)
       throw new NatsDecodeError(`Invalid CloudEvent: missing required attribute "${absent}"`);
+    const meta = buildMeta(attrs, ext);
     return {
-      meta: buildMeta(attrs, ext),
-      data: (codec) => decodePayload(codec, msg.data, msg.headers),
+      meta,
+      data: (codec) => decodeData(codec, msg.data, meta.datacontenttype, msg.headers),
     };
   }
   const env = parseEnvelope(msg.data);
@@ -164,13 +197,15 @@ export function parseCloudEvent(msg: CeMessage): {
   const absent = missing(attrs);
   if (absent)
     throw new NatsDecodeError(`Invalid CloudEvent: missing required attribute "${absent}"`);
+  const meta = buildMeta(attrs, ext);
   return {
-    meta: buildMeta(attrs, ext),
+    meta,
     data: (codec) => {
       if (typeof env.data_base64 === 'string') {
         const bytes = new Uint8Array(Buffer.from(env.data_base64, 'base64'));
-        return decodePayload(codec, bytes);
+        return decodeData(codec, bytes, meta.datacontenttype);
       }
+      // An inline JSON value: handed over as is.
       return env.data;
     },
   };
@@ -186,7 +221,7 @@ export function readCloudEvent(
 
 export function resolveCloudEvent(
   init: CloudEventInit,
-  defaults: { source?: string; contentType: string },
+  defaults: { source?: string; contentType?: string },
   gen: { now?: () => Date; id?: () => string } = {},
 ): CloudEventMeta {
   const source = init.source ?? defaults.source;
@@ -203,6 +238,9 @@ export function resolveCloudEvent(
       );
     }
   }
+  if (init.datacontenttype === '') {
+    throw new NatsConfigError('CloudEvent datacontenttype must not be empty');
+  }
   const id = init.id ?? (gen.id ?? randomUUID)();
   if (!id) throw new NatsConfigError('CloudEvent id must not be empty');
   const time = init.time ?? (gen.now ?? (() => new Date()))();
@@ -215,9 +253,10 @@ export function resolveCloudEvent(
     type: init.type,
     specversion: '1.0',
     time: time instanceof Date ? time.toISOString() : time,
-    datacontenttype: defaults.contentType,
     extensions: { ...init.extensions },
   };
+  const datacontenttype = init.datacontenttype ?? defaults.contentType;
+  if (datacontenttype !== undefined) meta.datacontenttype = datacontenttype;
   if (init.subject !== undefined) meta.subject = init.subject;
   if (init.dataschema !== undefined) meta.dataschema = init.dataschema;
   return meta;
