@@ -48,7 +48,8 @@
   },
   "files": [
     "dist",
-    "src"
+    "src",
+    "CHANGELOG.md"
   ],
   "publishConfig": {
     "access": "public",
@@ -68,7 +69,7 @@
     "check:pack": "node scripts/check-pack.mjs",
     "test:smoke": "node scripts/smoke.mjs",
     "changeset": "changeset",
-    "version-packages": "changeset version",
+    "version-packages": "changeset version && npm install --package-lock-only --ignore-scripts",
     "release": "changeset publish",
     "check:pkg": "publint && attw --pack . --profile esm-only",
     "prepublishOnly": "npm run build && npm run check:pack && npm run check:pkg && npm run typecheck && npm test"
