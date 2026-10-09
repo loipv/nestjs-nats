@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "isolatedModules": true,
+    "declaration": true,
+    "sourceMap": true,
+    "outDir": "dist",
+    "skipLibCheck": true
+  },
+  "include": ["src", "test"]
+}
