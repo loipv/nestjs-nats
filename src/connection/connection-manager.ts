@@ -11,7 +11,7 @@ import { NatsConfigError, NatsConnectionError } from '../errors/errors.js';
 import { createNatsLogger } from '../module/logger.js';
 import type { NatsModuleOptions } from '../module/options.js';
 import { DEFAULT_CONNECTION } from '../module/tokens.js';
-import { redactServers } from './redact.js';
+import { redactServers, redactText } from './redact.js';
 
 export type NatsConnectionState = 'connected' | 'reconnecting' | 'draining' | 'closed';
 
@@ -60,7 +60,8 @@ export class NatsConnectionManager {
       try {
         nc = await connect(options.connection);
       } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
+        const { pass, token } = options.connection;
+        const reason = redactText(err instanceof Error ? err.message : String(err), [pass, token]);
         throw new NatsConnectionError(
           `NATS connection "${name}" failed to connect to ${servers.join(', ')}: ${reason}`,
           { connection: name, servers, cause: err },
@@ -135,7 +136,22 @@ export class NatsConnectionManager {
 
   async closeAll(): Promise<void> {
     const open = [...this.entries.values()].filter(({ entry }) => !entry.nc.isClosed());
-    await Promise.all(open.map(({ entry }) => entry.nc.drain()));
+    const results = await Promise.allSettled(
+      open.map(async ({ entry }) => {
+        if (!entry.nc.isDraining()) return entry.nc.drain();
+        const err = await entry.nc.closed();
+        if (err instanceof Error) throw err;
+      }),
+    );
+    results.forEach((result, i) => {
+      if (result.status === 'rejected') {
+        const { entry } = open[i];
+        const reason = redactText(
+          result.reason instanceof Error ? result.reason.message : String(result.reason),
+        );
+        entry.logger.error(`NATS connection "${entry.name}" failed to close cleanly: ${reason}`);
+      }
+    });
   }
 
   private getInternal(name: string): InternalEntry {
