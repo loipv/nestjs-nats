@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm run check:pkg
+      - run: npm run check:pack
+      - run: npm run docs:check
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+        nest: [11, 12]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - name: Install Nest 11
+        if: matrix.nest == 11
+        run: npm install --no-save @nestjs/common@^11 @nestjs/core@^11 @nestjs/testing@^11 @nestjs/terminus@^11
+      - name: Print resolved Nest version
+        run: |
+          for p in core common testing terminus; do
+            node -p "const v = JSON.parse(require('node:fs').readFileSync('node_modules/@nestjs/$p/package.json', 'utf8')).version; '@nestjs/$p@' + v"
+          done
+      - run: npm test
+      - run: npm run test:int
+
+  smoke:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ['22.12', 24]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run test:smoke
+
+  example:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run example:check
