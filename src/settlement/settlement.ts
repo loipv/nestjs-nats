@@ -21,8 +21,6 @@ export interface SettlementConfig {
   entry: ConnectionEntry;
   retry: RetryPolicy | false;
   dlq: DlqPolicy | false;
-  /** Interval of `working()` calls on JetStream messages until they are settled. */
-  heartbeatMs?: number;
   /** Source of randomness for the backoff jitter (tests). */
   random?: () => number;
 }
@@ -70,28 +68,12 @@ function settle(d: Delivery, msg: InboundMessage, op: SettleOp, fn: () => void):
  * them; rethrows for deliveries expecting a reply. A batch is settled message by message,
  * each with its own attempt: the messages recorded in `FAILURES` fail with their own
  * error; when the handler throws, every other message fails with its error. Messages left out of the delivery
- * (`SKIPPED`) are not settled here. JetStream messages are heartbeated until settlement
- * completes. Handler errors are already logged by Nest: this logs one line per settlement
+ * (`SKIPPED`) are not settled here. (The JetStream adapter heartbeats its messages until
+ * this completes.) Handler errors are already logged by Nest: this logs one line per settlement
  * decision, without the stack.
  */
 export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
-  const { entry, retry, dlq, heartbeatMs, random } = cfg;
-
-  const startHeartbeat = (d: Delivery): (() => void) => {
-    if (!heartbeatMs || heartbeatMs <= 0 || d.handler.kind !== 'consume') return () => {};
-    const targets = jsTargets(d);
-    const timer = setInterval(() => {
-      for (const { msg, ctx } of targets) {
-        if (ctx.settled) continue;
-        try {
-          ctx.working();
-        } catch (err) {
-          d.logger.error(`Failed to extend ack deadline for ${label(d, msg)}`, errorTrace(err));
-        }
-      }
-    }, heartbeatMs);
-    return () => clearInterval(timer);
-  };
+  const { entry, retry, dlq, random } = cfg;
 
   const retryLine = (d: Delivery, msg: InboundMessage, delayMs: number, err: unknown): string =>
     `${label(d, msg)} failed (attempt ${msg.attempt}/${retry ? retry.maxRetries + 1 : 1}), retrying in ${delayMs}ms: ${errorMessage(err)}`;
@@ -219,21 +201,15 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
 
   return {
     async handle(d: Delivery, next: Next): Promise<void> {
-      // Heartbeat until settled: a slow DLQ PubAck must not let the ack deadline lapse.
-      const stopHeartbeat = startHeartbeat(d);
+      let failure: Outcome;
       try {
-        let failure: Outcome;
-        try {
-          await next();
-        } catch (err) {
-          failure = { err };
-        }
-        if (failure && isReplyDelivery(d)) throw failure.err;
-        if (d.handler.kind === 'consume') await settleConsume(d, failure);
-        else await settleSubscribe(d, failure);
-      } finally {
-        stopHeartbeat();
+        await next();
+      } catch (err) {
+        failure = { err };
       }
+      if (failure && isReplyDelivery(d)) throw failure.err;
+      if (d.handler.kind === 'consume') await settleConsume(d, failure);
+      else await settleSubscribe(d, failure);
     },
   };
 }

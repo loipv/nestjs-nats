@@ -312,24 +312,6 @@ describe('batch settlement', () => {
     expect(raws[2]?.ack).toHaveBeenCalledTimes(1);
   });
 
-  it('heartbeats every message of the batch', async () => {
-    vi.useFakeTimers();
-    try {
-      let release!: () => void;
-      const gate = new Promise<void>((resolve) => (release = resolve));
-      const { d, raws } = jsBatch(['1', '2'], () => gate);
-      const s = createSettlement({ entry: fakeEntry(), retry, dlq: false, heartbeatMs: 50 });
-      const run = pipeline(toMw(s))(d);
-      await vi.advanceTimersByTimeAsync(120);
-      expect(raws[0]?.working).toHaveBeenCalledTimes(2);
-      expect(raws[1]?.working).toHaveBeenCalledTimes(2);
-      release();
-      await run;
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
   it('retries failed core messages in process, one by one', async () => {
     const { d, schedule } = coreBatch(['1', '2', '3'], async (_p, ctx) => {
       (ctx as NatsBatchContext).fail(2, new Error('x'));
