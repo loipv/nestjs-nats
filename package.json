@@ -62,6 +62,7 @@
     "test:int": "vitest run --project integration",
     "lint": "biome check .",
     "docs:check": "npm run build && node scripts/check-docs.mjs",
+    "example:check": "npm run build && cd examples/orders && rm -rf node_modules/@loipv && npm install --no-audit --no-fund && npm run typecheck && npm test",
     "check:pack": "node scripts/check-pack.mjs",
     "test:smoke": "node scripts/smoke.mjs",
     "check:pkg": "publint && attw --pack . --profile esm-only",

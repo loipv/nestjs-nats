@@ -1,0 +1,8 @@
+services:
+  nats:
+    image: nats:2.12-alpine
+    # -js enables JetStream, -m 8222 opens the monitoring endpoint.
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
