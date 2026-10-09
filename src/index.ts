@@ -32,7 +32,11 @@ export {
   StreamConfigConflictError,
 } from './errors/errors.js';
 export type { IdempotencyOptions } from './idempotency/idempotency.js';
-export type { ClaimResult, IdempotencyStore } from './idempotency/store.js';
+export type {
+  ClaimResult,
+  IdempotencyStore,
+  InMemoryIdempotencyStoreOptions,
+} from './idempotency/store.js';
 export { InMemoryIdempotencyStore } from './idempotency/store.js';
 export type {
   JetStreamPublishOptions,
