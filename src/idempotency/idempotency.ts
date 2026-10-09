@@ -79,17 +79,19 @@ const label = (d: Delivery, msg: InboundMessage): string =>
 /**
  * Builds the idempotency middleware of a handler, or `undefined` when it did not enable
  * it. The store and TTL default to the connection's; the store defaults to one in-memory
- * store shared by the connection's handlers.
+ * store shared by the connection's handlers. `store` (called only when idempotency is
+ * enabled) replaces the connection's store.
  */
 export function resolveIdempotency(
   entry: ConnectionEntry,
   option: boolean | IdempotencyOptions | undefined,
   retry: RetryPolicy | false,
+  store: () => IdempotencyStore = () => entry.idempotencyStore(),
 ): InboundMiddleware | undefined {
   if (!option) return undefined;
   const opts = option === true ? {} : option;
   return createIdempotency({
-    store: entry.idempotencyStore(),
+    store: store(),
     ttl: opts.ttl ?? entry.options.idempotency?.ttl ?? DEFAULT_IDEMPOTENCY_TTL,
     ...(opts.keyExtractor ? { keyExtractor: opts.keyExtractor } : {}),
     inProgressNakMs: retry ? retry.initialDelay : DEFAULT_IN_PROGRESS_NAK_MS,

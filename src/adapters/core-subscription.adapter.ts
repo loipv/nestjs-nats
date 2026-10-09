@@ -1,28 +1,22 @@
 import { ServiceErrorCodeHeader, ServiceErrorHeader } from '@nats-io/services';
 import { headers, type Msg, type Subscription } from '@nats-io/transport-node';
 import { type ResolvedBatchOptions, resolveBatchOptions } from '../batch/collector.js';
-import { type Codec, encodePayload, jsonCodec } from '../codec/codec.js';
+import { type Codec, encodePayload } from '../codec/codec.js';
 import type { ConnectionEntry } from '../connection/connection-manager.js';
 import { NatsContext } from '../context/nats-context.js';
 import type { HandlerDefinition } from '../discovery/handler-explorer.js';
-import { resolveIdempotency } from '../idempotency/idempotency.js';
 import {
-  buildInboundPipeline,
   createDelivery,
   type DeliveryPart,
   type HandlerInfo,
   type InboundMessage,
   type InternalDelivery,
-  toHandlerInfo,
 } from '../pipeline/delivery.js';
-import { invokeHandler } from '../pipeline/invoker.js';
 import { type ServiceError, toServiceError } from '../pipeline/reply.js';
-import { resolveDlqPolicy } from '../settlement/dlq.js';
-import { resolveRetryPolicy } from '../settlement/retry.js';
-import { createSettlement } from '../settlement/settlement.js';
 import { errorMessage, errorTrace } from '../util/errors.js';
 import type { ForceStopResult, HandlerAdapter } from './adapter.js';
 import { Dispatcher, type DispatchItem } from './dispatcher.js';
+import { createHandlerPipeline, defaultPipelineDeps } from './handler-pipeline.js';
 
 type SubscribeDefinition = HandlerDefinition & { kind: 'subscribe' };
 
@@ -43,22 +37,10 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
     private readonly def: SubscribeDefinition,
     private readonly entry: ConnectionEntry,
   ) {
-    this.codec = def.options.codec ?? entry.options.codec ?? jsonCodec();
-    this.info = toHandlerInfo(def);
-    const retry = resolveRetryPolicy(entry.options.retry, def.options.retry);
-    const settlement = createSettlement({
-      entry,
-      retry,
-      dlq: resolveDlqPolicy('subscribe', entry.options.dlq, def.options.dlq),
-    });
-    const idempotency = resolveIdempotency(entry, def.options.idempotency, retry);
-    this.run = buildInboundPipeline(
-      {
-        plugins: entry.options.plugins ?? [],
-        core: idempotency ? [settlement, idempotency] : [settlement],
-      },
-      invokeHandler,
-    );
+    const pipeline = createHandlerPipeline(def, entry, defaultPipelineDeps);
+    this.codec = pipeline.codec;
+    this.info = pipeline.info;
+    this.run = pipeline.run;
     this.label = `${def.className}.${def.methodName} on "${def.subject}"`;
     this.batch = resolveBatchOptions(def.options.batch);
     this.dispatcher = new Dispatcher<Msg>({
