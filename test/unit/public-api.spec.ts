@@ -69,6 +69,29 @@ it('does not pull optional peers', async () => {
   expect(src).not.toMatch(/@opentelemetry|@nestjs\/terminus/);
 });
 
+it('does not pull optional peers or subpath entries, even transitively', async () => {
+  const srcRoot = new URL('../../src/', import.meta.url);
+  const seen = new Set<string>();
+  const pending = ['index.ts'];
+  const offenders: string[] = [];
+  for (let file = pending.pop(); file !== undefined; file = pending.pop()) {
+    if (seen.has(file)) continue;
+    seen.add(file);
+    if (file.startsWith('otel/')) offenders.push(file);
+    const code = await readFile(new URL(file, srcRoot), 'utf8');
+    for (const [, spec] of code.matchAll(/(?:from|import)\s*\(?\s*'([^']+)'/g)) {
+      if (!spec) continue;
+      if (/^@opentelemetry\/|^@nestjs\/terminus/.test(spec)) offenders.push(`${file} -> ${spec}`);
+      if (spec.startsWith('.')) {
+        const target = new URL(spec.replace(/\.js$/, '.ts'), new URL(file, srcRoot));
+        pending.push(target.pathname.slice(srcRoot.pathname.length));
+      }
+    }
+  }
+  expect(seen.size).toBeGreaterThan(20);
+  expect(offenders).toEqual([]);
+});
+
 it('exposes a narrow handler description on Delivery', () => {
   expectTypeOf<Delivery['handler']>().toEqualTypeOf<HandlerInfo>();
   type Common = {
