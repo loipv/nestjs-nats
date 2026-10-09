@@ -11,7 +11,7 @@ export async function invokeHandler(d: Delivery): Promise<void> {
   const msg = d.messages[0];
   const payload = msg ? decodePayload(d.codec, msg.data, msg.headers) : undefined;
   const result = await d.handler.invoke(payload, d.context);
-  d.result = isObservable(result)
-    ? await lastValueFrom(result, { defaultValue: undefined })
-    : result;
+  // Nest's ExternalContextCreator already unwraps observables (an empty one rejects with
+  // EmptyError there); this only covers invokers that hand back an Observable directly.
+  d.result = isObservable(result) ? await lastValueFrom(result) : result;
 }

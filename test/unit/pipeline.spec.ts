@@ -144,9 +144,9 @@ describe('invokeHandler', () => {
     expect(d.result).toBe(5);
   });
 
-  it('treats an empty observable as undefined', async () => {
-    const d = delivery({ invoke: () => EMPTY });
-    await invokeHandler(d);
-    expect(d.result).toBeUndefined();
+  it('rejects for an empty observable returned by a raw invoker', async () => {
+    // Real handlers go through Nest's ExternalContextCreator, which unwraps observables
+    // itself; this only pins the invoker's own fallback for a bare invoke function.
+    await expect(invokeHandler(delivery({ invoke: () => EMPTY }))).rejects.toThrow();
   });
 });

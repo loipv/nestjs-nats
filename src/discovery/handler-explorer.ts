@@ -54,13 +54,18 @@ export class HandlerExplorer {
   /**
    * Returns every handler of every provider/controller. Request-scoped and transient
    * providers are included (with their current instance) so validation can reject them.
+   * `useExisting` aliases are skipped and an instance reachable through several wrappers
+   * (other modules, other tokens) is explored once.
    */
   explore(): HandlerDefinition[] {
     const wrappers = [...this.discovery.getProviders(), ...this.discovery.getControllers()];
+    const seen = new Set<object>();
     const out: HandlerDefinition[] = [];
     for (const wrapper of wrappers) {
       const { instance, metatype } = wrapper;
-      if (!instance || typeof instance !== 'object' || !metatype) continue;
+      if (wrapper.isAlias || !instance || typeof instance !== 'object' || !metatype) continue;
+      if (seen.has(instance)) continue;
+      seen.add(instance);
       const service: NatsServiceOptions | undefined = Reflect.getMetadata(
         NATS_SERVICE_METADATA,
         instance.constructor,
