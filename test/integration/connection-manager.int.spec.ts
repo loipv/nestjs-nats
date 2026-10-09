@@ -124,3 +124,48 @@ describe('NatsConnectionManager', () => {
     await mgr.closeAll();
   });
 });
+
+describe('NatsConnectionManager close hooks', () => {
+  let srv: NatsTestServer;
+
+  beforeAll(async () => {
+    srv = await startNats();
+  });
+
+  afterAll(async () => {
+    await srv.stop();
+  });
+
+  it('runs close hooks before draining, logs failures and honours unregistering', async () => {
+    const lines: string[] = [];
+    const logger = {
+      log() {},
+      warn() {},
+      debug() {},
+      verbose() {},
+      error: (m: string) => lines.push(m),
+    };
+    const m = new NatsConnectionManager();
+    const e = await m.connect('h', { connection: { servers: srv.url }, logger });
+    const seen: string[] = [];
+    e.onClose(async () => {
+      seen.push(`ok:${e.nc.isDraining()}`);
+    });
+    e.onClose(async () => {
+      throw new Error('hook failed');
+    });
+    e.onClose(async () => {
+      seen.push('late');
+    });
+    const off = e.onClose(async () => {
+      seen.push('removed');
+    });
+    off();
+    await expect(m.closeAll()).resolves.toBeUndefined();
+    expect(seen).toEqual(['ok:false', 'late']);
+    expect(lines.some((l) => l.includes('close hook failed') && l.includes('hook failed'))).toBe(
+      true,
+    );
+    expect(e.nc.isClosed()).toBe(true);
+  });
+});
