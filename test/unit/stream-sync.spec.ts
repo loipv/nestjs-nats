@@ -68,4 +68,88 @@ describe('stream-sync', () => {
 
   it('keeps user max_deliver', () =>
     expect(withConsumerDefaults({ max_deliver: 3 }).max_deliver).toBe(3));
+
+  it('ignores server-injected _nats. metadata keys', () =>
+    expect(
+      diffConfig(
+        {
+          metadata: {
+            '_nats.level': '3',
+            '_nats.req.level': '0',
+            '_nats.ver': '2.12.15',
+            team: 'x',
+          },
+        },
+        { metadata: { team: 'x' } },
+        STREAM_IMMUTABLE_FIELDS,
+      ),
+    ).toEqual([]));
+
+  it('reports metadata drift without the _nats. keys', () =>
+    expect(
+      diffConfig(
+        { metadata: { '_nats.ver': '2.12.15', team: 'x' } },
+        { metadata: { team: 'y' } },
+        STREAM_IMMUTABLE_FIELDS,
+      ),
+    ).toEqual([
+      { field: 'metadata', current: { team: 'x' }, declared: { team: 'y' }, immutable: false },
+    ]));
+
+  it('treats a declared empty metadata as equal to server-only metadata', () =>
+    expect(
+      diffConfig(
+        { metadata: { '_nats.ver': '2.12.15' } },
+        { metadata: {} },
+        STREAM_IMMUTABLE_FIELDS,
+      ),
+    ).toEqual([]));
+
+  it.each([
+    ['false', false],
+    ['0', 0],
+    ["''", ''],
+    ['[]', []],
+    ['{}', {}],
+  ])('treats an absent current value as equal to declared %s', (_, value) =>
+    expect(diffConfig({}, { field: value }, CONSUMER_IMMUTABLE_FIELDS)).toEqual([]),
+  );
+
+  it('still flags a declared true against an absent current value', () =>
+    expect(diffConfig({}, { headers_only: true }, CONSUMER_IMMUTABLE_FIELDS)).toEqual([
+      { field: 'headers_only', current: undefined, declared: true, immutable: false },
+    ]));
+
+  it('compares nested objects as a subset of current, recursively', () => {
+    expect(
+      diffConfig(
+        { placement: { cluster: 'c', tags: ['a'], extra: 1 }, consumer_limits: {} },
+        { placement: { cluster: 'c' }, consumer_limits: {} },
+        STREAM_IMMUTABLE_FIELDS,
+      ),
+    ).toEqual([]);
+    expect(
+      diffConfig(
+        { republish: { src: 'a', dest: 'b' } },
+        { republish: { src: 'a', dest: 'b', headers_only: false } },
+        STREAM_IMMUTABLE_FIELDS,
+      ),
+    ).toEqual([]);
+    expect(
+      diffConfig(
+        { placement: { cluster: 'c' } },
+        { placement: { cluster: 'd' } },
+        STREAM_IMMUTABLE_FIELDS,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('compares objects inside arrays as subsets', () =>
+    expect(
+      diffConfig(
+        { sources: [{ name: 'A', opt_start_seq: 0, filter_subject: 'x' }] },
+        { sources: [{ name: 'A' }] },
+        STREAM_IMMUTABLE_FIELDS,
+      ),
+    ).toEqual([]));
 });
