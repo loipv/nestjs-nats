@@ -37,7 +37,8 @@ type HandlerSpec =
       kind: 'service-endpoint';
       endpoint: string;
       options: ServiceEndpointOptions;
-      service: NatsServiceOptions;
+      /** `undefined` when the class lacks `@NatsService`; `validateHandlers` rejects it. */
+      service: NatsServiceOptions | undefined;
     };
 
 export type HandlerDefinition = HandlerBase & HandlerSpec;
@@ -53,7 +54,8 @@ export class HandlerExplorer {
 
   /**
    * Returns every handler of every provider/controller. Request-scoped and transient
-   * providers are included (with their current instance) so validation can reject them.
+   * providers, and `@ServiceEndpoint` methods of classes without `@NatsService`, are
+   * included (with their current instance) so validation can reject them.
    * `useExisting` aliases are skipped and an instance reachable through several wrappers
    * (other modules, other tokens) is explored once.
    */
@@ -95,7 +97,7 @@ export class HandlerExplorer {
     if (consume) specs.push({ kind: 'consume', options: consume.options });
     const endpoint: { name: string; options?: ServiceEndpointOptions } | undefined =
       Reflect.getMetadata(NATS_ENDPOINT_METADATA, method);
-    if (endpoint && service) {
+    if (endpoint) {
       specs.push({
         kind: 'service-endpoint',
         endpoint: endpoint.name,
