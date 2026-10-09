@@ -8,6 +8,7 @@ import type {
   HandlerInfo,
   IdempotencyOptions,
   IdempotencyStore,
+  InMemoryIdempotencyStoreOptions,
   JetStreamPublishOptions,
   NatsBatchContext,
   NatsContext,
@@ -97,6 +98,7 @@ it('exports the reliability types', () => {
   expectTypeOf<IdempotencyOptions>().toHaveProperty('ttl');
   expectTypeOf<IdempotencyStore>().toHaveProperty('claim');
   expectTypeOf<ClaimResult>().not.toBeAny();
+  expectTypeOf<InMemoryIdempotencyStoreOptions>().toHaveProperty('maxKeys');
   expectTypeOf<BatchOptions>().toHaveProperty('maxSize');
   expectTypeOf<JetStreamPublishOptions>().not.toBeAny();
   expectTypeOf<PublishManyResult>().toHaveProperty('ok');

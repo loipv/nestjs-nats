@@ -362,7 +362,7 @@ NatsModule.forFeature({ connection: 'default', streams: [{ name: 'PAYMENTS', sub
 
 A failed message is retried with exponential backoff. When retries run out, or the error is not worth retrying, the message can be published to a dead-letter queue (DLQ). Retry is **on** by default. The DLQ is **off**.
 
-Set `retry` and `dlq` on `NatsModule.forRoot()` for every handler of a connection, or on a single `@Subscribe` / `@Consume`. Options of a handler are merged over those of the module, a handler's `retry: false` turns retries off for it, and a handler's `retry` object turns them back on when the module disabled them. Invalid values fail startup with a `NatsConfigError`.
+Set `retry` and `dlq` on `NatsModule.forRoot()` for every handler of a connection, or on a single `@Subscribe` / `@Consume`. Options of a handler are merged over those of the module, a handler's `retry: false` turns retries off for it, and a handler's `retry` object turns them back on when the module disabled them. Invalid values fail startup with a `NatsConfigError`. The examples in this section and the next ones use placeholder types and services (`OrderDto`, `PaymentService`, ...) that you replace with your own.
 
 ```ts
 import { Consume, NatsModule, NonRetryableError, Payload, defaultIsRetryable } from '@loipv/nestjs-nats';
@@ -400,11 +400,11 @@ class BillingHandlers {
 | `maxRetries` | `5` | Redeliveries after the first attempt, so a message is delivered at most `maxRetries + 1` times |
 | `initialDelay` | `1000` | Delay in ms before the first redelivery |
 | `factor` | `2` | Multiplier of the delay for each further redelivery (`>= 1`) |
-| `maxDelay` | `60000` | Upper bound of the delay in ms |
+| `maxDelay` | `60000` | Upper bound of the delay in ms, before jitter. Must be `>= initialDelay` |
 | `jitter` | `0.2` | Random spread of each delay: `0.2` means plus or minus 20 % (between `0` and `1`) |
 | `isRetryable` | `defaultIsRetryable` | `(err) => boolean`. Errors that return `false` are not retried |
 
-The delay before redelivery `n` is `min(maxDelay, initialDelay * factor^(n - 1))`, with the jitter applied. `defaultIsRetryable` returns `false` for `NatsDecodeError`, `NonRetryableError` and an `HttpException` with a 4xx status, and `true` for everything else.
+The delay before redelivery `n` is `min(maxDelay, initialDelay * factor^(n - 1))`, with the jitter applied after the cap, so a delay can exceed `maxDelay` by up to `jitter` times 100 %. `defaultIsRetryable` returns `false` for `NatsDecodeError`, `NonRetryableError` and an `HttpException` with a 4xx status, and `true` for everything else.
 
 ### What happens to a failed message
 
@@ -571,7 +571,7 @@ class AnalyticsHandlers {
 
 - **Parameters.** `@Payload()` is the array of decoded payloads. `@Ctx()` is a `NatsBatchContext` whose `messages[i]` is the context of `items[i]`, a `NatsJetStreamContext` for `@Consume`. `@Headers()`, `@Subject()` and `@Msg()` are arrays too, aligned with the payloads, and `@Payload('id')` maps the property over the items.
 - **Partial failure.** `ctx.fail(target, error)` marks one message as failed, where `target` is its index in `items` or its raw message. You can also return `{ failed: [{ msg, error }] }`, where `msg` is an index or a raw message. A failed message goes through the usual retry and DLQ rules on its own, and the others are acknowledged. If the handler throws, every message of the batch fails.
-- **Undecodable messages.** A message that cannot be decoded is left out of `items`. It is terminated, or dead-lettered if a DLQ is configured, and the rest of the batch is still handled.
+- **Undecodable messages.** A message that cannot be decoded is left out of `items`. It is not retried: for `@Consume` it is dead-lettered if a DLQ is configured, otherwise terminated; for `@Subscribe` it is dead-lettered if a DLQ is configured, otherwise logged and dropped. The rest of the batch is still handled.
 - **Idempotency and retries** apply to each message of a batch separately.
 - **Concurrency.** A batch counts as one unit of `concurrency`.
 - **No replies.** A batch never replies, so a request that lands in a `@Subscribe` batch is not answered.
@@ -730,7 +730,7 @@ NatsModule.forRoot({
 
 1. **Stop intake.** Subscriptions and consumers stop receiving messages. A batch that is being collected is handed to its handler.
 2. **Wait for in-flight handlers.** Phases 1 and 2 together wait for up to `drainTimeout`.
-3. **Force stop.** JetStream messages that are still unsettled (handlers that did not finish, and messages received but never started) are `nak`'d so the server redelivers them. Pending in-process retries are cancelled, and collected core messages that never started are dropped. One warning per connection says how many were forced.
+3. **Force stop.** JetStream messages that are being processed, collected into a batch, or waiting for a batch slot are `nak`'d so the server redelivers them. Pending in-process retries are cancelled, and collected core messages that never started are dropped. When something was forced, a warning per connection summarises the `nak`'d messages and cancelled retries, and a core handler may log a further warning about the dropped messages.
 4. **Close connections.** Each connection runs its close hooks (open `batcher()`s flush here), then drains. If this takes longer than `drainTimeout`, the connection is closed without draining and a warning is logged. This also happens when the server is unreachable.
 5. **Close idempotency stores.** The `close()` of each store is called, within the same bound.
 
@@ -748,6 +748,7 @@ These are tracked for upcoming releases:
 - **Retries can reorder messages**, even with `concurrency: 1`: a failed message is redelivered after the delay, behind messages that arrived meanwhile.
 - **DLQ publishing bypasses outbound plugins.** Dead letters are published directly, without going through `plugins[].outbound`.
 - **Core batches never reply.** A message with a reply subject that arrives in a `@Subscribe` batch is never answered, so its requester times out.
+- **Messages at shutdown.** Messages the server delivers while shutdown is stopping a consumer, and messages queued behind a handler that never finishes, are redelivered only after the consumer's `ack_wait` (30 s by default).
 - **Duplicate error logs.** Handler errors that are not `HttpException`s are logged by Nest's `ExceptionsHandler` as well as by this library. `logger: false` silences only this library's logs.
 - **Publish order.** If an outbound plugin awaits something, consecutive `publish()` calls are not guaranteed to leave in call order.
 - **Undetected removals.** Stream and consumer sync compares only declared fields, so a field you remove from a declaration is not detected as drift.
