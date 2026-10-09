@@ -78,10 +78,81 @@ describe('validateHandlers', () => {
     ['maxDelay < initialDelay', { initialDelay: 10, maxDelay: 5 }],
     ['jitter > 1', { jitter: 2 }],
     ['negative jitter', { jitter: -0.1 }],
+    ['infinite initialDelay', { initialDelay: Number.POSITIVE_INFINITY }],
+    ['infinite maxDelay', { maxDelay: Number.POSITIVE_INFINITY }],
+    ['maxDelay above the timer limit', { maxDelay: 2 ** 31 }],
+    ['initialDelay above the timer limit', { initialDelay: 2 ** 31, maxDelay: 2 ** 31 }],
   ])('rejects retry with %s', (_, retry) => {
     expect(() => validateHandlers([def({ options: { retry } })], mgr)).toThrow(NatsConfigError);
     expect(() => validateHandlers([consumeDef('S', 'd', { options: { retry } })], mgr)).toThrow(
       NatsConfigError,
+    );
+  });
+
+  it('accepts delays at the timer limit', () =>
+    expect(() =>
+      validateHandlers(
+        [def({ options: { retry: { initialDelay: 2 ** 31 - 1, maxDelay: 2 ** 31 - 1 } } })],
+        mgr,
+      ),
+    ).not.toThrow());
+
+  it('names Class.method and the timer limit in the delay error', () =>
+    expect(() =>
+      validateHandlers(
+        [
+          def({
+            className: 'Orders',
+            methodName: 'onX',
+            options: { retry: { maxDelay: 2 ** 31 } },
+          }),
+        ],
+        mgr,
+      ),
+    ).toThrow(/Orders\.onX.*retry\.maxDelay.*2147483647/));
+
+  describe('dlq subject', () => {
+    const withModuleDlq = (dlq: unknown) =>
+      ({ has: () => true, get: () => ({ options: { dlq } }) }) as unknown as NatsConnectionManager;
+
+    it.each([
+      ['an empty handler subject', mgr, { subject: '' }],
+      ['a blank handler subject', mgr, { subject: '  ' }],
+      ['a non-string, non-function subject', mgr, { subject: 42 }],
+      ['an empty module subject', withModuleDlq({ subject: '' }), true],
+      ['an empty module subject, handler unset', withModuleDlq({ subject: '' }), undefined],
+    ])('rejects %s', (_, m, dlq) => {
+      expect(() => validateHandlers([def({ options: { dlq } })], m)).toThrow(NatsConfigError);
+      expect(() => validateHandlers([consumeDef('S', 'd', { options: { dlq } })], m)).toThrow(
+        NatsConfigError,
+      );
+    });
+
+    it('names Class.method in the error', () =>
+      expect(() =>
+        validateHandlers(
+          [def({ className: 'Orders', methodName: 'onX', options: { dlq: { subject: '' } } })],
+          mgr,
+        ),
+      ).toThrow(/Orders\.onX.*dlq\.subject/));
+
+    it.each([
+      ['a static subject', mgr, { subject: 'dlq.x' }],
+      ['a function subject', mgr, { subject: () => 'dlq.x' }],
+      ['the default subject', mgr, true],
+      [
+        'an empty module subject the handler overrides',
+        withModuleDlq({ subject: '' }),
+        { subject: 'ok' },
+      ],
+      [
+        'an empty module subject on a handler with dlq: false',
+        withModuleDlq({ subject: '' }),
+        false,
+      ],
+      ['an empty module subject when DLQ is off', withModuleDlq(false), undefined],
+    ])('accepts %s', (_, m, dlq) =>
+      expect(() => validateHandlers([def({ options: { dlq } })], m)).not.toThrow(),
     );
   });
 

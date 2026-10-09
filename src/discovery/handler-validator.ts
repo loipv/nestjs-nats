@@ -2,6 +2,7 @@ import { MAX_TIMER_DELAY } from '../batch/collector.js';
 import type { NatsConnectionManager } from '../connection/connection-manager.js';
 import { NatsConfigError } from '../errors/errors.js';
 import { DEFAULT_IDEMPOTENCY_TTL } from '../idempotency/idempotency.js';
+import type { DlqOptions } from '../settlement/dlq.js';
 import { resolveRetryPolicy } from '../settlement/retry.js';
 import type { HandlerDefinition } from './handler-explorer.js';
 
@@ -31,6 +32,7 @@ export function validateHandlers(defs: HandlerDefinition[], mgr: NatsConnectionM
     }
     if (def.kind === 'subscribe' || def.kind === 'consume') {
       validateRetry(def, mgr);
+      validateDlq(def, mgr);
       validateIdempotency(def, mgr);
       validateBatch(def);
       const { concurrency } = def.options;
@@ -69,13 +71,43 @@ function validateRetry(def: HandlerDefinition, mgr: NatsConnectionManager): void
   if (!Number.isInteger(maxRetries) || maxRetries < 0) {
     throw invalidRetry(def, 'maxRetries', maxRetries, 'an integer >= 0');
   }
-  if (!(initialDelay >= 0)) throw invalidRetry(def, 'initialDelay', initialDelay, 'a number >= 0');
+  if (!(initialDelay >= 0 && initialDelay <= MAX_TIMER_DELAY)) {
+    throw invalidRetry(def, 'initialDelay', initialDelay, `a number in [0, ${MAX_TIMER_DELAY}]`);
+  }
   if (!(factor >= 1)) throw invalidRetry(def, 'factor', factor, 'a number >= 1');
-  if (!(maxDelay >= initialDelay)) {
-    throw invalidRetry(def, 'maxDelay', maxDelay, `a number >= initialDelay (${initialDelay})`);
+  if (!(maxDelay >= initialDelay && maxDelay <= MAX_TIMER_DELAY)) {
+    throw invalidRetry(
+      def,
+      'maxDelay',
+      maxDelay,
+      `a number in [initialDelay (${initialDelay}), ${MAX_TIMER_DELAY}]`,
+    );
   }
   if (!(jitter >= 0 && jitter <= 1))
     throw invalidRetry(def, 'jitter', jitter, 'a number in [0, 1]');
+}
+
+/**
+ * Validates the DLQ subject a handler resolves to (its own options over the module's,
+ * as `resolveDlqPolicy` merges them): a non-empty string or a function.
+ */
+function validateDlq(def: HandlerDefinition, mgr: NatsConnectionManager): void {
+  if (def.kind === 'service-endpoint') return;
+  const handler = def.options.dlq;
+  const module = mgr.get(def.connection).options.dlq;
+  if (handler === false) return;
+  if (!(handler !== undefined ? handler : module)) return;
+  const opts: DlqOptions = {
+    ...(typeof module === 'object' ? module : {}),
+    ...(typeof handler === 'object' ? handler : {}),
+  };
+  const { subject } = opts;
+  if (subject === undefined || typeof subject === 'function') return;
+  if (typeof subject !== 'string' || subject.trim() === '') {
+    throw new NatsConfigError(
+      `NATS handler ${label(def)} has invalid dlq.subject ${JSON.stringify(subject)}; expected a non-empty string or a function`,
+    );
+  }
 }
 
 /** Validates the TTL an idempotent handler resolves to (its own, else the module's). */

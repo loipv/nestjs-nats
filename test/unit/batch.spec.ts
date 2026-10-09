@@ -193,6 +193,40 @@ describe('batch invoker', () => {
     await expect(invokeHandler(d)).rejects.toThrow(/5/);
   });
 
+  it('logs and skips invalid entries of the returned { failed }, keeping the valid ones', async () => {
+    const foreign = jsRaw('9');
+    const { d, raws, log } = jsBatch(['1', '2', '3'], async () => ({
+      failed: [
+        { msg: 7, error: new Error('bad index') },
+        { msg: foreign, error: new Error('foreign') },
+        null,
+        { msg: raws[2], error: new Error('valid') },
+      ],
+    }));
+    await expect(invokeHandler(d)).resolves.toBeUndefined();
+    const failures = d[FAILURES];
+    expect([...failures.keys()]).toEqual([d.messages[2]]);
+    expect((failures.get(d.messages[2] as never) as Error).message).toBe('valid');
+    expect(log.error).toHaveBeenCalledTimes(3);
+    for (const call of log.error.mock.calls) {
+      expect(call[0]).toMatch(/H\.on returned an invalid entry in \{ failed \}/);
+    }
+    expect(log.error.mock.calls[0]?.[0]).toMatch(/Cannot fail message 7 of a batch of 3/);
+  });
+
+  it('settles the valid messages of a batch whose { failed } has an invalid entry', async () => {
+    const { d, raws } = jsBatch(['1', '2'], async () => ({
+      failed: [
+        { msg: 5, error: new Error('bad') },
+        { msg: 1, error: new Error('two fails') },
+      ],
+    }));
+    await pipeline(toMw(settlement()))(d);
+    expect(raws[0]?.ack).toHaveBeenCalledTimes(1);
+    expect(raws[1]?.nak).toHaveBeenCalledExactlyOnceWith(100);
+    expect(raws[1]?.ack).not.toHaveBeenCalled();
+  });
+
   it('never stores a reply result', async () => {
     const { d } = jsBatch(['1'], () => Promise.resolve('reply'));
     await invokeHandler(d);

@@ -158,6 +158,20 @@ describe('createSettlement — consume', () => {
     expect(raw.term).toHaveBeenCalledWith('poison');
   });
 
+  it('bounds the term reason: CR/LF stripped, at most 256 chars', async () => {
+    const { entry } = fakeEntry();
+    const { d, raw } = consumeDelivery(1);
+    const long = `line1\r\nline2\n${'x'.repeat(1000)}`;
+    await createSettlement({ entry, retry, dlq: false }).handle(
+      d,
+      nextWith(new NonRetryableError(long)),
+    );
+    const reason = raw.term.mock.calls[0]?.[0] as string;
+    expect(reason).toHaveLength(256);
+    expect(reason).not.toMatch(/[\r\n]/);
+    expect(reason.startsWith('line1 line2 xxx')).toBe(true);
+  });
+
   it('defaults to auto ack when ack is not set', async () => {
     const { entry } = fakeEntry();
     const { d, raw } = consumeDelivery(1, undefined);

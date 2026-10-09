@@ -4,6 +4,7 @@ import { isObservable, lastValueFrom } from 'rxjs';
 import { decodePayload } from '../codec/codec.js';
 import { NatsBatchContext } from '../context/nats-batch-context.js';
 import type { NatsContext } from '../context/nats-context.js';
+import { errorMessage } from '../util/errors.js';
 import { FAILURES, HANDLER_DEFINITION, type InternalDelivery, SKIPPED } from './delivery.js';
 
 /** What a batch handler may return to report the messages that failed. */
@@ -43,7 +44,9 @@ export async function invokeHandler(d: InternalDelivery): Promise<void> {
 /**
  * Invokes a batch handler with the decoded payloads of the messages that are not skipped.
  * Undecodable messages are left out and recorded as failures; so are the ones the handler
- * fails through `ctx.fail()` or returns as `{ failed }`. A batch never has a result.
+ * fails through `ctx.fail()` or returns as `{ failed }`. An invalid entry of `{ failed }`
+ * (unknown index, message not in the batch) is logged and skipped; the rest of the batch
+ * is settled normally. A batch never has a result.
  */
 async function invokeBatch(d: InternalDelivery, batch: NatsBatchContext): Promise<void> {
   const items: unknown[] = [];
@@ -66,7 +69,19 @@ async function invokeBatch(d: InternalDelivery, batch: NatsBatchContext): Promis
     onFail: (context, error) => batch.fail(context.raw, error),
   });
   const result = await unwrap(await d[HANDLER_DEFINITION].invoke(items, view));
-  if (isBatchResult(result)) {
-    for (const { msg, error } of result.failed) view.fail(msg, error);
+  if (!isBatchResult(result)) return;
+  const { className, methodName } = d.handler;
+  for (const entry of result.failed as unknown[]) {
+    try {
+      if (typeof entry !== 'object' || entry === null) {
+        throw new TypeError(`expected { msg, error }, got ${String(entry)}`);
+      }
+      const { msg, error } = entry as BatchResult['failed'][number];
+      view.fail(msg, error);
+    } catch (err) {
+      d.logger.error(
+        `${className}.${methodName} returned an invalid entry in { failed }, ignored: ${errorMessage(err)}`,
+      );
+    }
   }
 }

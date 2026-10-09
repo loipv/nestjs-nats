@@ -37,9 +37,17 @@ export function defaultIsRetryable(err: unknown): boolean {
   return true;
 }
 
+/** `opts` without the keys set to `undefined`, so they keep the value merged before. */
+function defined(opts: RetryOptions): RetryOptions {
+  return Object.fromEntries(
+    Object.entries(opts).filter(([, value]) => value !== undefined),
+  ) as RetryOptions;
+}
+
 /**
  * Merges the retry options (defaults, then module, then handler). `false` on the handler
- * disables retries; `false` on the module disables them unless the handler opts in.
+ * disables retries; `false` on the module disables them unless the handler opts in. Keys
+ * set to `undefined` are ignored.
  */
 export function resolveRetryPolicy(
   module?: RetryOptions | false,
@@ -47,7 +55,7 @@ export function resolveRetryPolicy(
 ): RetryPolicy | false {
   if (handler === false) return false;
   if (handler === undefined && module === false) return false;
-  const merged = { ...DEFAULT_RETRY, ...(module || {}), ...(handler ?? {}) };
+  const merged = { ...DEFAULT_RETRY, ...defined(module || {}), ...defined(handler ?? {}) };
   return { ...merged, isRetryable: merged.isRetryable ?? defaultIsRetryable };
 }
 

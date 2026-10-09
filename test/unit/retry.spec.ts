@@ -34,6 +34,23 @@ describe('resolveRetryPolicy', () => {
       initialDelay: 1000,
     });
   });
+  it('ignores keys set to undefined (module and handler)', () => {
+    const policy = resolveRetryPolicy(
+      { maxRetries: undefined, factor: 3, isRetryable: undefined },
+      { maxRetries: 2, initialDelay: undefined, jitter: undefined },
+    );
+    expect(policy).toMatchObject({
+      maxRetries: 2,
+      initialDelay: 1000,
+      factor: 3,
+      maxDelay: 60000,
+      jitter: 0.2,
+    });
+    expect((policy as { isRetryable: unknown }).isRetryable).toBe(defaultIsRetryable);
+    expect(resolveRetryPolicy({ maxRetries: 4 }, { maxRetries: undefined })).toMatchObject({
+      maxRetries: 4,
+    });
+  });
   it('handler overrides module', () =>
     expect(resolveRetryPolicy({ maxRetries: 3, factor: 3 }, { maxRetries: 1 })).toMatchObject({
       maxRetries: 1,
