@@ -1,23 +1,30 @@
 import { readFile } from 'node:fs/promises';
 import { expect, expectTypeOf, it } from 'vitest';
+import * as health from '../../src/health/index.js';
 import type {
   Batcher,
   BatchOptions,
   ClaimResult,
+  CloudEventInit,
+  CloudEventMeta,
   CloudEventRouterOptions,
   Delivery,
   DlqOptions,
   HandlerInfo,
   IdempotencyOptions,
   IdempotencyStore,
+  InboundMessage,
   InMemoryIdempotencyStoreOptions,
   JetStreamPublishOptions,
+  MessageOutcome,
   NatsBatchContext,
   NatsContext,
   PublishManyResult,
   RetryOptions,
 } from '../../src/index.js';
 import * as api from '../../src/index.js';
+import * as otel from '../../src/otel/index.js';
+import * as testing from '../../src/testing/index.js';
 
 it('exports the runtime API', () =>
   expect(Object.keys(api).sort()).toEqual(
@@ -159,6 +166,68 @@ it('exports the reliability types', () => {
   expectTypeOf<CloudEventRouterOptions>().toHaveProperty('unmatched');
 });
 
+it('exports the CloudEvents types', () => {
+  expectTypeOf<CloudEventMeta>().toEqualTypeOf<{
+    id: string;
+    source: string;
+    type: string;
+    specversion: string;
+    time?: string;
+    subject?: string;
+    datacontenttype?: string;
+    dataschema?: string;
+    extensions: Record<string, string>;
+  }>();
+  expectTypeOf<CloudEventInit>().toHaveProperty('type').toEqualTypeOf<string>();
+  expectTypeOf<CloudEventInit['mode']>().toEqualTypeOf<'binary' | 'structured' | undefined>();
+  expectTypeOf<CloudEventRouterOptions['unmatched']>().toEqualTypeOf<
+    'ack' | 'term' | 'dlq' | undefined
+  >();
+  expectTypeOf<CloudEventRouterOptions>().toMatchTypeOf<
+    { subscribe: string } | { consume: { stream: string; durable: string } }
+  >();
+});
+
+it('exports MessageOutcome as the outcome type of Delivery.outcomes', () => {
+  expectTypeOf<Delivery['outcomes']>().toEqualTypeOf<Map<InboundMessage, MessageOutcome>>();
+  expectTypeOf<MessageOutcome['action']>().toEqualTypeOf<
+    'ack' | 'retry' | 'dlq' | 'term' | 'drop' | 'skipped' | 'replied' | 'none'
+  >();
+});
+
+it('exports the subpath entries', () => {
+  expect(Object.keys(otel).sort()).toEqual(['msgHdrsGetter', 'msgHdrsSetter', 'tracing']);
+  expect(Object.keys(health).sort()).toEqual(['NatsHealthIndicator', 'NatsHealthModule']);
+  expect(Object.keys(testing).sort()).toEqual([
+    'NatsTestHarness',
+    'NatsTestingModule',
+    'createMockJetStreamClient',
+    'createMockNatsClient',
+  ]);
+  expectTypeOf<otel.TracingOptions>().toHaveProperty('captureHeaders');
+  expectTypeOf<health.NatsHealthCheckOptions>().toHaveProperty('rttTimeout');
+  expectTypeOf<testing.MockNatsClient>().toHaveProperty('published');
+  expectTypeOf<testing.MockJetStreamClient>().toHaveProperty('published');
+  expectTypeOf<testing.PublishedMessage>().toHaveProperty('raw');
+  expectTypeOf<testing.DispatchOptions>().toHaveProperty('cloudEvent');
+  expectTypeOf<testing.DispatchResult>().toHaveProperty('settlement');
+});
+
+it('keeps the subpath entries independent of each other', async () => {
+  const forbidden = {
+    'otel/index.ts': /^(health|testing)\//,
+    'health/index.ts': /^(otel|testing)\//,
+  } as const;
+  for (const [entry, pattern] of Object.entries(forbidden)) {
+    const { files } = await importGraph(entry);
+    expect([...files].filter((f) => pattern.test(f))).toEqual([]);
+  }
+  const otelGraph = await importGraph('otel/index.ts');
+  expect(otelGraph.packages.filter((p) => / -> @nestjs\/terminus/.test(p))).toEqual([]);
+  const healthGraph = await importGraph('health/index.ts');
+  expect(healthGraph.packages.filter((p) => / -> @opentelemetry\//.test(p))).toEqual([]);
+});
+
 it('does not export internals', () => {
   for (const name of [
     'Dispatcher',
@@ -171,6 +240,14 @@ it('does not export internals', () => {
     'IdempotencyStoreError',
     'UnmatchedCloudEventError',
     'createTypeRouter',
+    'createHandlerPipeline',
+    'parseCloudEvent',
+    'readCloudEvent',
+    'readCloudEventMeta',
+    'resolveCloudEvent',
+    'writeCloudEvent',
+    'cloudEventKey',
+    'cloudEventMode',
   ])
     expect(api).not.toHaveProperty(name);
 });

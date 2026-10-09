@@ -4,7 +4,7 @@ Decorator-driven [NATS](https://nats.io) integration for [NestJS](https://nestjs
 
 > [!WARNING]
 > **Status: 0.x, under active development, not production-ready yet.**
-> The API may change between minor versions until 1.0. See [Known limitations](#known-limitations) and the [roadmap](#roadmap).
+> The API may change between minor versions until 1.0. See [Known limitations](#known-limitations).
 
 ## Contents
 
@@ -21,12 +21,15 @@ Decorator-driven [NATS](https://nats.io) integration for [NestJS](https://nestjs
 - [Idempotency](#idempotency)
 - [Batch processing](#batch-processing)
 - [Batch publishing](#batch-publishing)
+- [CloudEvents](#cloudevents)
 - [Codecs](#codecs)
 - [Plugins](#plugins)
+- [Tracing (OpenTelemetry)](#tracing-opentelemetry)
+- [Health checks](#health-checks)
+- [Testing](#testing)
 - [Errors](#errors)
 - [Lifecycle and graceful shutdown](#lifecycle-and-graceful-shutdown)
 - [Known limitations](#known-limitations)
-- [Roadmap](#roadmap)
 - [License](#license)
 
 ## Features
@@ -40,7 +43,11 @@ Decorator-driven [NATS](https://nats.io) integration for [NestJS](https://nestjs
 - Retry with exponential backoff and an optional dead-letter queue (DLQ), idempotency with a pluggable store, and batch processing for `@Subscribe` and `@Consume`.
 - Batched JetStream publishing with `publishMany()` and an auto-flushing `batcher()`.
 - Several named connections in one application, each passing its options straight to the NATS client, so every NATS auth method and TLS/mTLS works unchanged.
-- An inbound and outbound plugin pipeline for cross-cutting concerns.
+- [CloudEvents](#cloudevents) 1.0 in binary and structured mode: publish with a `cloudEvent` option, and route incoming events to methods by `type` with `@CloudEventRouter()` and `@OnCloudEvent()`.
+- An inbound and outbound plugin pipeline for cross-cutting concerns, with a per-message outcome for plugins to observe.
+- [OpenTelemetry tracing](#tracing-opentelemetry) from producer to consumer, as a plugin (`@loipv/nestjs-nats/otel`).
+- A [Terminus health indicator](#health-checks) (`@loipv/nestjs-nats/health`).
+- [Testing utilities](#testing) (`@loipv/nestjs-nats/testing`): mock clients and a harness that runs messages through your handlers without a NATS server.
 - Startup fails fast on a bad connection, bad credentials or invalid handler configuration. Shutdown stops intake, waits for in-flight handlers and drains connections, all within a bounded time.
 
 ## Requirements
@@ -51,6 +58,8 @@ Decorator-driven [NATS](https://nats.io) integration for [NestJS](https://nestjs
 | NestJS | `11.x` or `12.x` |
 | NATS client | `@nats-io/transport-node`, `@nats-io/jetstream`, `@nats-io/services` `3.x` |
 | NATS server | JetStream enabled, needed only for `@Consume` and `JetStreamClient` |
+| `@opentelemetry/api` | `^1.9.0`, optional: only for `@loipv/nestjs-nats/otel` |
+| `@nestjs/terminus` | `11.x` or `12.x`, optional: only for `@loipv/nestjs-nats/health` |
 
 The package is **ESM-only**. CommonJS applications, which includes most Nest 11 projects, can still `require()` it, because Node 22.12+ loads ES modules through `require(esm)`.
 
@@ -61,6 +70,15 @@ npm install @loipv/nestjs-nats @nats-io/transport-node @nats-io/jetstream @nats-
 ```
 
 The library also has `@nestjs/common`, `@nestjs/core`, `reflect-metadata` and `rxjs` as peer dependencies. A Nest application already has them.
+
+The optional entry points have optional peer dependencies. The main entry point never imports them, so install one only when you use its entry point:
+
+```bash
+npm install @opentelemetry/api   # for @loipv/nestjs-nats/otel
+npm install @nestjs/terminus     # for @loipv/nestjs-nats/health
+```
+
+`@loipv/nestjs-nats/testing` needs nothing extra. Your tests will normally use `@nestjs/testing` next to it.
 
 ## Quick start
 
@@ -326,7 +344,7 @@ class OrderPublisher {
 }
 ```
 
-`publish()` also accepts `expect` (optimistic concurrency, for example `{ lastSubjectSequence: 41 }`), `headers`, `codec` and `timeout`. `msgId` is sent as the `Nats-Msg-Id` header, so plugins can see it. To publish many messages at once, see [Batch publishing](#batch-publishing).
+`publish()` also accepts `expect` (optimistic concurrency, for example `{ lastSubjectSequence: 41 }`), `headers`, `codec` and `timeout`. `msgId` is sent as the `Nats-Msg-Id` header, so plugins can see it. To publish a [CloudEvent](#cloudevents), pass `cloudEvent` instead of building its headers. To publish many messages at once, see [Batch publishing](#batch-publishing).
 
 ## Streams and consumers
 
@@ -473,7 +491,7 @@ class InvoiceHandlers {
     durable: 'invoices',
     idempotency: {
       ttl: 600_000,
-      // Used when the message has no `Nats-Msg-Id` header.
+      // Used when the message has neither a `Nats-Msg-Id` header nor CloudEvent attributes.
       keyExtractor: (msg) => msg.headers?.get('x-order-id') || undefined,
     },
   })
@@ -488,9 +506,9 @@ class InvoiceHandlers {
 | Option | Default | Description |
 |---|---|---|
 | `ttl` | module's, else `300000` | How long, in ms, a processed message is remembered. It must be a number above `0` |
-| `keyExtractor` | none | `(msg: InboundMessage) => string \| undefined`. Called only if the message has no `Nats-Msg-Id` header |
+| `keyExtractor` | none | `(msg: InboundMessage) => string \| undefined`. Called only if the message has neither a `Nats-Msg-Id` header nor CloudEvent attributes |
 
-- **Key.** The key is the `Nats-Msg-Id` header, which `JetStreamClient.publish()` sets from `msgId`, and otherwise what `keyExtractor` returns. A message without a key is processed as usual.
+- **Key.** The key is the first of these that exists: the `Nats-Msg-Id` header, which `JetStreamClient.publish()` sets from `msgId` (or from the `id` of a [CloudEvent](#cloudevents)); for a CloudEvent, `<source>|<id>`; what `keyExtractor` returns. A message without a key is processed as usual.
 - **Scope.** Keys are scoped per handler, as `consume:<stream>/<durable>` or `subscribe:<Class>.<method>`, so handlers that share a store never swallow each other's messages. The connection name is not part of the scope, so several instances of an application agree on keys when they share a store.
 - **Flow.** The key is claimed before the handler runs. If the handler succeeds, the key is marked as done for `ttl`. If it fails, the key is released, so the retry runs.
 - **Duplicates.** A message whose key is done is skipped, and acknowledged if it is a JetStream message. A message whose key is being processed by another delivery is skipped, and a JetStream message is `nak`'d, with the retry `initialDelay` (or 1000 ms when retries are off) as delay, so it comes back later.
@@ -644,6 +662,132 @@ class EventPublisher {
 
 `add(subject, data?, opts?)` returns a promise of the message's `PubAck`, rejected with that message's own error if it fails. `flush()` sends what is collected and waits for every result. `close()` flushes and then refuses further `add()` calls. `pending` is the number of messages not yet acknowledged or failed. A batcher is flushed and closed when its connection closes, before the connection drains.
 
+## CloudEvents
+
+The library reads and writes [CloudEvents](https://cloudevents.io) 1.0 following the [NATS protocol binding](https://github.com/cloudevents/spec/blob/main/cloudevents/bindings/nats-protocol-binding.md), in both modes:
+
+- **Binary mode.** Attributes travel as `ce-<name>` headers (written in lower case, read in any case), `datacontenttype` as the `Content-Type` header, and the body is the event's data, encoded by the codec.
+- **Structured mode.** The body is a JSON envelope with `Content-Type: application/cloudevents+json`.
+
+### Publishing CloudEvents
+
+Pass `cloudEvent` to `NatsClient.publish()` or to `JetStreamClient.publish()` (also in the `opts` of `publishMany()` and `batcher().add()`). The data you pass is the event's `data`.
+
+```ts
+import { Injectable } from '@nestjs/common';
+import { JetStreamClient, NatsClient, NatsModule } from '@loipv/nestjs-nats';
+
+NatsModule.forRoot({
+  connection: { servers: 'nats://localhost:4222' },
+  cloudEvents: { source: 'https://example.com/orders' }, // default `source` of every event
+});
+
+@Injectable()
+class OrderEvents {
+  constructor(
+    private readonly nats: NatsClient,
+    private readonly js: JetStreamClient,
+  ) {}
+
+  created(order: { id: string; total: number }) {
+    // Binary mode, the default: `ce-*` headers plus the JSON body.
+    this.nats.publish('orders.created', order, {
+      cloudEvent: { type: 'com.example.order.created', subject: order.id },
+    });
+  }
+
+  async createdDurably(order: { id: string; total: number }) {
+    // Structured mode. Without `msgId`, `Nats-Msg-Id` is the event's `id`.
+    const ack = await this.js.publish('orders.created', order, {
+      cloudEvent: {
+        type: 'com.example.order.created',
+        mode: 'structured',
+        extensions: { tenant: 'acme' },
+      },
+    });
+    return ack.duplicate;
+  }
+}
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `type` | required | The event type, for example `com.example.order.created` |
+| `source` | `cloudEvents.source` of the module | Required: without it, and without the module default, publishing throws a `NatsConfigError` |
+| `id` | `crypto.randomUUID()` | Must not be empty |
+| `time` | now | An ISO 8601 string or a `Date` |
+| `subject`, `dataschema` | none | CloudEvents attributes of the same name |
+| `extensions` | none | Extension attributes. A name must match `[a-z0-9]+` and must not be a standard attribute, or publishing throws a `NatsConfigError`. Values are strings |
+| `mode` | `'binary'` | `'binary'` or `'structured'` |
+
+`specversion` is always `'1.0'`, and `datacontenttype` is the content type of the codec (`application/json` by default).
+
+- **Errors.** An invalid `cloudEvent` throws a `NatsConfigError`: synchronously from `NatsClient.publish()`, as a rejection from `JetStreamClient.publish()`. `NatsClient.request()` has no `cloudEvent` option.
+- **De-duplication.** `JetStreamClient.publish()` sets `Nats-Msg-Id` to the event's `id` unless you pass `msgId`, so the stream's duplicate window de-duplicates events with the same `id`.
+- **Structured data.** With the JSON codec the data is the envelope's `data` member. With another codec, or when the data is a `Uint8Array`, the encoded bytes go into `data_base64`.
+- **Outbound plugins** see the resolved event (`id`, `time` and `source` filled in) as `message.cloudEvent` of the `OutgoingMessage`, and the event is written to the wire after they have run.
+
+### Receiving CloudEvents
+
+A `@CloudEventRouter()` class receives CloudEvents on one core subscription (`subscribe`) or one JetStream consumer (`consume`), and hands each event to the `@OnCloudEvent(typePattern)` method whose pattern matches the event's `type` best. In those methods `@Payload()` is the event's `data` and `@CloudEvent()` is its attributes, a `CloudEventMeta`. Pipes, guards, interceptors and exception filters work as for any handler.
+
+```ts
+import { Injectable } from '@nestjs/common';
+import {
+  CloudEvent,
+  type CloudEventMeta,
+  CloudEventRouter,
+  OnCloudEvent,
+  Payload,
+} from '@loipv/nestjs-nats';
+
+@Injectable()
+@CloudEventRouter({
+  consume: { stream: 'EVENTS', durable: 'order-projector' },
+  unmatched: 'dlq',
+  dlq: true,
+})
+class OrderProjector {
+  constructor(private readonly orders: OrderService) {}
+
+  @OnCloudEvent('com.example.order.created')
+  created(@Payload() order: OrderDto, @CloudEvent() event: CloudEventMeta) {
+    return this.orders.project(order, event.id);
+  }
+
+  // `*` matches one segment: order.paid, order.shipped, ...
+  @OnCloudEvent('com.example.order.*')
+  changed(@Payload() data: unknown, @CloudEvent() event: CloudEventMeta) {
+    return this.orders.touch(event.subject, data);
+  }
+
+  // A trailing `>` matches one or more segments. One method can handle several patterns.
+  @OnCloudEvent('com.example.>')
+  @OnCloudEvent('legacy.order.>')
+  other(@CloudEvent() event: CloudEventMeta) {
+    this.orders.noteIgnored(event.type);
+  }
+}
+```
+
+`@CloudEventRouter()` takes `connection`, `concurrency`, `codec`, `retry`, `dlq` and `idempotency` like `@Subscribe` and `@Consume`, plus these:
+
+| Option | Description |
+|---|---|
+| `subscribe`, `queue` | Receive on a core subject (with an optional queue group). Set exactly one of `subscribe` or `consume` |
+| `consume` | `{ stream, durable, config? }`: receive from a JetStream consumer, as for `@Consume` |
+| `unmatched` | What to do with an event no `@OnCloudEvent` matches: `'ack'` (default), `'term'` or `'dlq'` |
+
+- **Patterns.** A type is split on `.`. `*` matches exactly one segment, and a trailing `>` matches one or more. When several patterns match, an exact type wins over a pattern with `*`, which wins over one ending in `>`; among patterns of the same kind, the one with more literal segments wins, then the one declared first. An empty segment, a `>` that is not last or a repeated pattern fails startup with a `NatsConfigError`.
+- **Attributes first.** The router reads the attributes and picks the method before it decodes the event's data. An unmatched event follows `unmatched` even if its data cannot be decoded. If the data of a matched event cannot be decoded, that is a `NatsDecodeError`, handled like any decode failure.
+- **Not a CloudEvent.** A message without the required attributes (`id`, `source`, `type`, `specversion`), or with a structured body that is not a JSON object, fails with a `NatsDecodeError`. It is not retried: it is dead-lettered if a DLQ is configured, else terminated (JetStream) or dropped (core), and a request gets a `400` reply.
+- **Unmatched events.** `'ack'` acknowledges and skips the event (logged at debug level). `'term'` terminates a JetStream message, or drops a core one. `'dlq'` sends it to the [dead-letter queue](#dead-letter-queue); if none is configured, it behaves like `'term'` and logs a warning. An unmatched event is never retried. A request (a core message with a reply subject) that is unmatched gets a `404` error reply with the message `No handler for CloudEvent type "<type>"`, unless `unmatched` is `'ack'`, which sends no reply.
+- **Rules.** A router has no `batch` or `ack` option: it handles one event at a time and settles it automatically. It needs at least one `@OnCloudEvent` method, and an `@OnCloudEvent` method cannot also be a `@Subscribe`, `@Consume` or `@ServiceEndpoint`. Breaking these rules fails startup with a `NatsConfigError`.
+- **Idempotency.** With `idempotency` enabled, the key of an event is its `Nats-Msg-Id` header if it has one (the `id` of an event published with `JetStreamClient`), else `<source>|<id>`. See [Idempotency](#idempotency).
+- **Outside a router.** In any other handler `@CloudEvent()` and `ctx.cloudEvent` give the attributes of the message, or `undefined` when it is not a valid CloudEvent. In a batch handler `@CloudEvent()` is an array aligned with the payloads. `@Payload()` is not unwrapped there: for a structured event it is the whole envelope.
+
+A router is one handler for the connection's plugins, retries and dead-letter queue. Its `HandlerInfo` has the class name and `methodName: '@CloudEventRouter'`.
+
 ## Codecs
 
 Payloads are JSON by default. A `Uint8Array` is always sent as-is, and an empty payload decodes to `undefined`. You can provide your own codec per connection (`codec` in `forRoot`), per handler, or per publish call:
@@ -694,15 +838,307 @@ NatsModule.forRoot({ connection: { servers: 'nats://localhost:4222' }, plugins: 
 
 The inbound order is: `outer` plugins, then acknowledgement handling, then `inner` plugins, then decoding and the handler. `delivery.handler` is a read-only `HandlerInfo` that describes the handler (`kind`, `connection`, `className`, `methodName`, plus `subject`/`queue`, `stream`/`durable` or `service`/`endpoint`, depending on `kind`). Per-handler logic is better written as a regular Nest interceptor.
 
+### Observing outcomes
+
+`delivery.outcomes` is a `Map` from each message of the delivery (`delivery.messages`) to a `MessageOutcome` that says what became of it. The settlement and idempotency middlewares fill it in, so it is complete once the `next()` of an `outer` plugin has resolved or rejected. Read it there, after awaiting `next()`:
+
+```ts
+import type { NatsPlugin } from '@loipv/nestjs-nats';
+
+const deadLetterAlerts: NatsPlugin = {
+  name: 'dead-letter-alerts',
+  inbound: {
+    stage: 'outer',
+    async handle(delivery, next) {
+      try {
+        await next();
+      } finally {
+        for (const [message, outcome] of delivery.outcomes) {
+          if (outcome.action === 'dlq') {
+            delivery.logger.warn(`${message.subject} dead-lettered to ${outcome.subject}`);
+          }
+        }
+      }
+    },
+  },
+};
+```
+
+| `action` | Meaning | Other fields |
+|---|---|---|
+| `'ack'` | Acknowledged: automatically after success, or by the handler itself | |
+| `'retry'` | Handed back for another attempt: a JetStream `nak(delay)`, or an in-process retry of a core message | `delayMs`, `error` |
+| `'dlq'` | Failed for good and published to the dead-letter subject | `subject`, `error` |
+| `'term'` | A JetStream message terminated without a dead letter | `error?` |
+| `'drop'` | A core message given up on without a dead letter | `error?` |
+| `'skipped'` | Left out of the handler: a duplicate, or being processed by another delivery | `reason`: `'duplicate'` or `'in-progress'` |
+| `'replied'` | A request or service endpoint: the adapter sends the reply (an error reply when `error` is set) | `error?` |
+| `'none'` | Nothing to settle: a success on a core subscription, or a manually acknowledged message left unacknowledged | |
+
+A message with no entry was not settled by the library, for example because an `outer` plugin threw before calling `next()`.
+
+## Tracing (OpenTelemetry)
+
+`@loipv/nestjs-nats/otel` provides a plugin that traces every publish, request and delivery, and propagates the trace context in the message headers, so a trace continues from the producer to the consumer. It needs the `@opentelemetry/api` peer dependency (`^1.9.0`):
+
+```bash
+npm install @opentelemetry/api
+```
+
+**Setting up OpenTelemetry is your job.** The plugin only uses the API. Register a tracer provider with an exporter, a context manager (for example `AsyncLocalStorageContextManager`) so spans stay linked across `await`, and the W3C Trace Context propagator before the application starts. `NodeSDK` from `@opentelemetry/sdk-node` does all three by default. Without a registered SDK the plugin does nothing: no spans, no headers added.
+
+```ts
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
+import { NodeSDK } from '@opentelemetry/sdk-node';
+import { NatsModule } from '@loipv/nestjs-nats';
+import { tracing } from '@loipv/nestjs-nats/otel';
+
+// Start the SDK before the application is created.
+const sdk = new NodeSDK({ serviceName: 'orders-service', traceExporter: new OTLPTraceExporter() });
+sdk.start();
+
+NatsModule.forRoot({
+  connection: { servers: 'nats://localhost:4222' },
+  plugins: [tracing({ captureHeaders: ['x-tenant'] })],
+});
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `tracerName` | `'@loipv/nestjs-nats'` | Name of the tracer the spans are created with |
+| `captureHeaders` | none | Header names to record as `messaging.header.<lower-case name>` attributes (a string, or an array when the header has several values). Names match in any case. Do not list headers that carry secrets |
+
+### Spans
+
+| Span | Kind | Created for |
+|---|---|---|
+| `publish <subject>` | `PRODUCER` | `NatsClient.publish()` and `JetStreamClient.publish()`, including every item of `publishMany()` and `batcher()` |
+| `send <subject>` | `CLIENT` | `NatsClient.request()` |
+| `process <subject>` | `CONSUMER` | A message (or batch) handled by a `@Subscribe`, `@Consume` or `@CloudEventRouter` that sends no reply |
+| `process <subject>` | `SERVER` | A message that expects a reply: a `@ServiceEndpoint`, or a `@Subscribe` handler for a request |
+
+- **Propagation.** An outbound span's context is injected into the message headers (`traceparent`, `tracestate` and whatever else your propagator writes). A `process` span of a single message is a child of the context extracted from the message's headers, or starts a new trace if there is none. For a structured [CloudEvent](#cloudevents) without a `traceparent` header, the context is read from the envelope's `traceparent` and `tracestate` extension attributes.
+- **Batches.** A `process` span of a batch starts a new trace and has a link to the context of each message that carried one.
+- **Span scope.** The `process` span covers the handler and the settlement (ack, retry, dead-lettering), and spans you create in the handler are its children.
+- **Dead letters.** DLQ publishes do not go through plugins, so they have no `publish` span.
+
+### Attributes
+
+| Attribute | On | Value |
+|---|---|---|
+| `messaging.system` | all | `nats` |
+| `messaging.destination.name` | all | The subject |
+| `messaging.operation.type` | all | `send` for `publish` and `send` spans, `process` for `process` spans |
+| `messaging.operation.name` | all | `publish`, `request` or `process` |
+| `messaging.message.id` | `publish`, `send`, and single-message `process` | The `Nats-Msg-Id` header, else the CloudEvent `id`, when there is one |
+| `messaging.message.body.size` | single-message `process` | Size of the body in bytes |
+| `messaging.consumer.group.name` | `process` | The durable name of a `@Consume`, or the queue group of a `@Subscribe` that has one |
+| `messaging.batch.message_count` | batch `process` | Number of messages |
+| `messaging.nats.stream`, `messaging.nats.seq`, `messaging.nats.delivery_count` | single-message `process` of a JetStream message | Stream, stream sequence and delivery count |
+| `messaging.header.<name>` | as set by `captureHeaders` | The header's value |
+
+### Events and errors
+
+The `process` span records what became of the messages as events:
+
+| Event | Attributes | When |
+|---|---|---|
+| `nats.retry` | `nats.retry.delay_ms`, `nats.attempt` | A message was handed back for another attempt |
+| `nats.dlq` | `nats.dlq.subject` | A message was dead-lettered |
+| `nats.skipped` | `nats.skipped.reason` | An idempotency duplicate (`duplicate`) or a message being processed elsewhere (`in-progress`) |
+
+An error, whether the handler threw it or a failed message carries it, is recorded as an exception event and sets the span status to `ERROR`. The status of a successful span is left unset. A failed publish or request records the error on its span too.
+
+Notes:
+
+- A batch span is named after the subject of its first message, and a batch has no per-message attributes (`messaging.message.id`, `messaging.message.body.size`, `messaging.nats.*`, captured headers).
+- The spans of service endpoints have no `messaging.consumer.group.name`, because a service endpoint has no queue group or durable name.
+
+## Health checks
+
+`@loipv/nestjs-nats/health` provides a [Terminus](https://docs.nestjs.com/recipes/terminus) health indicator. It needs the `@nestjs/terminus` peer dependency (`11.x` or `12.x`). Import `NatsHealthModule` next to `NatsModule` and `TerminusModule`, and call the indicator from a health check:
+
+```ts
+import { Controller, Get, Module } from '@nestjs/common';
+import { HealthCheck, HealthCheckService, TerminusModule } from '@nestjs/terminus';
+import { NatsModule } from '@loipv/nestjs-nats';
+import { NatsHealthIndicator, NatsHealthModule } from '@loipv/nestjs-nats/health';
+
+@Controller('health')
+class HealthController {
+  constructor(
+    private readonly health: HealthCheckService,
+    private readonly nats: NatsHealthIndicator,
+  ) {}
+
+  @Get()
+  @HealthCheck()
+  check() {
+    return this.health.check([() => this.nats.isHealthy('nats', { jetstream: true })]);
+  }
+}
+
+@Module({
+  imports: [
+    NatsModule.forRoot({ connection: { servers: 'nats://localhost:4222' } }),
+    TerminusModule,
+    NatsHealthModule,
+  ],
+  controllers: [HealthController],
+})
+class AppModule {}
+```
+
+`isHealthy(key, options?)` accepts:
+
+| Option | Default | Description |
+|---|---|---|
+| `connection` | `'default'` | Name of the connection to check |
+| `rttTimeout` | `1000` | Longest wait, in ms, for the round trip to the server and, separately, for the JetStream check |
+| `jetstream` | `false` | Also require JetStream to answer an account info request |
+
+When the connection is up, the result is `{ nats: { status: 'up', connection, server, rtt } }`, where `rtt` is the round trip time in ms. Otherwise it is `{ nats: { status: 'down', connection, reason } }`, and `HealthCheckService` turns that into a `503` response. `reason` is one of:
+
+- `unknown connection`
+- `reconnecting`, `draining` or `closed`: the state of the connection
+- `rtt timeout after <n>ms` or `rtt failed: <error>`
+- `jetstream unavailable: <error>` (also for a timeout)
+- `check failed: <error>`
+
+The indicator never throws, and the result holds no credentials: the server URL is redacted and error text is scrubbed of the connection's password and token. The check can wait up to `rttTimeout` for the round trip plus up to `rttTimeout` for the JetStream check, so up to twice `rttTimeout` in the worst case. Set your probe's timeout above that.
+
+## Testing
+
+`@loipv/nestjs-nats/testing` lets you test code that uses the library without a NATS server. It needs nothing beyond the library itself, and works with any test runner. The examples use `@nestjs/testing` and `node:assert`.
+
+### Mock clients
+
+`createMockNatsClient()` and `createMockJetStreamClient()` return a real `NatsClient` and `JetStreamClient` that run on a fake connection. Outbound plugins and CloudEvents work as in production. Everything published is recorded in `published`.
+
+```ts
+import assert from 'node:assert/strict';
+import { NatsRequestError } from '@loipv/nestjs-nats';
+import { createMockJetStreamClient, createMockNatsClient } from '@loipv/nestjs-nats/testing';
+
+const nats = createMockNatsClient({ cloudEvents: { source: 'urn:test' } });
+
+nats.publish('orders.created', { id: 'o1' }, { cloudEvent: { type: 'order.created' } });
+await nats.flush(); // publishes are asynchronous: flush before you assert
+assert.equal(nats.published[0]?.subject, 'orders.created');
+assert.deepEqual(nats.published[0]?.data, { id: 'o1' });
+assert.equal(nats.published[0]?.cloudEvent?.type, 'order.created');
+
+// Requests are answered from stubs. With no stub, request() rejects with code 'no_responders'.
+nats.whenRequest('orders.get').reply({ id: 'o1', total: 10 });
+assert.deepEqual(await nats.request('orders.get', { id: 'o1' }), { id: 'o1', total: 10 });
+nats.whenRequest('orders.cancel').fail({ code: 409, description: 'already shipped' });
+await assert.rejects(
+  nats.request('orders.cancel', { id: 'o1' }),
+  (err) => err instanceof NatsRequestError && err.code === 'service_error',
+);
+
+const js = createMockJetStreamClient();
+await js.publish('orders.created', { id: 'o1' }, { msgId: 'o1' });
+const again = await js.publish('orders.created', { id: 'o1' }, { msgId: 'o1' });
+assert.equal(again.duplicate, true); // acked by a stream called 'mock'
+assert.equal(js.published.length, 2);
+```
+
+| Member | Description |
+|---|---|
+| `published` | The recorded messages, in order. Each has `subject`, `data` (decoded with the codec, the event's data for a CloudEvent), `raw` (the bytes), `headers`, `cloudEvent` (when the message is one) and `reply` (for a request). On the core client, requests are included |
+| `whenRequest(subject).reply(value)` | Answers requests to `subject` (a NATS subject pattern) with `value`. The latest matching stub wins |
+| `whenRequest(subject).fail({ code, description })` | Answers with a service error |
+
+Options: `codec`, `plugins` and `cloudEvents` (`{ source? }`). The JetStream mock acks with `{ stream: 'mock', seq, duplicate }`, where `duplicate` is `true` for a repeated `Nats-Msg-Id`. A standalone mock is never closed, so a `batcher()` of a mock is not flushed for you: call its `flush()` yourself.
+
+### `NatsTestingModule` and `NatsTestHarness`
+
+`NatsTestingModule.forRoot(options?)` replaces `NatsModule.forRoot()` in a test. It takes the same options except `connection`: `name`, `codec`, `plugins`, `retry`, `dlq`, `idempotency`, `cloudEvents` and so on. It never connects, syncs streams or subscribes. It provides the same injectable clients (`NatsClient` and `JetStreamClient` are the mocks above), `NatsConnectionManager` and `NatsTestHarness`. `NatsStreamManager` and the raw connection are provided too, but JetStream management is not available and subscriptions are refused.
+
+Messages reach your handlers through `NatsTestHarness.dispatch()`. It runs a fake message through the handler's real inbound pipeline: your plugins, retry decisions, dead-letter queue, idempotency, and Nest's guards, pipes, interceptors and exception filters. The harness never waits for a delay and never runs a retry again; it only reports the outcome.
+
+```ts
+import assert from 'node:assert/strict';
+import { Injectable } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
+import { Consume, NatsClient, NonRetryableError, Payload } from '@loipv/nestjs-nats';
+import { NatsTestHarness, NatsTestingModule } from '@loipv/nestjs-nats/testing';
+
+@Injectable()
+class BillingHandlers {
+  constructor(private readonly nats: NatsClient) {}
+
+  @Consume({ stream: 'ORDERS', durable: 'billing', dlq: true })
+  async bill(@Payload() order: { id: string; total: number }) {
+    if (order.total <= 0) throw new NonRetryableError('empty order');
+    this.nats.publish('orders.billed', { id: order.id });
+    return { billed: true };
+  }
+}
+
+const app = await Test.createTestingModule({
+  imports: [NatsTestingModule.forRoot()],
+  providers: [BillingHandlers],
+}).compile();
+await app.init();
+const harness = NatsTestHarness.create(app);
+
+const ok = await harness.dispatch(
+  { handler: 'BillingHandlers.bill' },
+  { id: 'o1', total: 10 },
+  { subject: 'orders.created' },
+);
+assert.equal(ok.settlement, 'ack');
+assert.deepEqual(ok.result, { billed: true });
+
+const bad = await harness.dispatch({ handler: 'BillingHandlers.bill' }, { id: 'o2', total: 0 });
+assert.equal(bad.settlement, 'dlq');
+assert.equal(bad.dlq[0]?.subject, 'dlq.ORDERS.billing');
+```
+
+`dispatch(target, payload, options?)` takes a target and returns a `DispatchResult`:
+
+| Target | Selects |
+|---|---|
+| `{ handler: 'Class.method' }` | A handler by class and method name. For a CloudEvent router it is `'Class.@CloudEventRouter'` |
+| `{ subject: '...' }` | The one handler that receives from that subject. For `@Consume` the subject is matched against the consumer's `filter_subject`(s) |
+
+It rejects with a `NatsConfigError` when the handlers are misconfigured (as bootstrap would report), or when the target matches no handler or several. For a batch handler, `payload` is a non-empty array with one message per entry.
+
+| Option | Description |
+|---|---|
+| `headers` | Message headers |
+| `subject` | The message's actual subject. Defaults to the target's subject, else to the handler's own: its subject pattern (which can be a wildcard), its first `filter_subject`, or the stream name for a `@Consume` without a filter. Pass it for realistic values in `@Subject()` and `ctx.subject` |
+| `deliveryCount` | JetStream delivery count (default `1`); above `1` the message counts as redelivered |
+| `attempt` | Core delivery attempt (default `1`), as after in-process retries |
+| `request` | Core subscriptions: the message is a request, with a reply subject |
+| `cloudEvent` | Sends the payload as a [CloudEvent](#cloudevents), with the same options as publishing |
+
+| `DispatchResult` field | Description |
+|---|---|
+| `result` | What the handler returned (never set for a batch) |
+| `settlement` | What became of the first message: `'ack'`, `'nak'` (a JetStream retry), `'retry'` (a core retry), `'term'`, `'dlq'`, `'drop'`, `'skipped'`, `'replied'` or `'none'` |
+| `outcomes` | The [`MessageOutcome`](#observing-outcomes) of every message, aligned with the payloads |
+| `nakDelay` | The redelivery delay in ms when `settlement` is `'nak'` |
+| `reply` | For a request or service endpoint: `{ data }`, or `{ error: { code, description } }` |
+| `dlq` | The dead letters published while the messages were processed |
+
+Notes:
+
+- Idempotency stores keep their state across the dispatches of one application, so dispatching the same message twice shows a duplicate.
+- Dead-letter publishes, and requests sent by your handlers, also appear in the `published` of the mock clients of the testing module.
+- A dispatched message is a fake message, so `ctx.raw` is a stand-in that records what you call on it. It is not a real `Msg` or `JsMsg`.
+
 ## Errors
 
 | Class | Thrown when |
 |---|---|
 | `NatsModuleError` | Base class of all errors below |
-| `NatsConfigError` | Invalid configuration found at startup. Examples: unknown connection name, duplicate durable, endpoint without `@NatsService`, request-scoped handler provider, missing consumer |
+| `NatsConfigError` | Invalid configuration found at startup. Examples: unknown connection name, duplicate durable, endpoint without `@NatsService`, request-scoped handler provider, missing consumer, an invalid `@CloudEventRouter`. Also thrown when publishing an invalid `cloudEvent` (no source, bad extension name) |
 | `NatsConnectionError` | The first connection attempt failed, including authentication errors |
 | `StreamConfigConflictError` | A declared stream or consumer differs in an immutable field. The error carries `field`, `current` and `declared` |
-| `NatsDecodeError` | A payload could not be decoded |
+| `NatsDecodeError` | A payload could not be decoded, or a message is not a valid CloudEvent |
 | `NatsRequestError` | `NatsClient.request()` failed. See `code` |
 | `NonRetryableError` | Throw it yourself to tell the library not to retry a message. It goes straight to the DLQ if there is one, else it is dropped |
 
@@ -758,15 +1194,6 @@ These are tracked for upcoming releases:
 - **Duplicate error logs.** Handler errors that are not `HttpException`s are logged by Nest's `ExceptionsHandler` as well as by this library. `logger: false` silences only this library's logs.
 - **Publish order.** If an outbound plugin awaits something, consecutive `publish()` calls are not guaranteed to leave in call order.
 - **Undetected removals.** Stream and consumer sync compares only declared fields, so a field you remove from a declaration is not detected as drift.
-
-## Roadmap
-
-Planned, **not available yet**:
-
-- CloudEvents (binary and structured modes) with routing by `type`
-- OpenTelemetry tracing from producer to consumer (`@loipv/nestjs-nats/otel`)
-- Health checks for `@nestjs/terminus` (`@loipv/nestjs-nats/health`)
-- Testing utilities (`@loipv/nestjs-nats/testing`)
 
 ## License
 
