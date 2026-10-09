@@ -4,12 +4,17 @@ import type {
   StreamExpectations,
 } from '@nats-io/jetstream';
 import { Batcher, DEFAULT_BATCHER_MAX_SIZE, DEFAULT_BATCHER_MAX_WAIT } from '../batch/batcher.js';
-import { type Codec, encodePayload } from '../codec/codec.js';
+import type { CloudEventInit } from '../cloudevents/types.js';
+import type { Codec } from '../codec/codec.js';
 import type { HeadersInit } from '../codec/headers.js';
 import type { ConnectionEntry } from '../connection/connection-manager.js';
 import { NatsConfigError, NatsModuleError } from '../errors/errors.js';
 import { compose } from '../pipeline/compose.js';
-import { createOutgoingMessage, outboundMiddlewares } from '../pipeline/outbound.js';
+import {
+  createOutgoingMessage,
+  encodeOutgoing,
+  outboundMiddlewares,
+} from '../pipeline/outbound.js';
 
 /** JetStream's de-duplication header, set from the `msgId` publish option. */
 const MSG_ID_HEADER = 'Nats-Msg-Id';
@@ -23,6 +28,8 @@ export type JetStreamPublishOptions = {
   headers?: HeadersInit;
   codec?: Codec;
   timeout?: number;
+  /** Publishes a CloudEvent; without `msgId`, `Nats-Msg-Id` is its `id` (server-side dedupe). */
+  cloudEvent?: CloudEventInit;
 };
 
 export type PublishManyResult = { ok: true; ack: PubAck } | { ok: false; error: Error };
@@ -37,14 +44,16 @@ export class JetStreamClient {
   ): Promise<PubAck> {
     const message = createOutgoingMessage(this.entry, 'jetstream', subject, data, opts);
     // As a header (rather than the `msgID` publish option) so outbound plugins see it.
-    if (opts.msgId !== undefined) message.headers.set(MSG_ID_HEADER, opts.msgId);
+    const msgId = opts.msgId ?? message.cloudEvent?.meta.id;
+    if (msgId !== undefined) message.headers.set(MSG_ID_HEADER, msgId);
     let ack: PubAck | undefined;
     const run = compose(outboundMiddlewares(this.entry), async (m) => {
+      const payload = encodeOutgoing(m);
       const publishOpts: Partial<NatsPublishOptions> = {};
       if (m.headers.keys().length > 0) publishOpts.headers = m.headers;
       if (opts.expect !== undefined) publishOpts.expect = opts.expect;
       if (opts.timeout !== undefined) publishOpts.timeout = opts.timeout;
-      ack = await this.entry.js().publish(m.subject, encodePayload(m.codec, m.data), publishOpts);
+      ack = await this.entry.js().publish(m.subject, payload, publishOpts);
     });
     await run(message);
     if (!ack) {

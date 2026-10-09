@@ -1,6 +1,6 @@
 import { headers } from '@nats-io/transport-node';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { NatsContext, NatsJetStreamContext } from '../../src/context/nats-context.js';
+import { CLOUD_EVENT, NatsContext, NatsJetStreamContext } from '../../src/context/nats-context.js';
 
 function fakeJsMsg() {
   const h = headers();
@@ -29,6 +29,42 @@ describe('NatsContext', () => {
     expect(ctx.headers).toEqual({});
     expect(ctx.replyTo).toBe('inbox.1');
     expect(ctx.raw).toBe(raw);
+  });
+
+  describe('cloudEvent', () => {
+    const ceHeaders = () => {
+      const h = headers();
+      h.set('ce-specversion', '1.0');
+      h.set('ce-id', '1');
+      h.set('ce-source', 's');
+      h.set('ce-type', 't');
+      return h;
+    };
+    const ctxOf = (h?: ReturnType<typeof headers>) =>
+      new NatsContext({
+        kind: 'core',
+        connection: 'default',
+        raw: { subject: 'a', reply: '', data: new Uint8Array(), headers: h } as never,
+      });
+
+    it('is read lazily, once, from the raw message', () => {
+      const ctx = ctxOf(ceHeaders());
+      const first = ctx.cloudEvent;
+      expect(first).toMatchObject({ id: '1', source: 's', type: 't', specversion: '1.0' });
+      expect(ctx.cloudEvent).toBe(first);
+    });
+
+    it('is undefined for a message that is not a CloudEvent', () => {
+      expect(ctxOf().cloudEvent).toBeUndefined();
+      expect(ctxOf(headers()).cloudEvent).toBeUndefined();
+    });
+
+    it('can be preset through the internal setter', () => {
+      const ctx = ctxOf();
+      const meta = { id: 'x', source: 's', type: 't', specversion: '1.0', extensions: {} };
+      ctx[CLOUD_EVENT] = meta;
+      expect(ctx.cloudEvent).toBe(meta);
+    });
   });
 
   it('returns undefined replyTo when there is no reply subject', () => {

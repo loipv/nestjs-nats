@@ -25,6 +25,8 @@ export interface NatsModuleOptions {
   streams?: StreamDeclaration[];
   consumers?: ConsumerDeclaration[];
   codec?: Codec;
+  /** Defaults of the CloudEvents this connection publishes. */
+  cloudEvents?: { source?: string };
   plugins?: NatsPlugin[];
   retry?: RetryOptions | false;
   dlq?: DlqOptions | boolean;

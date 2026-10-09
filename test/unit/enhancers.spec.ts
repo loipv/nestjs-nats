@@ -23,6 +23,8 @@ import { Test, type TestingModule } from '@nestjs/testing';
 import { IsString } from 'class-validator';
 import { map, type Observable } from 'rxjs';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import type { CloudEventMeta } from '../../src/cloudevents/types.js';
+import { NatsBatchContext } from '../../src/context/nats-batch-context.js';
 import { NatsContext } from '../../src/context/nats-context.js';
 import {
   Consume,
@@ -31,6 +33,7 @@ import {
   Subscribe,
 } from '../../src/decorators/handler.decorators.js';
 import {
+  CloudEvent,
   Ctx,
   Headers,
   Msg,
@@ -127,6 +130,14 @@ class Piped {
   }
 }
 
+@Injectable()
+class CeHandler {
+  @Subscribe('ce')
+  on(@CloudEvent() ce: CloudEventMeta | undefined, @Payload() p: unknown) {
+    return { ce, p };
+  }
+}
+
 // @ServiceEndpoint outside a @NatsService class is ignored.
 @Injectable()
 class Orphan {
@@ -168,8 +179,10 @@ function natsCtx(h: Record<string, string> = {}, subject = 'x') {
 describe('HandlerExplorer', () => {
   let moduleRef: TestingModule;
   let defs: HandlerDefinition[];
-  const find = (method: string) => {
-    const d = defs.find((x) => x.methodName === method);
+  const find = (method: string, className?: string) => {
+    const d = defs.find(
+      (x) => x.methodName === method && (!className || x.className === className),
+    );
     if (!d) throw new Error(`no handler ${method}`);
     return d;
   };
@@ -189,6 +202,7 @@ describe('HandlerExplorer', () => {
         Orphan,
         Scoped,
         Piped,
+        CeHandler,
         { provide: 'SHARED_1', useFactory: () => shared },
         { provide: 'SHARED_2', useFactory: () => shared },
       ],
@@ -217,6 +231,7 @@ describe('HandlerExplorer', () => {
         'subscribe:Svc.plain@svcconn',
         'subscribe:Scoped.on@default',
         'subscribe:Piped.piped@default',
+        'subscribe:CeHandler.on@default',
         'subscribe:Ctrl.onCtrl@default',
         'subscribe:Shared.onShared@default',
       ].sort(),
@@ -307,6 +322,16 @@ describe('HandlerExplorer', () => {
     await expect(find('fail').invoke(undefined, natsCtx())).resolves.toBe('handled');
   });
 
+  it('injects @CloudEvent() meta', async () => {
+    const ce = { 'ce-specversion': '1.0', 'ce-id': '1', 'ce-source': 's', 'ce-type': 't' };
+    const out = (await find('on', 'CeHandler').invoke('body', natsCtx(ce))) as {
+      ce: CloudEventMeta | undefined;
+    };
+    expect(out.ce).toMatchObject({ type: 't', source: 's', id: '1', specversion: '1.0' });
+    const none = (await find('on', 'CeHandler').invoke('body', natsCtx())) as { ce: unknown };
+    expect(none.ce).toBeUndefined();
+  });
+
   it('resolves built-in param decorators', async () => {
     await expect(
       find('consume').invoke({ id: 7 }, natsCtx({ h: 'hv' }, 'orders.1')),
@@ -334,6 +359,20 @@ describe('NatsParamsFactory', () => {
   ])('type %s data %s', (type, data, expected) =>
     expect(f.exchangeKeyForValue(type, data as never, args)).toEqual(expected),
   );
+
+  it('resolves @CloudEvent() per message of a batch', () => {
+    const ce = { 'ce-specversion': '1.0', 'ce-id': '1', 'ce-source': 's', 'ce-type': 't' };
+    const batch = new NatsBatchContext({
+      connection: 'default',
+      messages: [natsCtx(ce), natsCtx()],
+      onFail: () => {},
+    });
+    const out = f.exchangeKeyForValue(NatsParamType.CLOUD_EVENT, undefined as never, [
+      [1, 2],
+      batch,
+    ]);
+    expect(out).toEqual([expect.objectContaining({ type: 't', id: '1' }), undefined]);
+  });
 
   it('resolves @nestjs/microservices @Ctx() (RpcParamtype.CONTEXT = 6) to the context', () =>
     expect(f.exchangeKeyForValue(6, undefined as never, args)).toBe(ctx));

@@ -1,4 +1,5 @@
 import type { MsgHdrs } from '@nats-io/transport-node';
+import type { CloudEventMeta } from '../cloudevents/types.js';
 import type { Codec } from '../codec/codec.js';
 import type { Delivery } from './delivery.js';
 
@@ -13,6 +14,12 @@ export interface OutgoingMessage {
   data: unknown;
   headers: MsgHdrs;
   codec: Codec;
+  /**
+   * Set when the publish carries a `cloudEvent` option: the CloudEvent resolved (id, time,
+   * source filled in) before the outbound plugins run. It is written to the wire after
+   * them, with the message's final `codec` and `headers`.
+   */
+  cloudEvent?: { meta: CloudEventMeta; mode: 'binary' | 'structured' };
 }
 
 export interface OutboundMiddleware {

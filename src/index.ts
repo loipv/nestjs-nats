@@ -1,6 +1,7 @@
 export type { Batcher } from './batch/batcher.js';
 export type { BatchOptions } from './batch/collector.js';
 export { NatsClient } from './client/nats-client.js';
+export type { CloudEventInit, CloudEventMeta } from './cloudevents/types.js';
 export type { Codec } from './codec/codec.js';
 export { jsonCodec } from './codec/codec.js';
 export type { HeadersInit } from './codec/headers.js';
@@ -20,7 +21,7 @@ export {
   ServiceEndpoint,
   Subscribe,
 } from './decorators/handler.decorators.js';
-export { Ctx, Headers, Msg, Payload, Subject } from './decorators/param.decorators.js';
+export { CloudEvent, Ctx, Headers, Msg, Payload, Subject } from './decorators/param.decorators.js';
 export type { NatsRequestErrorCode } from './errors/errors.js';
 export {
   NatsConfigError,

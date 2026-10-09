@@ -1,5 +1,7 @@
 import type { JsMsg } from '@nats-io/jetstream';
 import type { Msg as NatsMsg } from '@nats-io/transport-node';
+import { readCloudEventMeta } from '../cloudevents/codec.js';
+import type { CloudEventMeta } from '../cloudevents/types.js';
 import { fromMsgHdrs } from '../codec/headers.js';
 
 export type NatsContextKind = 'core' | 'jetstream' | 'service';
@@ -10,11 +12,15 @@ export interface NatsContextInit<R extends NatsMsg | JsMsg = NatsMsg | JsMsg> {
   raw: R;
 }
 
+/** Internal: key of the `NatsContext.cloudEvent` presetting setter (used by the router). */
+export const CLOUD_EVENT: unique symbol = Symbol('nats.cloudEvent');
+
 export class NatsContext<R extends NatsMsg | JsMsg = NatsMsg | JsMsg> {
   readonly #kind: NatsContextKind;
   readonly #connection: string;
   readonly #raw: R;
   #headers?: Record<string, string | string[]>;
+  #cloudEvent?: { meta: CloudEventMeta | undefined };
 
   constructor(init: NatsContextInit<R>) {
     this.#kind = init.kind;
@@ -48,6 +54,20 @@ export class NatsContext<R extends NatsMsg | JsMsg = NatsMsg | JsMsg> {
 
   get raw(): R {
     return this.#raw;
+  }
+
+  /**
+   * The CloudEvent attributes of the message (binary or structured), `undefined` when it
+   * is not a valid CloudEvent. Read from the raw message on first access.
+   */
+  get cloudEvent(): CloudEventMeta | undefined {
+    this.#cloudEvent ??= { meta: readCloudEventMeta(this.#raw) };
+    return this.#cloudEvent.meta;
+  }
+
+  /** Internal: presets `cloudEvent` when the router has already read it. */
+  set [CLOUD_EVENT](meta: CloudEventMeta | undefined) {
+    this.#cloudEvent = { meta };
   }
 }
 
