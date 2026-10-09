@@ -77,7 +77,7 @@ it('does not pull optional peers or subpath entries, even transitively', async (
   for (let file = pending.pop(); file !== undefined; file = pending.pop()) {
     if (seen.has(file)) continue;
     seen.add(file);
-    if (file.startsWith('otel/')) offenders.push(file);
+    if (file.startsWith('otel/') || file.startsWith('health/')) offenders.push(file);
     const code = await readFile(new URL(file, srcRoot), 'utf8');
     for (const [, spec] of code.matchAll(/(?:from|import)\s*\(?\s*'([^']+)'/g)) {
       if (!spec) continue;
