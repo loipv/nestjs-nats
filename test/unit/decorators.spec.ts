@@ -120,11 +120,23 @@ describe('param decorators', () => {
   it('defines the param type enum values', () => {
     expect(NatsParamType).toMatchObject({
       PAYLOAD: 3,
-      HEADERS: 6,
+      CONTEXT: 6,
       SUBJECT: 7,
       MSG: 8,
-      CONTEXT: 9,
-      CLOUD_EVENT: 10,
+      HEADERS: 10,
+      CLOUD_EVENT: 11,
     });
+  });
+
+  it('lines up with @nestjs/microservices param types', () => {
+    // RpcParamtype of @nestjs/microservices: PAYLOAD = 3, CONTEXT = 6, GRPC_CALL = 9.
+    // Its @Payload()/@Ctx() must resolve to our payload/context, and nothing may map to
+    // GRPC_CALL or to Nest's 'query'/'param' pipe types (4/5).
+    expect(NatsParamType.PAYLOAD).toBe(3);
+    expect(NatsParamType.CONTEXT).toBe(6);
+    const values = Object.values(NatsParamType).filter((v) => typeof v === 'number');
+    expect(values).not.toContain(4);
+    expect(values).not.toContain(5);
+    expect(values).not.toContain(9);
   });
 });
