@@ -1,7 +1,7 @@
 import type { JsMsg } from '@nats-io/jetstream';
 import type { Msg as NatsMsg } from '@nats-io/transport-node';
 import { isObservable, lastValueFrom } from 'rxjs';
-import { readCloudEvent } from '../cloudevents/codec.js';
+import { parseCloudEvent } from '../cloudevents/codec.js';
 import { UnmatchedCloudEventError } from '../cloudevents/errors.js';
 import { decodePayload } from '../codec/codec.js';
 import { NatsBatchContext } from '../context/nats-batch-context.js';
@@ -49,9 +49,9 @@ export async function invokeHandler(d: InternalDelivery): Promise<void> {
 }
 
 /**
- * Reads the message as a CloudEvent (a `NatsDecodeError` when it is not a valid one),
- * presets `ctx.cloudEvent` and invokes the `@OnCloudEvent` route matching its type with
- * its `data`. With no matching route, policy `'ack'` succeeds without a result; the others
+ * Reads the CloudEvent attributes of the message (a `NatsDecodeError` when it is not a
+ * valid CloudEvent), presets `ctx.cloudEvent` and invokes the `@OnCloudEvent` route
+ * matching its type with its decoded `data` (a `NatsDecodeError` when undecodable). With no matching route, policy `'ack'` succeeds without a result; the others
  * throw an `UnmatchedCloudEventError` for settlement to apply.
  */
 async function invokeRoute(
@@ -61,11 +61,14 @@ async function invokeRoute(
 ): Promise<void> {
   const msg = d.messages[0];
   if (!msg) throw new NatsModuleError('A CloudEvent router delivery holds no message');
-  const { meta, data } = readCloudEvent(msg, d.codec);
+  // Attributes only: the data is decoded once a route matched, so an unmatched event
+  // with an undecodable body still follows the `unmatched` policy.
+  const event = parseCloudEvent(msg);
+  const { meta } = event;
   ctx[CLOUD_EVENT] = meta;
   const target = router.route(meta.type);
   if (target) {
-    d.result = await unwrap(await target.invoke(data, ctx));
+    d.result = await unwrap(await target.invoke(event.data(d.codec), ctx));
     return;
   }
   if (router.unmatched === 'ack') {

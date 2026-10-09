@@ -155,6 +155,14 @@ export class HandlerExplorer {
         `${label} has invalid unmatched ${JSON.stringify(unmatched)}; expected 'ack', 'term' or 'dlq'`,
       );
     }
+    // Not part of the options type; rejected for untyped callers (spec §5: no batch).
+    for (const key of ['batch', 'ack'] as const) {
+      if (key in options && (options as Record<string, unknown>)[key] !== undefined) {
+        throw new NatsConfigError(
+          `${label} does not support ${key}: a router handles one CloudEvent at a time and settles it automatically`,
+        );
+      }
+    }
     const hasSubscribe = 'subscribe' in options && options.subscribe !== undefined;
     const hasConsume = 'consume' in options && options.consume !== undefined;
     if (hasSubscribe === hasConsume) {
