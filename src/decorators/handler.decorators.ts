@@ -1,6 +1,7 @@
 import type { ConsumerConfig } from '@nats-io/jetstream';
 import { SetMetadata } from '@nestjs/common';
 import type { Codec } from '../codec/codec.js';
+import type { IdempotencyOptions } from '../idempotency/idempotency.js';
 import type { DlqOptions } from '../settlement/dlq.js';
 import type { RetryOptions } from '../settlement/retry.js';
 import {
@@ -17,6 +18,7 @@ export interface SubscribeOptions {
   concurrency?: number;
   retry?: RetryOptions | false;
   dlq?: DlqOptions | boolean;
+  idempotency?: boolean | IdempotencyOptions;
 }
 
 export interface ConsumeOptions {
@@ -29,6 +31,7 @@ export interface ConsumeOptions {
   concurrency?: number;
   retry?: RetryOptions | false;
   dlq?: DlqOptions | boolean;
+  idempotency?: boolean | IdempotencyOptions;
 }
 
 export interface NatsServiceOptions {

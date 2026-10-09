@@ -2,6 +2,7 @@ import type { ConsumerConfig, JetStreamOptions, StreamConfig } from '@nats-io/je
 import type { NodeConnectionOptions } from '@nats-io/transport-node';
 import type { LoggerService } from '@nestjs/common';
 import type { Codec } from '../codec/codec.js';
+import type { IdempotencyStore } from '../idempotency/store.js';
 import type { NatsPlugin } from '../pipeline/types.js';
 import type { DlqOptions } from '../settlement/dlq.js';
 import type { RetryOptions } from '../settlement/retry.js';
@@ -27,6 +28,8 @@ export interface NatsModuleOptions {
   plugins?: NatsPlugin[];
   retry?: RetryOptions | false;
   dlq?: DlqOptions | boolean;
+  /** Defaults for handlers that enable idempotency: the store and the key TTL (ms, default 300_000). */
+  idempotency?: { store?: IdempotencyStore; ttl?: number };
   shutdown?: { drainTimeout?: number };
   logger?: false | LoggerService;
 }
