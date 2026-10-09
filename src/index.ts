@@ -28,6 +28,8 @@ export {
   NonRetryableError,
   StreamConfigConflictError,
 } from './errors/errors.js';
+export type { IdempotencyOptions } from './idempotency/idempotency.js';
+export type { ClaimResult, IdempotencyStore } from './idempotency/store.js';
 export { JetStreamClient } from './jetstream/jetstream-client.js';
 export { NatsStreamManager } from './jetstream/stream-manager.js';
 export {

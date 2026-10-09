@@ -8,6 +8,7 @@ import {
   type Delivery,
   HANDLER_DEFINITION,
   type InternalDelivery,
+  SKIPPED,
 } from '../../src/pipeline/delivery.js';
 import { invokeHandler } from '../../src/pipeline/invoker.js';
 import type { InboundMiddleware, NatsPlugin, Next } from '../../src/pipeline/types.js';
@@ -30,6 +31,7 @@ function delivery(opts: {
   return {
     handler,
     [HANDLER_DEFINITION]: { ...handler, options: {}, invoke: opts.invoke },
+    [SKIPPED]: new Set(),
     messages: [{ subject: 'a.b', data: opts.data ?? enc.encode('{"a":1}'), raw }],
     context,
     codec: jsonCodec(),
@@ -124,6 +126,16 @@ describe('invokeHandler', () => {
       invokeHandler(delivery({ invoke, data: enc.encode('{nope') })),
     ).rejects.toBeInstanceOf(NatsDecodeError);
     expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it('does not invoke a skipped message and leaves the result undefined', async () => {
+    const invoke = vi.fn(() => 'x');
+    const d = delivery({ invoke });
+    const [msg] = d.messages;
+    if (msg) d[SKIPPED].add(msg);
+    await invokeHandler(d);
+    expect(invoke).not.toHaveBeenCalled();
+    expect(d.result).toBeUndefined();
   });
 
   it('treats synchronous throws like rejections', async () => {

@@ -4,12 +4,14 @@ import { type Codec, encodePayload, jsonCodec } from '../codec/codec.js';
 import type { ConnectionEntry } from '../connection/connection-manager.js';
 import { NatsContext } from '../context/nats-context.js';
 import type { HandlerDefinition } from '../discovery/handler-explorer.js';
+import { resolveIdempotency } from '../idempotency/idempotency.js';
 import {
   buildInboundPipeline,
   HANDLER_DEFINITION,
   type HandlerInfo,
   type InternalDelivery,
   RETRY_SCHEDULER,
+  SKIPPED,
   toHandlerInfo,
 } from '../pipeline/delivery.js';
 import { invokeHandler } from '../pipeline/invoker.js';
@@ -41,13 +43,18 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
   ) {
     this.codec = def.options.codec ?? entry.options.codec ?? jsonCodec();
     this.info = toHandlerInfo(def);
+    const retry = resolveRetryPolicy(entry.options.retry, def.options.retry);
     const settlement = createSettlement({
       entry,
-      retry: resolveRetryPolicy(entry.options.retry, def.options.retry),
+      retry,
       dlq: resolveDlqPolicy('subscribe', entry.options.dlq, def.options.dlq),
     });
+    const idempotency = resolveIdempotency(entry, def.options.idempotency, retry);
     this.run = buildInboundPipeline(
-      { plugins: entry.options.plugins ?? [], core: [settlement] },
+      {
+        plugins: entry.options.plugins ?? [],
+        core: idempotency ? [settlement, idempotency] : [settlement],
+      },
       invokeHandler,
     );
     this.label = `${def.className}.${def.methodName} on "${def.subject}"`;
@@ -116,6 +123,7 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
     const d: InternalDelivery = {
       handler: this.info,
       [HANDLER_DEFINITION]: this.def,
+      [SKIPPED]: new Set(),
       [RETRY_SCHEDULER]: (_msg, delayMs) => this.dispatcher.scheduleRetry(item, delayMs),
       messages: [{ subject: msg.subject, data: msg.data, headers: msg.headers, raw: msg, attempt }],
       context,

@@ -8,6 +8,7 @@ import { connect, type NatsConnection, type Status } from '@nats-io/transport-no
 import { Injectable, type LoggerService } from '@nestjs/common';
 import { Observable, Subject } from 'rxjs';
 import { NatsConfigError, NatsConnectionError } from '../errors/errors.js';
+import { type IdempotencyStore, InMemoryIdempotencyStore } from '../idempotency/store.js';
 import { createNatsLogger } from '../module/logger.js';
 import type { NatsModuleOptions } from '../module/options.js';
 import { DEFAULT_CONNECTION } from '../module/tokens.js';
@@ -28,11 +29,25 @@ export interface ConnectionEntry {
   readonly logger: LoggerService;
   js(): JetStreamClient;
   jsm(): Promise<JetStreamManager>;
+  /**
+   * The idempotency store of this connection: the one given in the module options, else a
+   * default in-memory store created on first use and shared by the connection's handlers.
+   */
+  idempotencyStore(): IdempotencyStore;
+}
+
+/** An idempotency store handed to a connection's handlers. */
+export interface UsedIdempotencyStore {
+  connection: string;
+  store: IdempotencyStore;
+  /** `true` for the default store created by the library, `false` for one the module was given. */
+  owned: boolean;
 }
 
 interface InternalEntry {
   entry: ConnectionEntry;
   reconnecting: boolean;
+  usedStores: UsedIdempotencyStore[];
 }
 
 const LOGGED_EVENTS = new Set<Status['type']>([
@@ -71,6 +86,7 @@ export class NatsConnectionManager {
       const logger = createNatsLogger(options.logger, `NatsConnection:${name}`);
       let js: JetStreamClient | undefined;
       let jsm: Promise<JetStreamManager> | undefined;
+      let idempotency: UsedIdempotencyStore | undefined;
       const entry: ConnectionEntry = {
         name,
         options,
@@ -88,8 +104,20 @@ export class NatsConnectionManager {
           });
           return jsm;
         },
+        idempotencyStore() {
+          if (!idempotency) {
+            const provided = options.idempotency?.store;
+            idempotency = {
+              connection: name,
+              store: provided ?? new InMemoryIdempotencyStore(),
+              owned: provided === undefined,
+            };
+            internal.usedStores.push(idempotency);
+          }
+          return idempotency.store;
+        },
       };
-      const internal: InternalEntry = { entry, reconnecting: false };
+      const internal: InternalEntry = { entry, reconnecting: false, usedStores: [] };
       this.entries.set(name, internal);
       void this.watchStatus(internal);
       return entry;
@@ -108,6 +136,11 @@ export class NatsConnectionManager {
 
   names(): string[] {
     return [...this.entries.keys()];
+  }
+
+  /** The idempotency stores handed to handlers so far (for closing them on shutdown). */
+  idempotencyStores(): UsedIdempotencyStore[] {
+    return [...this.entries.values()].flatMap(({ usedStores }) => usedStores);
   }
 
   status(name: string = DEFAULT_CONNECTION): {

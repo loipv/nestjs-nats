@@ -63,9 +63,14 @@ export const HANDLER_DEFINITION: unique symbol = Symbol('nats.handlerDefinition'
 /** Internal: key of the in-process retry scheduler on core subscription deliveries. */
 export const RETRY_SCHEDULER: unique symbol = Symbol('nats.retryScheduler');
 
+/** Internal: key of the set of messages the handler must not process (idempotency). */
+export const SKIPPED: unique symbol = Symbol('nats.skipped');
+
 /** Internal: a delivery as built by the adapters, carrying the full handler definition. */
 export interface InternalDelivery extends Delivery {
   readonly [HANDLER_DEFINITION]: HandlerDefinition;
+  /** Messages the invoker leaves out (e.g. duplicates); the adapter starts it empty. */
+  readonly [SKIPPED]: Set<InboundMessage>;
   /** Processes `msg` again (as the next attempt) after `delayMs`; set by the core adapter. */
   readonly [RETRY_SCHEDULER]?: (msg: InboundMessage, delayMs: number) => void;
 }

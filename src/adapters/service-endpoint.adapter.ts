@@ -11,6 +11,7 @@ import {
   HANDLER_DEFINITION,
   type HandlerInfo,
   type InternalDelivery,
+  SKIPPED,
   toHandlerInfo,
 } from '../pipeline/delivery.js';
 import { invokeHandler } from '../pipeline/invoker.js';
@@ -164,6 +165,7 @@ export class NatsServiceAdapter implements HandlerAdapter {
     const d: InternalDelivery = {
       handler: endpoint.info,
       [HANDLER_DEFINITION]: endpoint.def,
+      [SKIPPED]: new Set(),
       messages: [
         { subject: msg.subject, data: msg.data, headers: msg.headers, raw: msg, attempt: 1 },
       ],

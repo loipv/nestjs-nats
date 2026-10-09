@@ -10,12 +10,14 @@ import type { ConnectionEntry } from '../connection/connection-manager.js';
 import { NatsJetStreamContext } from '../context/nats-context.js';
 import type { HandlerDefinition } from '../discovery/handler-explorer.js';
 import { NatsConfigError } from '../errors/errors.js';
+import { resolveIdempotency } from '../idempotency/idempotency.js';
 import type { NatsStreamManager } from '../jetstream/stream-manager.js';
 import {
   buildInboundPipeline,
   HANDLER_DEFINITION,
   type HandlerInfo,
   type InternalDelivery,
+  SKIPPED,
   toHandlerInfo,
 } from '../pipeline/delivery.js';
 import { invokeHandler } from '../pipeline/invoker.js';
@@ -131,8 +133,12 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
       dlq: this.dlq,
       ...(heartbeatMs !== undefined ? { heartbeatMs } : {}),
     });
+    const idempotency = resolveIdempotency(this.entry, this.def.options.idempotency, this.retry);
     return buildInboundPipeline(
-      { plugins: this.entry.options.plugins ?? [], core: [settlement] },
+      {
+        plugins: this.entry.options.plugins ?? [],
+        core: idempotency ? [settlement, idempotency] : [settlement],
+      },
       invokeHandler,
     );
   }
@@ -235,6 +241,7 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     const d: InternalDelivery = {
       handler: this.info,
       [HANDLER_DEFINITION]: this.def,
+      [SKIPPED]: new Set(),
       messages: [{ subject: msg.subject, data: msg.data, headers: msg.headers, raw: msg, attempt }],
       context,
       codec: this.codec,
