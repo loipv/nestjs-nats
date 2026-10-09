@@ -16,10 +16,10 @@ npm only lets you configure a trusted publisher for a package that already exist
 
    ```sh
    npm ci
-   npm run build && npm publish --access public
+   npm publish --access public --provenance=false
    ```
 
-   `prepublishOnly` runs the build, tarball check, package checks, typecheck and unit tests first. npm asks for a one-time password (2FA). Do not create a changeset for `0.1.0`; the first changelog entry is written by hand in `CHANGELOG.md`.
+   `--provenance=false` is required: `publishConfig.provenance` is `true`, and npm refuses to generate provenance outside a supported CI provider (`EUSAGE: Automatic provenance generation not supported for provider: null`). `prepublishOnly` runs the build, tarball check, package checks, typecheck and unit tests first. npm asks for a one-time password (2FA). Do not create a changeset for `0.1.0`; the first changelog entry is written by hand in `CHANGELOG.md`.
 
 3. On [npmjs.com](https://www.npmjs.com), open the package, then **Settings** and **Trusted Publisher**, and configure:
 
@@ -32,6 +32,8 @@ npm only lets you configure a trusted publisher for a package that already exist
    | Environment | leave empty |
 
    While you are in the settings, consider restricting publishing to trusted publishers only ("Require two-factor authentication and disallow tokens").
+
+The `Release` workflow runs on every push to `main`. If it runs before this bootstrap is done, it is expected to fail at the publish step without publishing anything. After the bootstrap, re-running it is a no-op, because `0.1.0` is already on npm.
 
 ## 2. Regular release flow
 
@@ -48,6 +50,14 @@ npm only lets you configure a trusted publisher for a package that already exist
 3. Review and merge the **chore: version packages** PR. The `Release` workflow runs again, finds no pending changesets and publishes the new version to npm with provenance. It also creates the GitHub tag.
 
 The workflow only runs for `loipv/nestjs-nats` (forks skip it), is serialized by a `release` concurrency group, and has `id-token: write` so npm can verify the run through OIDC.
+
+### CI gating
+
+`release.yml` does not wait for `ci.yml`, so make CI the gate yourself:
+
+- **Protect `main`.** Enable branch protection (or a ruleset) on `main` that requires pull requests and requires the CI jobs (`checks`, `test`, `smoke`, `example`) to pass before merging. This guarantees every changeset PR has passed full CI.
+- **The version PR gets no CI runs.** Pull requests opened by the workflow with `GITHUB_TOKEN` do not trigger other workflows, so **chore: version packages** shows no CI checks. Before merging it, confirm that CI on the `main` push that triggered the latest version PR update is green. Alternatively, close and reopen the PR to trigger CI on it (and satisfy required checks, if you require them for it).
+- **What gates the publish itself.** Only `prepublishOnly` runs before `npm publish`: build, `check:pack`, `check:pkg`, typecheck and the unit tests. The integration tests, the Nest 11 matrix, the smoke tests and the example app are not part of it, which is why the points above matter.
 
 ## 3. Verify provenance
 
@@ -87,4 +97,4 @@ The workflow only opens it when `main` contains changesets that are not yet rele
 
 ### Publishing a version manually
 
-Only as a last resort, from a clean checkout of `main` at the release commit: `npm ci && npm publish` (add `--provenance=false` because provenance is only available from GitHub Actions). Then restore the normal flow.
+Only as a last resort, from a clean checkout of `main` at the release commit: `npm ci && npm publish --provenance=false` (provenance is only available from GitHub Actions, and `publishConfig.provenance` would otherwise make the publish fail). Then restore the normal flow.

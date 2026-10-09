@@ -1,10 +1,10 @@
 // Guards the security-relevant shape of the workflow files by matching strings in their text.
 // Fails (exit 1) on any violation. Cheap and dependency-free; actionlint covers the syntax.
-import { readFileSync } from 'node:fs';
+// Rules: release.yml is the only workflow allowed to publish; every other workflow is read-only.
+import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 const dir = resolve(import.meta.dirname, '..', '.github', 'workflows');
-const read = (name) => readFileSync(join(dir, name), 'utf8');
 const stripComments = (text) =>
   text
     .split('\n')
@@ -13,7 +13,7 @@ const stripComments = (text) =>
 
 // Non-empty, comment-free, trimmed lines of the top-level `on:` block.
 function onBlock(text) {
-  const lines = stripComments(text).split('\n');
+  const lines = text.split('\n');
   const start = lines.findIndex((l) => /^on:\s*$/.test(l));
   if (start === -1) return null;
   const block = [];
@@ -25,42 +25,63 @@ function onBlock(text) {
 }
 
 const violations = [];
-const release = read('release.yml');
-const ci = read('ci.yml');
+const files = readdirSync(dir)
+  .filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'))
+  .sort();
 
-// release.yml: triggers only on push to main.
-const releaseOn = onBlock(release);
-if (!releaseOn) {
-  violations.push('release.yml: missing top-level `on:` block');
-} else if (releaseOn.join('|') !== 'push:|branches: [main]') {
-  violations.push(
-    `release.yml: \`on:\` must be exactly push -> branches: [main], found: ${releaseOn.join(' / ')}`,
-  );
-}
+if (!files.includes('release.yml')) violations.push('release.yml is missing');
+if (!files.includes('ci.yml')) violations.push('ci.yml is missing');
 
-// release.yml: OIDC permission present, no npm token anywhere.
-if (!/^\s*id-token:\s*write\s*$/m.test(stripComments(release))) {
-  violations.push('release.yml: missing `id-token: write` (required for npm trusted publishing)');
-}
-if (/NPM_TOKEN/.test(release)) {
-  violations.push('release.yml: must not reference NPM_TOKEN (use trusted publishing)');
-}
-if (!release.includes("github.repository == 'loipv/nestjs-nats'")) {
-  violations.push(
-    "release.yml: release job must be gated on github.repository == 'loipv/nestjs-nats'",
-  );
-}
+for (const file of files) {
+  const body = stripComments(readFileSync(join(dir, file), 'utf8'));
 
-// ci.yml: read-only, no secrets for publishing.
-const ciBody = stripComments(ci);
-if (!/^permissions:\s*\n\s+contents:\s*read\s*$/m.test(ciBody)) {
-  violations.push('ci.yml: top-level `permissions:` must be `contents: read`');
-}
-if (/:\s*write\s*$/m.test(ciBody)) {
-  violations.push('ci.yml: must not request any `write` permission');
-}
-if (/NPM_TOKEN|id-token/.test(ciBody)) {
-  violations.push('ci.yml: must not reference NPM_TOKEN or id-token');
+  if (/NPM_TOKEN/.test(body)) {
+    violations.push(`${file}: must not reference NPM_TOKEN (use trusted publishing)`);
+  }
+
+  if (file === 'release.yml') {
+    // Triggers only on push to main.
+    const on = onBlock(body);
+    if (!on) {
+      violations.push('release.yml: missing top-level `on:` block');
+    } else if (on.join('|') !== 'push:|branches: [main]') {
+      violations.push(
+        `release.yml: \`on:\` must be exactly push -> branches: [main], found: ${on.join(' / ')}`,
+      );
+    }
+    // OIDC permission for npm trusted publishing.
+    if (!/^\s*id-token:\s*write\s*$/m.test(body)) {
+      violations.push(
+        'release.yml: missing `id-token: write` (required for npm trusted publishing)',
+      );
+    }
+    // Only runs in the canonical repository.
+    if (!/^\s*if:\s*github\.repository\s*==\s*'loipv\/nestjs-nats'\s*$/m.test(body)) {
+      violations.push(
+        "release.yml: release job needs `if: github.repository == 'loipv/nestjs-nats'`",
+      );
+    }
+    // The only secret it may use is the built-in GITHUB_TOKEN.
+    for (const [, name] of body.matchAll(/secrets\.([A-Za-z0-9_]+)/g)) {
+      if (name !== 'GITHUB_TOKEN') {
+        violations.push(`release.yml: only secrets.GITHUB_TOKEN is allowed, found secrets.${name}`);
+      }
+    }
+  } else {
+    // Every other workflow is read-only and cannot publish.
+    if (!/^permissions:\s*\n\s+contents:\s*read\s*$/m.test(body)) {
+      violations.push(`${file}: top-level \`permissions:\` must be \`contents: read\``);
+    }
+    if (/:\s*write\s*$/m.test(body)) {
+      violations.push(`${file}: must not request any \`write\` permission`);
+    }
+    if (/id-token/.test(body)) {
+      violations.push(`${file}: must not reference id-token`);
+    }
+    if (/secrets\./.test(body)) {
+      violations.push(`${file}: must not reference secrets`);
+    }
+  }
 }
 
 if (violations.length > 0) {
@@ -69,5 +90,5 @@ if (violations.length > 0) {
   process.exit(1);
 }
 console.log(
-  'check-workflows: ok (release.yml push-to-main only, id-token: write, no NPM_TOKEN; ci.yml read-only)',
+  `check-workflows: ok (${files.join(', ')}; release.yml push-to-main only, id-token: write, no NPM_TOKEN; others read-only)`,
 );
