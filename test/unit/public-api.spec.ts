@@ -1,15 +1,30 @@
 import { readFile } from 'node:fs/promises';
 import { expect, expectTypeOf, it } from 'vitest';
-import type { Delivery, HandlerInfo, NatsBatchContext, NatsContext } from '../../src/index.js';
+import type {
+  BatchOptions,
+  ClaimResult,
+  Delivery,
+  DlqOptions,
+  HandlerInfo,
+  IdempotencyOptions,
+  IdempotencyStore,
+  JetStreamPublishOptions,
+  NatsBatchContext,
+  NatsContext,
+  PublishManyResult,
+  RetryOptions,
+} from '../../src/index.js';
 import * as api from '../../src/index.js';
 
 it('exports the runtime API', () =>
   expect(Object.keys(api).sort()).toEqual(
     [
+      'Batcher',
       'Consume',
       'Ctx',
       'DEFAULT_CONNECTION',
       'Headers',
+      'InMemoryIdempotencyStore',
       'InjectJetStream',
       'InjectNatsClient',
       'InjectNatsConnection',
@@ -35,6 +50,7 @@ it('exports the runtime API', () =>
       'StreamConfigConflictError',
       'Subject',
       'Subscribe',
+      'defaultIsRetryable',
       'getConnectionToken',
       'getJetStreamClientToken',
       'getNatsClientToken',
@@ -73,4 +89,28 @@ it('exposes a narrow handler description on Delivery', () => {
   expectTypeOf<keyof Delivery>().toEqualTypeOf<
     'handler' | 'messages' | 'context' | 'codec' | 'logger' | 'result'
   >();
+});
+
+it('exports the reliability types', () => {
+  expectTypeOf<RetryOptions>().toHaveProperty('maxRetries');
+  expectTypeOf<DlqOptions>().toHaveProperty('subject');
+  expectTypeOf<IdempotencyOptions>().toHaveProperty('ttl');
+  expectTypeOf<IdempotencyStore>().toHaveProperty('claim');
+  expectTypeOf<ClaimResult>().not.toBeAny();
+  expectTypeOf<BatchOptions>().toHaveProperty('maxSize');
+  expectTypeOf<JetStreamPublishOptions>().not.toBeAny();
+  expectTypeOf<PublishManyResult>().toHaveProperty('ok');
+});
+
+it('does not export internals', () => {
+  for (const name of [
+    'Dispatcher',
+    'BatchCollector',
+    'createSettlement',
+    'createIdempotency',
+    'decide',
+    'backoffDelay',
+    'publishToDlq',
+  ])
+    expect(api).not.toHaveProperty(name);
 });
