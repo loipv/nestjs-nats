@@ -1,0 +1,34 @@
+import type { ConsumerConfig, JetStreamOptions, StreamConfig } from '@nats-io/jetstream';
+import type { NodeConnectionOptions } from '@nats-io/transport-node';
+import type { LoggerService } from '@nestjs/common';
+import type { Codec } from '../codec/codec.js';
+import type { NatsPlugin } from '../pipeline/types.js';
+
+type WithRequired<T, K extends keyof T> = T & { [P in K]-?: T[P] };
+
+export type StreamSyncMode = 'create-or-update' | 'create-only' | 'verify' | 'none';
+
+export type StreamDeclaration = WithRequired<Partial<StreamConfig>, 'name'>;
+
+export interface ConsumerDeclaration {
+  stream: string;
+  config: Partial<ConsumerConfig> & { durable_name: string };
+}
+
+export interface NatsModuleOptions {
+  name?: string;
+  connection: NodeConnectionOptions;
+  jetstream?: { options?: JetStreamOptions; sync?: StreamSyncMode };
+  streams?: StreamDeclaration[];
+  consumers?: ConsumerDeclaration[];
+  codec?: Codec;
+  plugins?: NatsPlugin[];
+  shutdown?: { drainTimeout?: number };
+  logger?: false | LoggerService;
+}
+
+export interface NatsFeatureOptions {
+  connection?: string;
+  streams?: StreamDeclaration[];
+  consumers?: ConsumerDeclaration[];
+}
