@@ -23,6 +23,8 @@ function errorTrace(err: unknown): string {
   return err instanceof Error ? (err.stack ?? err.message) : String(err);
 }
 
+const isPowerOfTwo = (n: number): boolean => n >= 1 && (n & (n - 1)) === 0;
+
 /** Runs a `@Consume` handler on a JetStream pull consumer (`consumer.consume()`). */
 export class JetStreamConsumerAdapter implements HandlerAdapter {
   private readonly limiter: Limiter;
@@ -53,10 +55,16 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     if (this.messages) return;
     const { stream, durable, config } = this.def.options;
     if (config) await this.streams.ensureConsumer(stream, { ...config, durable_name: durable });
-    const consumer = await this.getConsumer(stream, durable);
+    const consumer = await this.getConsumer(stream, durable, config !== undefined);
     const messages = await consumer.consume({ max_messages: Math.max(2 * this.concurrency, 2) });
+    if (this.stopping) {
+      // stop() ran while start() was awaiting: nothing will ever read these messages.
+      await messages.close();
+      return;
+    }
     this.messages = messages;
     this.loop = this.consume(messages);
+    void this.watchStatus(messages);
   }
 
   stop(): Promise<void> {
@@ -78,7 +86,7 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     await this.limiter.idle();
   }
 
-  private async getConsumer(stream: string, durable: string) {
+  private async getConsumer(stream: string, durable: string, configDeclared: boolean) {
     try {
       return await this.entry.js().consumers.get(stream, durable);
     } catch (err) {
@@ -88,7 +96,9 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
           err.code === JetStreamApiCodes.StreamNotFound)
       ) {
         throw new NatsConfigError(
-          `Consumer "${stream}/${durable}" not found and no config declared for ${this.def.className}.${this.def.methodName}`,
+          configDeclared
+            ? `Consumer "${stream}/${durable}" not found for ${this.def.className}.${this.def.methodName}; its config is declared but the JetStream sync mode did not create it`
+            : `Consumer "${stream}/${durable}" not found and no config declared for ${this.def.className}.${this.def.methodName}`,
           { cause: err },
         );
       }
@@ -116,6 +126,43 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
       if (!this.stopping) {
         this.entry.logger.error(`Consumer of ${this.label} failed`, errorTrace(err));
       }
+      return;
+    }
+    if (!this.stopping) {
+      this.entry.logger.error(
+        `Consumer of ${this.label} ended unexpectedly; no more messages will be received`,
+      );
+    }
+  }
+
+  /** Surfaces consumer problems the library only reports through `status()` while it retries. */
+  private async watchStatus(messages: ConsumerMessages): Promise<void> {
+    try {
+      for await (const n of messages.status()) {
+        if (this.stopping) return;
+        switch (n.type) {
+          case 'consumer_deleted':
+            this.entry.logger.error(
+              `Consumer of ${this.label} was deleted; no messages will be received until it is recreated`,
+            );
+            break;
+          case 'consumer_not_found':
+          case 'stream_not_found':
+          case 'heartbeats_missed':
+            // The library retries forever; log on exponentially spaced attempts only.
+            if (!('count' in n) || isPowerOfTwo(n.count)) {
+              const attempt = 'count' in n ? ` (attempt ${n.count})` : '';
+              this.entry.logger.warn(`Consumer of ${this.label} reported ${n.type}${attempt}`);
+            }
+            break;
+          default:
+            break;
+        }
+      }
+    } catch (err) {
+      if (!this.stopping) {
+        this.entry.logger.warn(`Status watch of ${this.label} failed: ${errorTrace(err)}`);
+      }
     }
   }
 
@@ -140,6 +187,18 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
       codec: this.codec,
       logger: this.entry.logger,
     };
-    await this.run(d);
+    try {
+      await this.run(d);
+    } catch (err) {
+      // Reached only when the pipeline failed outside settlement (e.g. a plugin threw).
+      this.entry.logger.error(`Handler ${this.label} failed`, errorTrace(err));
+      if (!context.settled) {
+        try {
+          context.nak();
+        } catch (nakErr) {
+          this.entry.logger.error(`Failed to nak message for ${this.label}`, errorTrace(nakErr));
+        }
+      }
+    }
   }
 }

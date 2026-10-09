@@ -1,4 +1,5 @@
 import {
+  AckPolicy,
   type JetStreamClient,
   type JetStreamManager,
   jetstream,
@@ -7,7 +8,7 @@ import {
 import { connect, type NatsConnection } from '@nats-io/transport-node';
 import { Injectable } from '@nestjs/common';
 import type { TestingModule } from '@nestjs/testing';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { NatsJetStreamContext } from '../../src/context/nats-context.js';
 import { Consume } from '../../src/decorators/handler.decorators.js';
 import { Ctx, Payload } from '../../src/decorators/param.decorators.js';
@@ -103,6 +104,18 @@ class PreCreatedHandlers {
 }
 
 @Injectable()
+class DoomedHandlers {
+  @Consume({ stream: 'ORD', durable: 'doomed', config: { filter_subject: 'ord.doomed' } })
+  on() {}
+}
+
+@Injectable()
+class SyncNoneHandlers {
+  @Consume({ stream: 'ORD', durable: 'unsynced', config: { filter_subject: 'ord.unsynced' } })
+  on() {}
+}
+
+@Injectable()
 class SlowHandlers {
   started = 0;
   done = 0;
@@ -165,10 +178,10 @@ describe('@Consume', () => {
 
   it('terms non-JSON payloads instead of redelivering', async () => {
     const callsBefore = handlers.billing.length;
-    await js.publish('ord.created', enc.encode('hello'));
+    const { seq } = await js.publish('ord.created', enc.encode('hello'));
     await eventually(async () => {
       const info = await jsm.consumers.info('ORD', 'billing');
-      expect(info.delivered.stream_seq).toBeGreaterThanOrEqual(2);
+      expect(info.delivered.stream_seq).toBeGreaterThanOrEqual(seq);
       expect(info.num_ack_pending).toBe(0);
     });
     await sleep(1000);
@@ -207,7 +220,7 @@ describe('@Consume', () => {
   it('consumes a pre-created consumer without config', async () => {
     await jsm.consumers.add('ORD', {
       durable_name: 'precreated',
-      ack_policy: 'explicit' as never,
+      ack_policy: AckPolicy.Explicit,
       filter_subject: 'ord.pre',
     });
     const preApp = await createTestApp({
@@ -232,6 +245,46 @@ describe('@Consume', () => {
     );
   });
 
+  it('says config is declared but not synced when sync mode is none', async () => {
+    await expect(
+      createTestApp({
+        imports: [
+          NatsModule.forRoot({
+            connection: { servers: srv.url },
+            logger: false,
+            jetstream: { sync: 'none' },
+          }),
+        ],
+        providers: [SyncNoneHandlers],
+      }),
+    ).rejects.toThrow(
+      /Consumer "ORD\/unsynced" not found for SyncNoneHandlers\.on; its config is declared/,
+    );
+  });
+
+  it('logs when the consumer is deleted at runtime', async () => {
+    const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const doomedApp = await createTestApp({
+      imports: [
+        NatsModule.forRoot({
+          connection: { servers: srv.url },
+          logger,
+          streams: [{ name: 'ORD', subjects: ['ord.>'] }],
+        }),
+      ],
+      providers: [DoomedHandlers],
+    });
+    try {
+      await jsm.consumers.delete('ORD', 'doomed');
+      await eventually(() => {
+        const logged = [...logger.error.mock.calls, ...logger.warn.mock.calls].flat().join('\n');
+        expect(logged).toMatch(/DoomedHandlers\.on.*ORD\/doomed/);
+      });
+    } finally {
+      await doomedApp.close();
+    }
+  });
+
   it('fails bootstrap on duplicate durable', async () => {
     await expect(
       createTestApp({ imports: [nats()], providers: [DuplicateDurableHandlers] }),
@@ -246,6 +299,6 @@ describe('@Consume', () => {
     await slowApp.close();
     // The in-flight message finished; the others were handed back without being handled.
     expect(slow.done).toBe(slow.started);
-    expect(slow.started).toBeLessThan(3);
+    expect(slow.started).toBe(1);
   });
 });

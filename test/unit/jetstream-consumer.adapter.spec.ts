@@ -12,7 +12,17 @@ function fakeMessages() {
   const queue: JsMsg[] = [];
   let wake: (() => void) | undefined;
   let closed = false;
+  const statusQueue: unknown[] = [];
+  let statusWake: (() => void) | undefined;
   const messages = {
+    async *status() {
+      for (;;) {
+        const next = statusQueue.shift();
+        if (next) yield next;
+        else if (closed) return;
+        else await new Promise<void>((resolve) => (statusWake = resolve));
+      }
+    },
     async *[Symbol.asyncIterator]() {
       for (;;) {
         const next = queue.shift();
@@ -24,6 +34,7 @@ function fakeMessages() {
     close: () => {
       closed = true;
       wake?.();
+      statusWake?.();
       return Promise.resolve();
     },
   };
@@ -32,6 +43,14 @@ function fakeMessages() {
     push(msg: JsMsg) {
       queue.push(msg);
       wake?.();
+    },
+    notify(n: unknown) {
+      statusQueue.push(n);
+      statusWake?.();
+    },
+    /** Ends the iterator without anybody calling stop() on the adapter. */
+    end() {
+      void messages.close();
     },
   };
 }
@@ -50,13 +69,20 @@ function fakeMsg(id: number) {
   return msg;
 }
 
-function setup(invoke: (payload: unknown) => Promise<unknown>) {
+function setup(
+  invoke: (payload: unknown) => Promise<unknown>,
+  opts: {
+    concurrency?: number;
+    plugins?: unknown[];
+    consume?: () => Promise<ConsumerMessages>;
+  } = {},
+) {
   const fake = fakeMessages();
-  const consume = vi.fn(() => Promise.resolve(fake.messages));
+  const consume = vi.fn(opts.consume ?? (() => Promise.resolve(fake.messages)));
   const logger = { log: vi.fn(), error: vi.fn(), warn: vi.fn() };
   const entry = {
     name: 'default',
-    options: {},
+    options: { plugins: opts.plugins },
     logger,
     js: () => ({ consumers: { get: () => Promise.resolve({ consume }) } }),
   } as unknown as ConnectionEntry;
@@ -65,7 +91,7 @@ function setup(invoke: (payload: unknown) => Promise<unknown>) {
     connection: 'default',
     className: 'C',
     methodName: 'm',
-    options: { stream: 'ORD', durable: 'd' },
+    options: { stream: 'ORD', durable: 'd', concurrency: opts.concurrency },
     invoke,
   } as unknown as HandlerDefinition & { kind: 'consume' };
   const adapter = new JetStreamConsumerAdapter(def, entry, {} as NatsStreamManager);
@@ -78,6 +104,83 @@ describe('JetStreamConsumerAdapter', () => {
     await adapter.start();
     expect(consume).toHaveBeenCalledWith({ max_messages: 2 });
     await adapter.stop();
+    await adapter.idle();
+  });
+
+  it('requests 8 messages for concurrency 4', async () => {
+    const { adapter, consume } = setup(() => Promise.resolve(), { concurrency: 4 });
+    await adapter.start();
+    expect(consume).toHaveBeenCalledWith({ max_messages: 8 });
+    await adapter.stop();
+    await adapter.idle();
+  });
+
+  it('logs an error when the consume loop ends while not stopping', async () => {
+    const { adapter, fake, logger } = setup(() => Promise.resolve());
+    await adapter.start();
+    fake.end();
+    await adapter.idle();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringMatching(/C\.m.*ORD\/d.*ended unexpectedly/),
+    );
+  });
+
+  it('does not log when the loop ends because of stop()', async () => {
+    const { adapter, logger } = setup(() => Promise.resolve());
+    await adapter.start();
+    await adapter.stop();
+    await adapter.idle();
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  it('logs consumer status notifications', async () => {
+    const { adapter, fake, logger } = setup(() => Promise.resolve());
+    await adapter.start();
+    fake.notify({ type: 'consumer_deleted', stream: 'ORD', consumer: 'd' });
+    fake.notify({ type: 'consumer_not_found', name: 'd', stream: 'ORD', count: 1 });
+    await tick();
+    expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/ORD\/d.*was deleted/));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/ORD\/d.*consumer_not_found/));
+    await adapter.stop();
+    await adapter.idle();
+  });
+
+  it('naks the message when the pipeline fails outside settlement', async () => {
+    const plugin = {
+      inbound: {
+        stage: 'outer',
+        handle: () => Promise.reject(new Error('plugin boom')),
+      },
+    };
+    const { adapter, fake, logger } = setup(() => Promise.resolve(), { plugins: [plugin] });
+    await adapter.start();
+    const m = fakeMsg(1);
+    fake.push(m as unknown as JsMsg);
+    await tick();
+    await tick();
+    expect(m.nak).toHaveBeenCalledTimes(1);
+    expect(m.ack).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalled();
+    await adapter.stop();
+    await adapter.idle();
+  });
+
+  it('closes freshly created messages when stop() ran during start()', async () => {
+    const fake = fakeMessages();
+    const closeSpy = vi.spyOn(fake.messages, 'close');
+    let resolveConsume!: () => void;
+    const { adapter } = setup(() => Promise.resolve(), {
+      consume: () =>
+        new Promise<ConsumerMessages>((resolve) => {
+          resolveConsume = () => resolve(fake.messages);
+        }),
+    });
+    const starting = adapter.start();
+    await tick();
+    await adapter.stop();
+    resolveConsume();
+    await starting;
+    expect(closeSpy).toHaveBeenCalledTimes(1);
     await adapter.idle();
   });
 
