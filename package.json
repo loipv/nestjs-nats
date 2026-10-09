@@ -18,11 +18,14 @@
     "dist"
   ],
   "scripts": {
+    "prebuild": "node --input-type=commonjs -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run --project unit",
     "test:int": "vitest run --project integration",
     "lint": "biome check .",
-    "check:pkg": "publint && attw --pack . --profile esm-only"
+    "check:pkg": "publint && attw --pack . --profile esm-only",
+    "prepublishOnly": "npm run build && npm run check:pkg && npm run typecheck && npm test"
   },
   "peerDependencies": {
     "@nats-io/jetstream": "^3.0.0",
