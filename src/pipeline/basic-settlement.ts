@@ -1,18 +1,8 @@
-import { HttpException } from '@nestjs/common';
 import { NatsJetStreamContext } from '../context/nats-context.js';
-import { NatsDecodeError, NonRetryableError } from '../errors/errors.js';
+import { defaultIsRetryable } from '../settlement/retry.js';
 import { type Delivery, definitionOf } from './delivery.js';
 import { isReplyDelivery } from './reply.js';
 import type { InboundMiddleware, Next } from './types.js';
-
-function isNonRetryable(err: unknown): boolean {
-  if (err instanceof NatsDecodeError || err instanceof NonRetryableError) return true;
-  if (err instanceof HttpException) {
-    const status = err.getStatus();
-    return status >= 400 && status < 500;
-  }
-  return false;
-}
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -47,8 +37,8 @@ export const basicSettlement: InboundMiddleware = {
       if (d.handler.kind === 'consume') {
         d.logger.error(`Handler ${label(d)} failed`, errorTrace(err));
         if (ctx && !ctx.settled) {
-          if (isNonRetryable(err)) settle(d, 'term', () => ctx.term(errorMessage(err)));
-          else settle(d, 'nak', () => ctx.nak());
+          if (defaultIsRetryable(err)) settle(d, 'nak', () => ctx.nak());
+          else settle(d, 'term', () => ctx.term(errorMessage(err)));
         }
         return;
       }

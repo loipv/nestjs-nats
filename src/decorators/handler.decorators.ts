@@ -1,6 +1,8 @@
 import type { ConsumerConfig } from '@nats-io/jetstream';
 import { SetMetadata } from '@nestjs/common';
 import type { Codec } from '../codec/codec.js';
+import type { DlqOptions } from '../settlement/dlq.js';
+import type { RetryOptions } from '../settlement/retry.js';
 import {
   NATS_CONSUME_METADATA,
   NATS_ENDPOINT_METADATA,
@@ -13,6 +15,8 @@ export interface SubscribeOptions {
   queue?: string;
   codec?: Codec;
   concurrency?: number;
+  retry?: RetryOptions | false;
+  dlq?: DlqOptions | boolean;
 }
 
 export interface ConsumeOptions {
@@ -23,6 +27,8 @@ export interface ConsumeOptions {
   ack?: 'auto' | 'manual';
   codec?: Codec;
   concurrency?: number;
+  retry?: RetryOptions | false;
+  dlq?: DlqOptions | boolean;
 }
 
 export interface NatsServiceOptions {

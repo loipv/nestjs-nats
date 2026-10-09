@@ -4,7 +4,10 @@ import type { HandlerDefinition } from '../../src/discovery/handler-explorer.js'
 import { validateHandlers } from '../../src/discovery/handler-validator.js';
 import { NatsConfigError } from '../../src/errors/errors.js';
 
-const mgr = { has: (name: string) => name === 'default' } as unknown as NatsConnectionManager;
+const mgr = {
+  has: (name: string) => name === 'default',
+  get: () => ({ options: {} }),
+} as unknown as NatsConnectionManager;
 
 interface Opts {
   connection?: string;
@@ -67,6 +70,50 @@ describe('validateHandlers', () => {
     expect(() => validateHandlers(toArray(defs), mgr)).toThrow(NatsConfigError),
   );
 
+  it.each([
+    ['negative maxRetries', { maxRetries: -1 }],
+    ['fractional maxRetries', { maxRetries: 1.5 }],
+    ['negative initialDelay', { initialDelay: -1 }],
+    ['factor < 1', { factor: 0.5 }],
+    ['maxDelay < initialDelay', { initialDelay: 10, maxDelay: 5 }],
+    ['jitter > 1', { jitter: 2 }],
+    ['negative jitter', { jitter: -0.1 }],
+  ])('rejects retry with %s', (_, retry) => {
+    expect(() => validateHandlers([def({ options: { retry } })], mgr)).toThrow(NatsConfigError);
+    expect(() => validateHandlers([consumeDef('S', 'd', { options: { retry } })], mgr)).toThrow(
+      NatsConfigError,
+    );
+  });
+
+  it('names Class.method and the field in the retry error', () =>
+    expect(() =>
+      validateHandlers(
+        [def({ className: 'Orders', methodName: 'onX', options: { retry: { jitter: 2 } } })],
+        mgr,
+      ),
+    ).toThrow(/Orders\.onX.*jitter/));
+
+  it('validates retry against module-level options', () => {
+    const bad = {
+      has: () => true,
+      get: () => ({ options: { retry: { initialDelay: 100_000 } } }),
+    } as unknown as NatsConnectionManager;
+    // module initialDelay 100000 > default maxDelay 60000
+    expect(() => validateHandlers([def()], bad)).toThrow(/maxDelay/);
+  });
+
+  it('accepts retry: false and valid retry options', () => {
+    expect(() =>
+      validateHandlers(
+        [
+          def({ options: { retry: false } }),
+          consumeDef('S', 'd', { options: { retry: { maxRetries: 0, jitter: 1, factor: 1 } } }),
+        ],
+        mgr,
+      ),
+    ).not.toThrow();
+  });
+
   it('accepts valid handlers', () => {
     expect(() =>
       validateHandlers(
@@ -83,7 +130,10 @@ describe('validateHandlers', () => {
   });
 
   it('allows the same stream + durable on different connections', () => {
-    const two = { has: () => true } as unknown as NatsConnectionManager;
+    const two = {
+      has: () => true,
+      get: () => ({ options: {} }),
+    } as unknown as NatsConnectionManager;
     expect(() =>
       validateHandlers([consumeDef('S', 'd'), consumeDef('S', 'd', { connection: 'b' })], two),
     ).not.toThrow();

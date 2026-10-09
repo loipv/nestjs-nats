@@ -3,6 +3,8 @@ import type { NodeConnectionOptions } from '@nats-io/transport-node';
 import type { LoggerService } from '@nestjs/common';
 import type { Codec } from '../codec/codec.js';
 import type { NatsPlugin } from '../pipeline/types.js';
+import type { DlqOptions } from '../settlement/dlq.js';
+import type { RetryOptions } from '../settlement/retry.js';
 
 type WithRequired<T, K extends keyof T> = T & { [P in K]-?: T[P] };
 
@@ -23,6 +25,8 @@ export interface NatsModuleOptions {
   consumers?: ConsumerDeclaration[];
   codec?: Codec;
   plugins?: NatsPlugin[];
+  retry?: RetryOptions | false;
+  dlq?: DlqOptions | boolean;
   shutdown?: { drainTimeout?: number };
   logger?: false | LoggerService;
 }
