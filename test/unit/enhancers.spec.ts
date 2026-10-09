@@ -335,6 +335,9 @@ describe('NatsParamsFactory', () => {
     expect(f.exchangeKeyForValue(type, data as never, args)).toEqual(expected),
   );
 
+  it('resolves @nestjs/microservices @Ctx() (RpcParamtype.CONTEXT = 6) to the context', () =>
+    expect(f.exchangeKeyForValue(6, undefined as never, args)).toBe(ctx));
+
   it('tolerates a missing payload when a property is requested', () =>
     expect(f.exchangeKeyForValue(NatsParamType.PAYLOAD, 'p', [undefined, ctx])).toBeUndefined());
 });
