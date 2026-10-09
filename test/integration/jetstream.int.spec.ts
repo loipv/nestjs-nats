@@ -419,6 +419,41 @@ describe('JetStream', () => {
     }
   });
 
+  it('exposes msgId to outbound plugins as the Nats-Msg-Id header', async () => {
+    const seen: Array<string | undefined> = [];
+    const plugin: NatsPlugin = {
+      name: 'p',
+      outbound: {
+        async handle(m, next) {
+          seen.push(m.headers.has('Nats-Msg-Id') ? m.headers.get('Nats-Msg-Id') : undefined);
+          // A plugin may set the id itself, e.g. derived from the payload.
+          if (!m.headers.has('Nats-Msg-Id')) m.headers.set('Nats-Msg-Id', 'from-plugin');
+          await next();
+        },
+      },
+    };
+    const { app, sm, js } = await bareApp({ plugins: [plugin] });
+    try {
+      await sm.ensureStream({ name: 'S9P', subjects: ['s9p.>'] });
+      const a = await js.publish('s9p.x', 1, { msgId: 'm1' });
+      const b = await js.publish('s9p.x', 1, { msgId: 'm1' });
+      const c = await js.publish('s9p.x', 2);
+      const d = await js.publish('s9p.x', 3);
+      expect(seen).toEqual(['m1', 'm1', undefined, undefined]);
+      expect([a.duplicate, b.duplicate, c.duplicate, d.duplicate]).toEqual([
+        false,
+        true,
+        false,
+        true,
+      ]);
+      const jsm = await sm.jsm();
+      const msg = await jsm.streams.getMessage('S9P', { seq: 1 });
+      expect(msg?.header.get('Nats-Msg-Id')).toBe('m1');
+    } finally {
+      await app.close();
+    }
+  });
+
   it('publish runs the outbound pipeline with kind jetstream and honors expect', async () => {
     const seen: string[] = [];
     const plugin: NatsPlugin = {
