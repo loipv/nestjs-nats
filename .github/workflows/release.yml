@@ -3,6 +3,7 @@ name: Release
 on:
   push:
     branches: [main]
+  workflow_dispatch: {}
 
 concurrency:
   group: release
@@ -10,7 +11,8 @@ concurrency:
 
 jobs:
   release:
-    if: github.repository == 'loipv/nestjs-nats'
+    # Canonical repository only, and only from main (workflow_dispatch can pick any ref).
+    if: github.repository == 'loipv/nestjs-nats' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -28,11 +30,11 @@ jobs:
       # Trusted publishing (OIDC) needs npm CLI 11.5.1 or newer.
       - run: npm install -g npm@^11.5.1
       - run: npm ci
-      - uses: changesets/action@v1
+      # changesets/action v2 is the line that supports @changesets/cli v3 (v1 is for CLI v2).
+      # It uses the job's GITHUB_TOKEN through its `github-token` input default.
+      - uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
         with:
-          version: npm run version-packages
-          publish: npm run release
-          commit: "chore: version packages"
-          title: "chore: version packages"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          version-script: npm run version-packages
+          publish-script: npm run release
+          commit-message: "chore: version packages"
+          pr-title: "chore: version packages"

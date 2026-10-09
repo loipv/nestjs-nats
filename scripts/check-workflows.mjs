@@ -11,17 +11,30 @@ const stripComments = (text) =>
     .map((line) => line.replace(/(^|\s)#.*$/, ''))
     .join('\n');
 
-// Non-empty, comment-free, trimmed lines of the top-level `on:` block.
+// The top-level `on:` block as { trigger: [trimmed child lines] }, from comment-free text.
 function onBlock(text) {
   const lines = text.split('\n');
   const start = lines.findIndex((l) => /^on:\s*$/.test(l));
   if (start === -1) return null;
-  const block = [];
+  const body = [];
   for (const line of lines.slice(start + 1)) {
     if (/^\S/.test(line)) break;
-    if (line.trim() !== '') block.push(line.trim());
+    if (line.trim() !== '') body.push(line);
   }
-  return block;
+  if (body.length === 0) return {};
+  const indent = (l) => l.length - l.trimStart().length;
+  const top = Math.min(...body.map(indent));
+  const triggers = {};
+  let current = null;
+  for (const line of body) {
+    if (indent(line) === top) {
+      current = line.trim();
+      triggers[current] = [];
+    } else {
+      triggers[current].push(line.trim());
+    }
+  }
+  return triggers;
 }
 
 const violations = [];
@@ -40,14 +53,27 @@ for (const file of files) {
   }
 
   if (file === 'release.yml') {
-    // Triggers only on push to main.
+    // Triggers only on push to main, plus an optional manual workflow_dispatch (no inputs).
+    // Never pull_request / pull_request_target: they would run with fork-controlled code.
+    if (/\bpull_request/.test(body)) {
+      violations.push('release.yml: must not use a pull_request or pull_request_target trigger');
+    }
     const on = onBlock(body);
     if (!on) {
       violations.push('release.yml: missing top-level `on:` block');
-    } else if (on.join('|') !== 'push:|branches: [main]') {
-      violations.push(
-        `release.yml: \`on:\` must be exactly push -> branches: [main], found: ${on.join(' / ')}`,
-      );
+    } else {
+      const found = Object.entries(on)
+        .map(([k, v]) => [k, ...v].join(' '))
+        .join(' / ');
+      const pushOk = on['push:']?.join('|') === 'branches: [main]';
+      const dispatchOk = (k) =>
+        (k === 'workflow_dispatch:' || k === 'workflow_dispatch: {}') && on[k].length === 0;
+      const extra = Object.keys(on).filter((k) => k !== 'push:' && !dispatchOk(k));
+      if (!pushOk || extra.length > 0) {
+        violations.push(
+          `release.yml: \`on:\` must be exactly push -> branches: [main] (plus optional workflow_dispatch), found: ${found}`,
+        );
+      }
     }
     // OIDC permission for npm trusted publishing.
     if (!/^\s*id-token:\s*write\s*$/m.test(body)) {
@@ -55,10 +81,14 @@ for (const file of files) {
         'release.yml: missing `id-token: write` (required for npm trusted publishing)',
       );
     }
-    // Only runs in the canonical repository.
-    if (!/^\s*if:\s*github\.repository\s*==\s*'loipv\/nestjs-nats'\s*$/m.test(body)) {
+    // Only runs in the canonical repository, and only on main (a manual run can pick any ref).
+    if (
+      !/^\s*if:\s*github\.repository\s*==\s*'loipv\/nestjs-nats'\s*&&\s*github\.ref\s*==\s*'refs\/heads\/main'\s*$/m.test(
+        body,
+      )
+    ) {
       violations.push(
-        "release.yml: release job needs `if: github.repository == 'loipv/nestjs-nats'`",
+        "release.yml: release job needs `if: github.repository == 'loipv/nestjs-nats' && github.ref == 'refs/heads/main'`",
       );
     }
     // The only secret it may use is the built-in GITHUB_TOKEN.
@@ -90,5 +120,5 @@ if (violations.length > 0) {
   process.exit(1);
 }
 console.log(
-  `check-workflows: ok (${files.join(', ')}; release.yml push-to-main only, id-token: write, no NPM_TOKEN; others read-only)`,
+  `check-workflows: ok (${files.join(', ')}; release.yml push-to-main (+ workflow_dispatch) only, id-token: write, no NPM_TOKEN; others read-only)`,
 );
