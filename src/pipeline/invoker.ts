@@ -1,9 +1,13 @@
 import type { JsMsg } from '@nats-io/jetstream';
 import type { Msg as NatsMsg } from '@nats-io/transport-node';
 import { isObservable, lastValueFrom } from 'rxjs';
+import { readCloudEvent } from '../cloudevents/codec.js';
+import { UnmatchedCloudEventError } from '../cloudevents/errors.js';
 import { decodePayload } from '../codec/codec.js';
 import { NatsBatchContext } from '../context/nats-batch-context.js';
-import type { NatsContext } from '../context/nats-context.js';
+import { CLOUD_EVENT, type NatsContext } from '../context/nats-context.js';
+import type { CloudEventRouting } from '../discovery/handler-explorer.js';
+import { NatsModuleError } from '../errors/errors.js';
 import { errorMessage } from '../util/errors.js';
 import { FAILURES, HANDLER_DEFINITION, type InternalDelivery, SKIPPED } from './delivery.js';
 
@@ -29,7 +33,8 @@ async function unwrap(result: unknown): Promise<unknown> {
 /**
  * Terminal of the inbound pipeline: decodes the payload, invokes the handler (with Nest
  * guards/pipes/interceptors/filters) and stores its result on the delivery. Batches are
- * handed over as an array of the decoded payloads (see `invokeBatch`). Synchronous throws
+ * handed over as an array of the decoded payloads (see `invokeBatch`); a CloudEvent router
+ * hands the message to its matching route (see `invokeRoute`). Synchronous throws
  * surface as rejections.
  */
 export async function invokeHandler(d: InternalDelivery): Promise<void> {
@@ -37,8 +42,39 @@ export async function invokeHandler(d: InternalDelivery): Promise<void> {
   const msg = d.messages[0];
   // A skipped message (e.g. an idempotency duplicate) is not handled and has no result.
   if (msg && d[SKIPPED].has(msg)) return;
+  const { router } = d[HANDLER_DEFINITION];
+  if (router) return invokeRoute(d, d.context, router);
   const payload = msg ? decodePayload(d.codec, msg.data, msg.headers) : undefined;
   d.result = await unwrap(await d[HANDLER_DEFINITION].invoke(payload, d.context));
+}
+
+/**
+ * Reads the message as a CloudEvent (a `NatsDecodeError` when it is not a valid one),
+ * presets `ctx.cloudEvent` and invokes the `@OnCloudEvent` route matching its type with
+ * its `data`. With no matching route, policy `'ack'` succeeds without a result; the others
+ * throw an `UnmatchedCloudEventError` for settlement to apply.
+ */
+async function invokeRoute(
+  d: InternalDelivery,
+  ctx: NatsContext,
+  router: CloudEventRouting,
+): Promise<void> {
+  const msg = d.messages[0];
+  if (!msg) throw new NatsModuleError('A CloudEvent router delivery holds no message');
+  const { meta, data } = readCloudEvent(msg, d.codec);
+  ctx[CLOUD_EVENT] = meta;
+  const target = router.route(meta.type);
+  if (target) {
+    d.result = await unwrap(await target.invoke(data, ctx));
+    return;
+  }
+  if (router.unmatched === 'ack') {
+    d.logger.debug?.(
+      `No handler for CloudEvent type "${meta.type}" in ${d.handler.className} on "${msg.subject}"; acknowledged`,
+    );
+    return;
+  }
+  throw new UnmatchedCloudEventError(meta.type, router.unmatched);
 }
 
 /**

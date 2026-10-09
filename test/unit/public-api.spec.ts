@@ -4,6 +4,7 @@ import type {
   Batcher,
   BatchOptions,
   ClaimResult,
+  CloudEventRouterOptions,
   Delivery,
   DlqOptions,
   HandlerInfo,
@@ -22,6 +23,7 @@ it('exports the runtime API', () =>
   expect(Object.keys(api).sort()).toEqual(
     [
       'CloudEvent',
+      'CloudEventRouter',
       'Consume',
       'Ctx',
       'DEFAULT_CONNECTION',
@@ -47,6 +49,7 @@ it('exports the runtime API', () =>
       'NatsService',
       'NatsStreamManager',
       'NonRetryableError',
+      'OnCloudEvent',
       'Payload',
       'ServiceEndpoint',
       'StreamConfigConflictError',
@@ -107,6 +110,7 @@ it('exports the reliability types', () => {
   expectTypeOf<Batcher>().toHaveProperty('add');
   expectTypeOf<Batcher>().toHaveProperty('flush');
   expectTypeOf<Batcher>().toHaveProperty('close');
+  expectTypeOf<CloudEventRouterOptions>().toHaveProperty('unmatched');
 });
 
 it('does not export internals', () => {
@@ -119,6 +123,8 @@ it('does not export internals', () => {
     'backoffDelay',
     'publishToDlq',
     'IdempotencyStoreError',
+    'UnmatchedCloudEventError',
+    'createTypeRouter',
   ])
     expect(api).not.toHaveProperty(name);
 });
