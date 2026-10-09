@@ -1,7 +1,7 @@
 import { headers } from '@nats-io/transport-node';
 import { describe, expect, it, vi } from 'vitest';
 import type { ConnectionEntry } from '../../src/connection/connection-manager.js';
-import { NatsContext, NatsJetStreamContext } from '../../src/context/nats-context.js';
+import { CLOUD_EVENT, NatsContext, NatsJetStreamContext } from '../../src/context/nats-context.js';
 import {
   createIdempotency,
   IdempotencyStoreError,
@@ -162,6 +162,34 @@ describe('idempotencyKey', () => {
     expect(idempotencyKey(ce)).toBe('m1');
   });
 
+  it("uses the context's cached CloudEvent attributes when given one", () => {
+    const raw = {
+      subject: 'a.b',
+      reply: '',
+      data: new TextEncoder().encode(
+        JSON.stringify({ specversion: '1.0', id: 'body', source: 'svc', type: 't' }),
+      ),
+      headers: hdrs({ 'Content-Type': 'application/cloudevents+json' }),
+    };
+    const msg: InboundMessage = { ...raw, raw: raw as never, attempt: 1 };
+    const ctx = new NatsContext({ kind: 'core', connection: 'default', raw: raw as never });
+    expect(idempotencyKey(msg, undefined, ctx)).toBe('svc|body');
+    // The context's attributes are used as they are, without reading the body again.
+    ctx[CLOUD_EVENT] = {
+      id: 'cached',
+      source: 'svc',
+      type: 't',
+      specversion: '1.0',
+      extensions: {},
+    };
+    expect(idempotencyKey(msg, () => 'x', ctx)).toBe('svc|cached');
+    ctx[CLOUD_EVENT] = undefined;
+    expect(idempotencyKey(msg, () => 'x', ctx)).toBe('x');
+    // A Nats-Msg-Id header still wins.
+    raw.headers.set('Nats-Msg-Id', 'm1');
+    expect(idempotencyKey(msg, undefined, ctx)).toBe('m1');
+  });
+
   it('is undefined without header and extractor result', () => {
     expect(idempotencyKey(msgWith({}))).toBeUndefined();
     expect(idempotencyKey(msgWith({}), () => undefined)).toBeUndefined();
@@ -233,6 +261,26 @@ describe('createIdempotency', () => {
     expect(next).toHaveBeenCalledTimes(1);
     expect(store.complete).toHaveBeenCalledWith('subscribe:H.on|m1', 1000);
     expect(d[SKIPPED].has(msg)).toBe(false);
+  });
+
+  it("keys a CloudEvent by its delivery context's cached attributes", async () => {
+    const store = fakeStore();
+    const { d } = coreDelivery({
+      'ce-specversion': '1.0',
+      'ce-id': 'hdr',
+      'ce-source': 'svc',
+      'ce-type': 't',
+    });
+    // Read by an earlier stage (e.g. tracing); idempotency must not parse the message again.
+    (d.context as NatsContext)[CLOUD_EVENT] = {
+      id: 'cached',
+      source: 'svc',
+      type: 't',
+      specversion: '1.0',
+      extensions: {},
+    };
+    await createIdempotency(cfg(store)).handle(d, async () => {});
+    expect(store.claim).toHaveBeenCalledWith('subscribe:H.on|svc|cached', 1000);
   });
 
   it('completes on success and survives complete failures', async () => {
