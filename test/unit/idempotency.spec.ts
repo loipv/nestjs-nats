@@ -7,7 +7,11 @@ import {
   idempotencyKey,
   resolveIdempotency,
 } from '../../src/idempotency/idempotency.js';
-import type { ClaimResult, IdempotencyStore } from '../../src/idempotency/store.js';
+import {
+  type ClaimResult,
+  type IdempotencyStore,
+  InMemoryIdempotencyStore,
+} from '../../src/idempotency/store.js';
 import { compose } from '../../src/pipeline/compose.js';
 import {
   type Delivery,
@@ -190,9 +194,9 @@ describe('createIdempotency', () => {
     const { d, msg } = coreDelivery();
     const next = vi.fn(async () => {});
     await createIdempotency(cfg(store)).handle(d, next);
-    expect(store.claim).toHaveBeenCalledWith('m1', 1000);
+    expect(store.claim).toHaveBeenCalledWith('subscribe:H.on|m1', 1000);
     expect(next).toHaveBeenCalledTimes(1);
-    expect(store.complete).toHaveBeenCalledWith('m1', 1000);
+    expect(store.complete).toHaveBeenCalledWith('subscribe:H.on|m1', 1000);
     expect(d[SKIPPED].has(msg)).toBe(false);
   });
 
@@ -211,7 +215,7 @@ describe('createIdempotency', () => {
     await expect(createIdempotency(cfg(store)).handle(d, () => Promise.reject(boom))).rejects.toBe(
       boom,
     );
-    expect(store.release).toHaveBeenCalledWith('m1');
+    expect(store.release).toHaveBeenCalledWith('subscribe:H.on|m1');
     expect(store.complete).not.toHaveBeenCalled();
   });
 
@@ -252,7 +256,7 @@ describe('createIdempotency', () => {
     await createIdempotency(
       cfg(store, { keyExtractor: (m: InboundMessage) => m.headers?.get('x-order-id') }),
     ).handle(d, async () => {});
-    expect(store.claim).toHaveBeenCalledWith('o-9', 1000);
+    expect(store.claim).toHaveBeenCalledWith('subscribe:H.on|o-9', 1000);
   });
 
   it('treats a throwing extractor like a claim failure', async () => {
@@ -267,6 +271,36 @@ describe('createIdempotency', () => {
         }),
       ).handle(d, async () => {}),
     ).rejects.toBe(err);
+  });
+});
+
+describe('handler scoping', () => {
+  it("keeps handlers sharing a store from swallowing each other's messages", async () => {
+    const store = new InMemoryIdempotencyStore();
+    const a = coreDelivery();
+    const b = coreDelivery();
+    (b.d.handler as { methodName: string }).methodName = 'other';
+    const nextA = vi.fn(async () => {});
+    const nextB = vi.fn(async () => {});
+    const mwA = createIdempotency(cfg(store));
+    const mwB = createIdempotency(cfg(store));
+    await mwA.handle(a.d, nextA);
+    await mwB.handle(b.d, nextB);
+    expect(nextA).toHaveBeenCalledTimes(1);
+    expect(nextB).toHaveBeenCalledTimes(1);
+    // Redelivery to the same handler is still a duplicate.
+    const again = coreDelivery();
+    const nextAgain = vi.fn(async () => {});
+    await mwA.handle(again.d, nextAgain);
+    expect(nextAgain).not.toHaveBeenCalled();
+    await store.close();
+  });
+
+  it('scopes consume keys by stream/durable and leaves the connection out', async () => {
+    const store = fakeStore();
+    const { d } = jsDelivery();
+    await createIdempotency(cfg(store)).handle(d, async () => {});
+    expect(store.claim).toHaveBeenCalledWith('consume:ORD/d|m1', 1000);
   });
 });
 
@@ -306,7 +340,7 @@ describe('ordering with settlement', () => {
     const bad = jsDelivery();
     const store = fakeStore();
     await run(bad.d, store, () => Promise.reject(new Error('boom')));
-    expect(store.release).toHaveBeenCalledWith('m1');
+    expect(store.release).toHaveBeenCalledWith('consume:ORD/d|m1');
     expect(bad.raw.nak).toHaveBeenCalledExactlyOnceWith(50);
     expect(bad.raw.ack).not.toHaveBeenCalled();
   });
@@ -345,9 +379,9 @@ describe('resolveIdempotency', () => {
       await resolveIdempotency(entry, opt, r)?.handle(d, async () => {});
       return store.complete.mock.calls[0];
     };
-    expect(await run(entryWith(store, 5), { ttl: 9 }, retry)).toEqual(['m1', 9]);
-    expect(await run(entryWith(store, 5), true, retry)).toEqual(['m1', 5]);
-    expect(await run(entryWith(store), true, retry)).toEqual(['m1', 300_000]);
+    expect(await run(entryWith(store, 5), { ttl: 9 }, retry)).toEqual(['subscribe:H.on|m1', 9]);
+    expect(await run(entryWith(store, 5), true, retry)).toEqual(['subscribe:H.on|m1', 5]);
+    expect(await run(entryWith(store), true, retry)).toEqual(['subscribe:H.on|m1', 300_000]);
 
     const { d, raw } = jsDelivery();
     store.claim.mockResolvedValueOnce('in-progress');

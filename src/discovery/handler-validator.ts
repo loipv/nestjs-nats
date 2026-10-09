@@ -1,5 +1,6 @@
 import type { NatsConnectionManager } from '../connection/connection-manager.js';
 import { NatsConfigError } from '../errors/errors.js';
+import { DEFAULT_IDEMPOTENCY_TTL } from '../idempotency/idempotency.js';
 import { resolveRetryPolicy } from '../settlement/retry.js';
 import type { HandlerDefinition } from './handler-explorer.js';
 
@@ -29,6 +30,7 @@ export function validateHandlers(defs: HandlerDefinition[], mgr: NatsConnectionM
     }
     if (def.kind === 'subscribe' || def.kind === 'consume') {
       validateRetry(def, mgr);
+      validateIdempotency(def, mgr);
       const { concurrency } = def.options;
       if (concurrency !== undefined && (!Number.isInteger(concurrency) || concurrency < 1)) {
         throw new NatsConfigError(
@@ -72,4 +74,19 @@ function validateRetry(def: HandlerDefinition, mgr: NatsConnectionManager): void
   }
   if (!(jitter >= 0 && jitter <= 1))
     throw invalidRetry(def, 'jitter', jitter, 'a number in [0, 1]');
+}
+
+/** Validates the TTL an idempotent handler resolves to (its own, else the module's). */
+function validateIdempotency(def: HandlerDefinition, mgr: NatsConnectionManager): void {
+  if (def.kind === 'service-endpoint') return;
+  const option = def.options.idempotency;
+  if (!option) return;
+  const handlerTtl = option === true ? undefined : option.ttl;
+  const ttl =
+    handlerTtl ?? mgr.get(def.connection).options.idempotency?.ttl ?? DEFAULT_IDEMPOTENCY_TTL;
+  if (!(Number.isFinite(ttl) && ttl > 0)) {
+    throw new NatsConfigError(
+      `NATS handler ${label(def)} has invalid idempotency.ttl ${String(ttl)}; expected a number > 0`,
+    );
+  }
 }

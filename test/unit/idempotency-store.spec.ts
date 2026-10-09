@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { NatsConfigError } from '../../src/errors/errors.js';
 import { InMemoryIdempotencyStore } from '../../src/idempotency/store.js';
 
 describe('InMemoryIdempotencyStore', () => {
@@ -62,16 +63,25 @@ describe('InMemoryIdempotencyStore', () => {
     vi.useFakeTimers();
     try {
       let t = 0;
-      const timed = new InMemoryIdempotencyStore({ now: () => t, maxKeys: 10 });
-      await timed.claim('k', 1000);
+      const timed = new InMemoryIdempotencyStore({ now: () => t });
+      await timed.claim('old', 1000);
+      await timed.claim('fresh', 100_000);
       t = 5000;
+      // Nothing touched the keys: only the sweep can remove the expired one.
+      expect(timed.size).toBe(2);
       vi.advanceTimersByTime(60_000);
-      // Expired and swept: a new claim starts from scratch.
-      expect(await timed.claim('k', 1000)).toBe('claimed');
+      expect(timed.size).toBe(1);
       await timed.close();
+      expect(timed.size).toBe(0);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it('rejects an invalid maxKeys', () => {
+    for (const maxKeys of [0, -1, 1.5, Number.NaN]) {
+      expect(() => new InMemoryIdempotencyStore({ maxKeys })).toThrow(NatsConfigError);
     }
   });
 
