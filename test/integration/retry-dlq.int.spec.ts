@@ -10,11 +10,14 @@ import { BadRequestException, Injectable, type LoggerService } from '@nestjs/com
 import type { TestingModule } from '@nestjs/testing';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { NatsClient } from '../../src/client/nats-client.js';
+import { NatsConnectionManager } from '../../src/connection/connection-manager.js';
 import type { NatsContext, NatsJetStreamContext } from '../../src/context/nats-context.js';
 import { Consume, Subscribe } from '../../src/decorators/handler.decorators.js';
 import { Ctx } from '../../src/decorators/param.decorators.js';
 import { NatsRequestError } from '../../src/errors/errors.js';
 import { NatsModule } from '../../src/module/nats.module.js';
+import type { InboundMessage } from '../../src/pipeline/delivery.js';
+import { sendToDlq } from '../../src/settlement/dlq.js';
 import { createTestApp } from './support/app.js';
 import { eventually, sleep } from './support/eventually.js';
 import { type NatsTestServer, startNats } from './support/nats-server.js';
@@ -99,6 +102,34 @@ class NowhereHandlers extends Attempts {
   on(@Ctx() ctx: NatsJetStreamContext) {
     this.record(ctx.subject, ctx.deliveryCount);
     throw new Error('fails');
+  }
+}
+
+/** Two consumers of the same stream both failing the same poison message. */
+@Injectable()
+class SharedDlqHandlers extends Attempts {
+  @Consume({
+    stream: 'ORD',
+    durable: 'billing',
+    retry: false,
+    dlq: true,
+    config: { filter_subject: 'ord.poison' },
+  })
+  onBilling(@Ctx() ctx: NatsJetStreamContext) {
+    this.record(`billing:${ctx.subject}`, ctx.deliveryCount);
+    throw new Error('billing fails');
+  }
+
+  @Consume({
+    stream: 'ORD',
+    durable: 'shipping',
+    retry: false,
+    dlq: true,
+    config: { filter_subject: 'ord.poison' },
+  })
+  onShipping(@Ctx() ctx: NatsJetStreamContext) {
+    this.record(`shipping:${ctx.subject}`, ctx.deliveryCount);
+    throw new Error('shipping fails');
   }
 }
 
@@ -233,6 +264,41 @@ describe('retry, backoff and DLQ', () => {
     expect(lines(logger.error)).toContainEqual(
       expect.stringMatching(/ord\.nodlq.*gave up after 3 attempts: no dlq/),
     );
+  });
+
+  it('keeps one dead letter per consumer on a shared DLQ stream, and dedupes re-sends', async () => {
+    const sharedApp = await createTestApp({ imports: [nats()], providers: [SharedDlqHandlers] });
+    try {
+      const ack = await js.publish('ord.poison', json({ id: 9 }), { msgID: 'poison-1' });
+      const billing = await nextFromStream('DLQ', 'dlq.ORD.billing');
+      const shipping = await nextFromStream('DLQ', 'dlq.ORD.shipping');
+      expect(billing.json()).toEqual({ id: 9 });
+      expect(shipping.json()).toEqual({ id: 9 });
+      expect(billing.header.get('Nats-Msg-Id')).toBe(`dlq:ORD:billing:${ack.seq}`);
+      expect(shipping.header.get('Nats-Msg-Id')).toBe(`dlq:ORD:shipping:${ack.seq}`);
+      expect(billing.header.get('Nats-DLQ-Msg-Id')).toBe('poison-1');
+      expect(shipping.header.get('Nats-DLQ-Msg-Id')).toBe('poison-1');
+      expect(billing.header.get('Nats-DLQ-Error')).toBe('billing fails');
+      expect(shipping.header.get('Nats-DLQ-Error')).toBe('shipping fails');
+      const counts = async () =>
+        (await jsm.streams.info('DLQ', { subjects_filter: 'dlq.ORD.*' })).state.subjects ?? {};
+      expect(await counts()).toMatchObject({ 'dlq.ORD.billing': 1, 'dlq.ORD.shipping': 1 });
+
+      // The same dead letter sent again (same stream sequence and consumer) is deduplicated.
+      const entry = sharedApp.get(NatsConnectionManager).get();
+      const again: InboundMessage = {
+        subject: 'ord.poison',
+        data: json({ id: 9 }),
+        raw: { info: { stream: 'ORD', consumer: 'billing', streamSequence: ack.seq } } as never,
+        attempt: 1,
+      };
+      await sendToDlq(entry, 'dlq.ORD.billing', 'jetstream', again, new Error('again'), 1);
+      expect(await counts()).toMatchObject({ 'dlq.ORD.billing': 1, 'dlq.ORD.shipping': 1 });
+      expect(sharedApp.get(SharedDlqHandlers).attempts('billing:ord.poison')).toEqual([1]);
+      expect(sharedApp.get(SharedDlqHandlers).attempts('shipping:ord.poison')).toEqual([1]);
+    } finally {
+      await sharedApp.close();
+    }
   });
 
   it('naks and logs when no stream captures the DLQ subject', async () => {
