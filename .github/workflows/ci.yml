@@ -15,6 +15,7 @@ concurrency:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -28,9 +29,11 @@ jobs:
       - run: npm run check:pkg
       - run: npm run check:pack
       - run: npm run docs:check
+      - run: npm run check:workflows
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -56,6 +59,7 @@ jobs:
 
   smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       matrix:
         node: ['22.12', 24]
@@ -70,6 +74,7 @@ jobs:
 
   example:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
