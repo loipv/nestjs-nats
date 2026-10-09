@@ -1,6 +1,6 @@
 import { cloudEventKey } from '../cloudevents/codec.js';
 import type { ConnectionEntry } from '../connection/connection-manager.js';
-import { NatsJetStreamContext } from '../context/nats-context.js';
+import { type NatsContext, NatsJetStreamContext } from '../context/nats-context.js';
 import { NatsModuleError } from '../errors/errors.js';
 import type {
   Delivery,
@@ -38,15 +38,24 @@ const DEFAULT_IN_PROGRESS_NAK_MS = 1000;
 
 /**
  * The idempotency key of a message: its `Nats-Msg-Id` header, else the CloudEvent
- * `source|id`, else what `extractor` returns. `undefined` when there is none.
+ * `source|id`, else what `extractor` returns. `undefined` when there is none. With the
+ * message's context, its (cached) CloudEvent attributes are used instead of reading them
+ * from the message again.
  */
 export function idempotencyKey(
   msg: InboundMessage,
   extractor?: IdempotencyOptions['keyExtractor'],
+  ctx?: NatsContext,
 ): string | undefined {
   const msgId = msg.headers?.get('Nats-Msg-Id');
   if (msgId) return msgId;
-  const ceKey = cloudEventKey(msg);
+  let ceKey: string | undefined;
+  if (ctx) {
+    const meta = ctx.cloudEvent;
+    if (meta) ceKey = `${meta.source}|${meta.id}`;
+  } else {
+    ceKey = cloudEventKey(msg);
+  }
   if (ceKey) return ceKey;
   return extractor?.(msg) || undefined;
 }
@@ -146,11 +155,12 @@ export function createIdempotency(cfg: IdempotencyConfig): InboundMiddleware {
       const skipped = (d as InternalDelivery)[SKIPPED];
       const scope = scopeOf(d.handler);
       const claimed: Array<{ key: string; msg: InboundMessage }> = [];
-      for (const msg of d.messages) {
+      const contexts = messageContexts(d);
+      for (const [i, msg] of d.messages.entries()) {
         let result: Awaited<ReturnType<IdempotencyStore['claim']>>;
         let key: string | undefined;
         try {
-          key = idempotencyKey(msg, keyExtractor);
+          key = idempotencyKey(msg, keyExtractor, contexts[i]);
           if (key === undefined) {
             d.logger.debug?.(`No idempotency key for message on "${msg.subject}"; processing it`);
             continue;
