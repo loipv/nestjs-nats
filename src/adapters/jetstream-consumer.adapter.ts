@@ -6,33 +6,22 @@ import {
 } from '@nats-io/jetstream';
 import { type ResolvedBatchOptions, resolveBatchOptions } from '../batch/collector.js';
 import type { Codec } from '../codec/codec.js';
-import { jsonCodec } from '../codec/codec.js';
 import type { ConnectionEntry } from '../connection/connection-manager.js';
 import { NatsJetStreamContext } from '../context/nats-context.js';
 import type { HandlerDefinition } from '../discovery/handler-explorer.js';
 import { NatsConfigError } from '../errors/errors.js';
-import { resolveIdempotency } from '../idempotency/idempotency.js';
 import type { NatsStreamManager } from '../jetstream/stream-manager.js';
 import {
-  buildInboundPipeline,
   createDelivery,
   type HandlerInfo,
   type InboundMessage,
   type InternalDelivery,
-  toHandlerInfo,
 } from '../pipeline/delivery.js';
-import { invokeHandler } from '../pipeline/invoker.js';
-import { type DlqPolicy, resolveDlqPolicy } from '../settlement/dlq.js';
-import {
-  backoffDelay,
-  DEFAULT_RETRY,
-  type RetryPolicy,
-  resolveRetryPolicy,
-} from '../settlement/retry.js';
-import { createSettlement } from '../settlement/settlement.js';
+import { backoffDelay, DEFAULT_RETRY, type RetryPolicy } from '../settlement/retry.js';
 import { errorTrace } from '../util/errors.js';
 import type { ForceStopResult, HandlerAdapter } from './adapter.js';
 import { Dispatcher, type DispatchItem } from './dispatcher.js';
+import { createHandlerPipeline, defaultPipelineDeps } from './handler-pipeline.js';
 
 type ConsumeDefinition = HandlerDefinition & { kind: 'consume' };
 
@@ -43,7 +32,6 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
   private readonly dispatcher: Dispatcher<JsMsg>;
   private readonly codec: Codec;
   private readonly retry: RetryPolicy | false;
-  private readonly dlq: DlqPolicy | false;
   private readonly run: (d: InternalDelivery) => Promise<void>;
   private readonly info: HandlerInfo;
   private readonly label: string;
@@ -68,11 +56,11 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     private readonly streams: NatsStreamManager,
   ) {
     this.concurrency = def.options.concurrency ?? 1;
-    this.codec = def.options.codec ?? entry.options.codec ?? jsonCodec();
-    this.info = toHandlerInfo(def);
-    this.retry = resolveRetryPolicy(entry.options.retry, def.options.retry);
-    this.dlq = resolveDlqPolicy('consume', entry.options.dlq, def.options.dlq);
-    this.run = this.buildPipeline();
+    const pipeline = createHandlerPipeline(def, entry, defaultPipelineDeps);
+    this.codec = pipeline.codec;
+    this.info = pipeline.info;
+    this.retry = pipeline.retry;
+    this.run = pipeline.run;
     this.label = `${def.className}.${def.methodName} on "${def.options.stream}/${def.options.durable}"`;
     this.batch = resolveBatchOptions(def.options.batch);
     this.dispatcher = new Dispatcher<JsMsg>({
@@ -159,18 +147,6 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     for (const msg of this.dispatcher.abandon()) nak(() => msg.nak());
     this.unsettled.clear();
     return { nakked, cancelledRetries: this.dispatcher.cancelRetries() };
-  }
-
-  private buildPipeline(): (d: InternalDelivery) => Promise<void> {
-    const settlement = createSettlement({ entry: this.entry, retry: this.retry, dlq: this.dlq });
-    const idempotency = resolveIdempotency(this.entry, this.def.options.idempotency, this.retry);
-    return buildInboundPipeline(
-      {
-        plugins: this.entry.options.plugins ?? [],
-        core: idempotency ? [settlement, idempotency] : [settlement],
-      },
-      invokeHandler,
-    );
   }
 
   /** The server stops redelivering after `max_deliver`: warn when that is before the DLQ. */

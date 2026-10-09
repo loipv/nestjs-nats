@@ -1,23 +1,16 @@
 import { type Service, type ServiceConfig, type ServiceMsg, Svcm } from '@nats-io/services';
 import type { QueuedIterator } from '@nats-io/transport-node';
-import { type Codec, encodePayload, jsonCodec } from '../codec/codec.js';
+import { type Codec, encodePayload } from '../codec/codec.js';
 import type { ConnectionEntry } from '../connection/connection-manager.js';
 import { NatsContext } from '../context/nats-context.js';
 import type { NatsServiceOptions } from '../decorators/handler.decorators.js';
 import type { HandlerDefinition } from '../discovery/handler-explorer.js';
 import { NatsConfigError } from '../errors/errors.js';
-import {
-  buildInboundPipeline,
-  createDelivery,
-  type HandlerInfo,
-  type InternalDelivery,
-  toHandlerInfo,
-} from '../pipeline/delivery.js';
-import { invokeHandler } from '../pipeline/invoker.js';
+import { createDelivery, type HandlerInfo, type InternalDelivery } from '../pipeline/delivery.js';
 import { toServiceError } from '../pipeline/reply.js';
-import { createSettlement } from '../settlement/settlement.js';
 import { errorMessage, errorTrace } from '../util/errors.js';
 import type { ForceStopResult, HandlerAdapter } from './adapter.js';
+import { createHandlerPipeline, defaultPipelineDeps } from './handler-pipeline.js';
 import { createLimiter, type Limiter } from './limiter.js';
 
 export type ServiceEndpointDefinition = HandlerDefinition & { kind: 'service-endpoint' };
@@ -25,6 +18,7 @@ export type ServiceEndpointDefinition = HandlerDefinition & { kind: 'service-end
 interface EndpointRuntime {
   def: ServiceEndpointDefinition;
   info: HandlerInfo;
+  run: (d: InternalDelivery) => Promise<void>;
   limiter: Limiter;
   codec: Codec;
   label: string;
@@ -35,7 +29,6 @@ interface EndpointRuntime {
  * `@ServiceEndpoint` handlers (one at a time per endpoint) on the service's endpoints.
  */
 export class NatsServiceAdapter implements HandlerAdapter {
-  private readonly run: (d: InternalDelivery) => Promise<void>;
   private readonly endpoints: EndpointRuntime[];
   private service?: Service;
   private loops: Array<Promise<void>> = [];
@@ -46,21 +39,22 @@ export class NatsServiceAdapter implements HandlerAdapter {
     endpoints: ServiceEndpointDefinition[],
     private readonly entry: ConnectionEntry,
   ) {
-    this.run = buildInboundPipeline(
+    this.endpoints = endpoints.map((def) => {
       // Requests are never retried: errors are answered with an error reply.
-      {
-        plugins: entry.options.plugins ?? [],
-        core: [createSettlement({ entry, retry: false, dlq: false })],
-      },
-      invokeHandler,
-    );
-    this.endpoints = endpoints.map((def) => ({
-      def,
-      info: toHandlerInfo(def, options),
-      limiter: createLimiter(1),
-      codec: def.options.codec ?? entry.options.codec ?? jsonCodec(),
-      label: `${def.className}.${def.methodName} on service "${options.name}" endpoint "${def.endpoint}"`,
-    }));
+      const { run, info, codec } = createHandlerPipeline(
+        { ...def, service: options },
+        entry,
+        defaultPipelineDeps,
+      );
+      return {
+        def,
+        info,
+        run,
+        limiter: createLimiter(1),
+        codec,
+        label: `${def.className}.${def.methodName} on service "${options.name}" endpoint "${def.endpoint}"`,
+      };
+    });
   }
 
   async start(): Promise<void> {
@@ -182,7 +176,7 @@ export class NatsServiceAdapter implements HandlerAdapter {
       logger: this.entry.logger,
     });
     try {
-      await this.run(d);
+      await endpoint.run(d);
     } catch (err) {
       this.respondError(msg, endpoint, err);
       return;
