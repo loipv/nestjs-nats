@@ -6,7 +6,6 @@ import { NatsContext } from '../context/nats-context.js';
 import type { NatsServiceOptions } from '../decorators/handler.decorators.js';
 import type { HandlerDefinition } from '../discovery/handler-explorer.js';
 import { NatsConfigError } from '../errors/errors.js';
-import { basicSettlement } from '../pipeline/basic-settlement.js';
 import {
   buildInboundPipeline,
   HANDLER_DEFINITION,
@@ -16,6 +15,7 @@ import {
 } from '../pipeline/delivery.js';
 import { invokeHandler } from '../pipeline/invoker.js';
 import { toServiceError } from '../pipeline/reply.js';
+import { createSettlement } from '../settlement/settlement.js';
 import { errorMessage, errorTrace } from '../util/errors.js';
 import type { ForceStopResult, HandlerAdapter } from './adapter.js';
 import { createLimiter, type Limiter } from './limiter.js';
@@ -47,7 +47,11 @@ export class NatsServiceAdapter implements HandlerAdapter {
     private readonly entry: ConnectionEntry,
   ) {
     this.run = buildInboundPipeline(
-      { plugins: entry.options.plugins ?? [], core: [basicSettlement] },
+      // Requests are never retried: errors are answered with an error reply.
+      {
+        plugins: entry.options.plugins ?? [],
+        core: [createSettlement({ entry, retry: false, dlq: false })],
+      },
       invokeHandler,
     );
     this.endpoints = endpoints.map((def) => ({

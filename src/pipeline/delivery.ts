@@ -60,9 +60,14 @@ export interface Delivery {
 /** Internal: key of the full handler definition on deliveries built by the adapters. */
 export const HANDLER_DEFINITION: unique symbol = Symbol('nats.handlerDefinition');
 
+/** Internal: key of the in-process retry scheduler on core subscription deliveries. */
+export const RETRY_SCHEDULER: unique symbol = Symbol('nats.retryScheduler');
+
 /** Internal: a delivery as built by the adapters, carrying the full handler definition. */
 export interface InternalDelivery extends Delivery {
   readonly [HANDLER_DEFINITION]: HandlerDefinition;
+  /** Processes `msg` again (as the next attempt) after `delayMs`; set by the core adapter. */
+  readonly [RETRY_SCHEDULER]?: (msg: InboundMessage, delayMs: number) => void;
 }
 
 /** Internal: the full definition behind a delivery built by an adapter. */

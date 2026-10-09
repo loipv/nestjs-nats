@@ -11,7 +11,6 @@ import { NatsJetStreamContext } from '../context/nats-context.js';
 import type { HandlerDefinition } from '../discovery/handler-explorer.js';
 import { NatsConfigError } from '../errors/errors.js';
 import type { NatsStreamManager } from '../jetstream/stream-manager.js';
-import { basicSettlement } from '../pipeline/basic-settlement.js';
 import {
   buildInboundPipeline,
   HANDLER_DEFINITION,
@@ -20,6 +19,9 @@ import {
   toHandlerInfo,
 } from '../pipeline/delivery.js';
 import { invokeHandler } from '../pipeline/invoker.js';
+import { type DlqPolicy, resolveDlqPolicy } from '../settlement/dlq.js';
+import { type RetryPolicy, resolveRetryPolicy } from '../settlement/retry.js';
+import { createSettlement } from '../settlement/settlement.js';
 import { errorTrace } from '../util/errors.js';
 import type { ForceStopResult, HandlerAdapter } from './adapter.js';
 import { Dispatcher, type DispatchItem } from './dispatcher.js';
@@ -32,7 +34,10 @@ const isPowerOfTwo = (n: number): boolean => n >= 1 && (n & (n - 1)) === 0;
 export class JetStreamConsumerAdapter implements HandlerAdapter {
   private readonly dispatcher: Dispatcher<JsMsg>;
   private readonly codec: Codec;
-  private readonly run: (d: InternalDelivery) => Promise<void>;
+  private readonly retry: RetryPolicy | false;
+  private readonly dlq: DlqPolicy | false;
+  /** Rebuilt in `start()` once the consumer's `ack_wait` (heartbeat interval) is known. */
+  private run: (d: InternalDelivery) => Promise<void>;
   private readonly info: HandlerInfo;
   private readonly label: string;
   private readonly concurrency: number;
@@ -50,10 +55,9 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     this.concurrency = def.options.concurrency ?? 1;
     this.codec = def.options.codec ?? entry.options.codec ?? jsonCodec();
     this.info = toHandlerInfo(def);
-    this.run = buildInboundPipeline(
-      { plugins: entry.options.plugins ?? [], core: [basicSettlement] },
-      invokeHandler,
-    );
+    this.retry = resolveRetryPolicy(entry.options.retry, def.options.retry);
+    this.dlq = resolveDlqPolicy('consume', entry.options.dlq, def.options.dlq);
+    this.run = this.buildPipeline(undefined);
     this.label = `${def.className}.${def.methodName} on "${def.options.stream}/${def.options.durable}"`;
     this.dispatcher = new Dispatcher<JsMsg>({
       concurrency: this.concurrency,
@@ -70,6 +74,11 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     const { stream, durable, config } = this.def.options;
     if (config) await this.streams.ensureConsumer(stream, { ...config, durable_name: durable });
     const consumer = await this.getConsumer(stream, durable, config !== undefined);
+    const { config: actual } = await consumer.info(true);
+    this.checkMaxDeliver(actual.max_deliver);
+    // `ack_wait` is in nanoseconds; extend the deadline twice per period.
+    const ackWait = actual.ack_wait ?? 0;
+    this.run = this.buildPipeline(ackWait > 0 ? ackWait / 1e6 / 2 : undefined);
     const messages = await consumer.consume({ max_messages: Math.max(2 * this.concurrency, 2) });
     if (this.stopping) {
       // stop() ran while start() was awaiting: nothing will ever read these messages.
@@ -113,6 +122,29 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
       }
     }
     return { nakked, cancelledRetries: this.dispatcher.cancelRetries() };
+  }
+
+  private buildPipeline(heartbeatMs: number | undefined): (d: InternalDelivery) => Promise<void> {
+    const settlement = createSettlement({
+      entry: this.entry,
+      retry: this.retry,
+      dlq: this.dlq,
+      ...(heartbeatMs !== undefined ? { heartbeatMs } : {}),
+    });
+    return buildInboundPipeline(
+      { plugins: this.entry.options.plugins ?? [], core: [settlement] },
+      invokeHandler,
+    );
+  }
+
+  /** The server stops redelivering after `max_deliver`: warn when that is before the DLQ. */
+  private checkMaxDeliver(maxDeliver: number | undefined): void {
+    if (!this.retry || maxDeliver === undefined || maxDeliver <= 0) return;
+    if (maxDeliver > this.retry.maxRetries) return;
+    const { stream, durable } = this.def.options;
+    this.entry.logger.warn(
+      `Consumer ${stream}/${durable} for ${this.def.className}.${this.def.methodName} has max_deliver ${maxDeliver} ≤ maxRetries ${this.retry.maxRetries}; the server will stop redelivering before the DLQ is reached`,
+    );
   }
 
   private async getConsumer(stream: string, durable: string, configDeclared: boolean) {

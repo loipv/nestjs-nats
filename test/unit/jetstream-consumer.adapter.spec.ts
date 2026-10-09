@@ -75,27 +75,35 @@ function setup(
     concurrency?: number;
     plugins?: unknown[];
     consume?: () => Promise<ConsumerMessages>;
+    /** The consumer's config as reported by `consumer.info()`. */
+    consumerConfig?: { ack_wait?: number; max_deliver?: number };
+    retry?: unknown;
   } = {},
 ) {
   const fake = fakeMessages();
   const consume = vi.fn(opts.consume ?? (() => Promise.resolve(fake.messages)));
+  const info = vi.fn(() =>
+    Promise.resolve({
+      config: opts.consumerConfig ?? { ack_wait: 30_000_000_000, max_deliver: -1 },
+    }),
+  );
   const logger = { log: vi.fn(), error: vi.fn(), warn: vi.fn() };
   const entry = {
     name: 'default',
     options: { plugins: opts.plugins },
     logger,
-    js: () => ({ consumers: { get: () => Promise.resolve({ consume }) } }),
+    js: () => ({ consumers: { get: () => Promise.resolve({ consume, info }) } }),
   } as unknown as ConnectionEntry;
   const def = {
     kind: 'consume',
     connection: 'default',
     className: 'C',
     methodName: 'm',
-    options: { stream: 'ORD', durable: 'd', concurrency: opts.concurrency },
+    options: { stream: 'ORD', durable: 'd', concurrency: opts.concurrency, retry: opts.retry },
     invoke,
   } as unknown as HandlerDefinition & { kind: 'consume' };
   const adapter = new JetStreamConsumerAdapter(def, entry, {} as NatsStreamManager);
-  return { adapter, fake, consume, logger };
+  return { adapter, fake, consume, info, logger };
 }
 
 describe('JetStreamConsumerAdapter', () => {
@@ -314,5 +322,71 @@ describe('JetStreamConsumerAdapter', () => {
       expect.stringMatching(/Failed to nak/),
       expect.stringContaining('closed'),
     );
+  });
+
+  it('reads the consumer info (cached) on start', async () => {
+    const { adapter, info } = setup(() => Promise.resolve());
+    await adapter.start();
+    expect(info).toHaveBeenCalledWith(true);
+    await adapter.stop();
+    await adapter.idle();
+  });
+
+  it('naks a failing message with the retry backoff', async () => {
+    const { adapter, fake } = setup(() => Promise.reject(new Error('boom')), {
+      retry: { initialDelay: 50, jitter: 0 },
+    });
+    await adapter.start();
+    const m = fakeMsg(1, 2);
+    fake.push(m as unknown as JsMsg);
+    await tick();
+    await tick();
+    expect(m.nak).toHaveBeenCalledWith(100);
+    await adapter.stop();
+    await adapter.idle();
+  });
+
+  it('heartbeats every ack_wait / 2 while the handler runs', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const { adapter, fake } = setup(() => gate, {
+      // 100 ms ack_wait (in nanoseconds) → working() every 50 ms.
+      consumerConfig: { ack_wait: 100_000_000, max_deliver: -1 },
+    });
+    await adapter.start();
+    const m = fakeMsg(1);
+    fake.push(m as unknown as JsMsg);
+    await new Promise((resolve) => setTimeout(resolve, 230));
+    release();
+    await tick();
+    await tick();
+    expect(m.working.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(m.working.mock.calls.length).toBeLessThanOrEqual(5);
+    expect(m.ack).toHaveBeenCalledTimes(1);
+    await adapter.stop();
+    await adapter.idle();
+  });
+
+  it.each([
+    [2, { maxRetries: 5 }, true],
+    [5, { maxRetries: 5 }, true],
+    [6, { maxRetries: 5 }, false],
+    [-1, { maxRetries: 5 }, false],
+    [2, false, false],
+  ])('max_deliver %s with retry %j → warns: %s', async (maxDeliver, retry, warns) => {
+    const { adapter, logger } = setup(() => Promise.resolve(), {
+      consumerConfig: { ack_wait: 30_000_000_000, max_deliver: maxDeliver },
+      retry,
+    });
+    await adapter.start();
+    const expected = expect.stringMatching(
+      new RegExp(
+        `Consumer ORD/d for C\\.m has max_deliver ${maxDeliver} ≤ maxRetries 5; the server will stop redelivering before the DLQ is reached`,
+      ),
+    );
+    if (warns) expect(logger.warn).toHaveBeenCalledWith(expected);
+    else expect(logger.warn).not.toHaveBeenCalled();
+    await adapter.stop();
+    await adapter.idle();
   });
 });

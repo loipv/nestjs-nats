@@ -143,6 +143,8 @@ describe('@Consume', () => {
     NatsModule.forRoot({
       connection: { servers: srv.url },
       logger: false,
+      // Failed messages are nak'd with a backoff: keep it short for the redelivery tests.
+      retry: { initialDelay: 50, jitter: 0 },
       streams: [{ name: 'ORD', subjects: ['ord.>'] }],
     });
   const ackPending = async (durable: string) =>
@@ -170,7 +172,7 @@ describe('@Consume', () => {
     expect((await jsm.consumers.info('ORD', 'billing')).config.max_deliver).toBe(-1);
   });
 
-  it('naks on error so the message is redelivered', async () => {
+  it('naks on error with a backoff so the message is redelivered', async () => {
     await js.publish('ord.flaky', json({ id: 2 }));
     await eventually(() => expect(handlers.deliveries['ord.flaky']).toEqual([1, 2]));
     await eventually(async () => expect(await ackPending('flaky')).toBe(0));

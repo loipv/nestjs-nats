@@ -103,4 +103,32 @@ describe('buildDlqHeaders', () => {
   });
   it('stringifies non-Error values', () =>
     expect(buildDlqHeaders(coreMsg(), 'oops', 1, new Date()).get('Nats-DLQ-Error')).toBe('oops'));
+  it('strips JetStream publish directives but keeps Nats-Msg-Id', () => {
+    const h = buildDlqHeaders(
+      jsMsg({
+        stream: 'ORD',
+        consumer: 'bill',
+        streamSequence: 7,
+        headers: {
+          'Nats-Expected-Stream': 'ORD',
+          'nats-expected-last-sequence': '6',
+          'NATS-EXPECTED-LAST-MSG-ID': 'm0',
+          'Nats-Expected-Last-Subject-Sequence': '3',
+          'Nats-Rollup': 'sub',
+          'nats-ttl': '1m',
+          'Nats-Msg-Id': 'm1',
+          'x-keep': 'yes',
+        },
+      }),
+      new Error('x'),
+      1,
+      new Date(),
+    );
+    const keys = h.keys().map((k) => k.toLowerCase());
+    expect(keys.filter((k) => k.startsWith('nats-expected-'))).toEqual([]);
+    expect(keys).not.toContain('nats-rollup');
+    expect(keys).not.toContain('nats-ttl');
+    expect(h.get('Nats-Msg-Id')).toBe('m1');
+    expect(h.get('x-keep')).toBe('yes');
+  });
 });

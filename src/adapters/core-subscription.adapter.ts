@@ -4,17 +4,20 @@ import { type Codec, encodePayload, jsonCodec } from '../codec/codec.js';
 import type { ConnectionEntry } from '../connection/connection-manager.js';
 import { NatsContext } from '../context/nats-context.js';
 import type { HandlerDefinition } from '../discovery/handler-explorer.js';
-import { basicSettlement } from '../pipeline/basic-settlement.js';
 import {
   buildInboundPipeline,
   HANDLER_DEFINITION,
   type HandlerInfo,
   type InternalDelivery,
+  RETRY_SCHEDULER,
   toHandlerInfo,
 } from '../pipeline/delivery.js';
 import { invokeHandler } from '../pipeline/invoker.js';
-import { toServiceError } from '../pipeline/reply.js';
-import { errorTrace } from '../util/errors.js';
+import { type ServiceError, toServiceError } from '../pipeline/reply.js';
+import { resolveDlqPolicy } from '../settlement/dlq.js';
+import { resolveRetryPolicy } from '../settlement/retry.js';
+import { createSettlement } from '../settlement/settlement.js';
+import { errorMessage, errorTrace } from '../util/errors.js';
 import type { ForceStopResult, HandlerAdapter } from './adapter.js';
 import { Dispatcher, type DispatchItem } from './dispatcher.js';
 
@@ -38,8 +41,13 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
   ) {
     this.codec = def.options.codec ?? entry.options.codec ?? jsonCodec();
     this.info = toHandlerInfo(def);
+    const settlement = createSettlement({
+      entry,
+      retry: resolveRetryPolicy(entry.options.retry, def.options.retry),
+      dlq: resolveDlqPolicy('subscribe', entry.options.dlq, def.options.dlq),
+    });
     this.run = buildInboundPipeline(
-      { plugins: entry.options.plugins ?? [], core: [basicSettlement] },
+      { plugins: entry.options.plugins ?? [], core: [settlement] },
       invokeHandler,
     );
     this.label = `${def.className}.${def.methodName} on "${def.subject}"`;
@@ -48,6 +56,11 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
       process: (items) => this.process(items),
       logger: entry.logger,
       label: this.label,
+      // A retry that fires once the subscription is stopping cannot be processed anymore.
+      onRejected: (msg) =>
+        entry.logger.warn(
+          `Dropped message on "${msg.subject}" for ${this.label}: the subscription is stopping`,
+        ),
     });
   }
 
@@ -97,11 +110,13 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
     for (const item of items) await this.handle(item);
   }
 
-  private async handle({ msg, attempt }: DispatchItem<Msg>): Promise<void> {
+  private async handle(item: DispatchItem<Msg>): Promise<void> {
+    const { msg, attempt } = item;
     const context = new NatsContext({ kind: 'core', connection: this.entry.name, raw: msg });
     const d: InternalDelivery = {
       handler: this.info,
       [HANDLER_DEFINITION]: this.def,
+      [RETRY_SCHEDULER]: (_msg, delayMs) => this.dispatcher.scheduleRetry(item, delayMs),
       messages: [{ subject: msg.subject, data: msg.data, headers: msg.headers, raw: msg, attempt }],
       context,
       codec: this.codec,
@@ -110,8 +125,18 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
     try {
       await this.run(d);
     } catch (err) {
-      if (context.replyTo) this.respondError(msg, err);
-      else this.entry.logger.error(`Handler ${this.label} failed`, errorTrace(err));
+      if (context.replyTo) {
+        const { code } = this.respondError(msg, err);
+        if (code >= 500) {
+          const { className, methodName } = this.def;
+          this.entry.logger.warn(
+            `Replied ${code} to request on "${msg.subject}" for ${className}.${methodName}: ${errorMessage(err)}`,
+          );
+        }
+      } else {
+        // Reached only when the pipeline failed outside settlement (e.g. a plugin threw).
+        this.entry.logger.error(`Handler ${this.label} failed`, errorTrace(err));
+      }
       return;
     }
     if (!context.replyTo || d.result === undefined) return;
@@ -126,8 +151,9 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
     this.respond(msg, () => msg.respond(payload));
   }
 
-  private respondError(msg: Msg, err: unknown): void {
-    const { code, description } = toServiceError(err);
+  private respondError(msg: Msg, err: unknown): ServiceError {
+    const error = toServiceError(err);
+    const { code, description } = error;
     this.respond(msg, () => {
       const h = headers();
       // Header values must not contain CR/LF.
@@ -135,6 +161,7 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
       h.set(ServiceErrorCodeHeader, String(code));
       return msg.respond(EMPTY, { headers: h });
     });
+    return error;
   }
 
   private respond(msg: Msg, send: () => boolean): void {
