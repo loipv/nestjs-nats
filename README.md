@@ -43,7 +43,7 @@ Decorator-driven [NATS](https://nats.io) integration for [NestJS](https://nestjs
 - Retry with exponential backoff and an optional dead-letter queue (DLQ), idempotency with a pluggable store, and batch processing for `@Subscribe` and `@Consume`.
 - Batched JetStream publishing with `publishMany()` and an auto-flushing `batcher()`.
 - Several named connections in one application, each passing its options straight to the NATS client, so every NATS auth method and TLS/mTLS works unchanged.
-- [CloudEvents](#cloudevents) 1.0 in binary and structured mode: publish with a `cloudEvent` option, and route incoming events to methods by `type` with `@CloudEventRouter()` and `@OnCloudEvent()`.
+- [CloudEvents](#cloudevents) 1.0 in binary and structured mode: publish with a `cloudEvent` option, route incoming events to methods by `type` with `@CloudEventRouter()` and `@OnCloudEvent()`, and read an event's attributes in any handler with `@CloudEvent()`.
 - An inbound and outbound plugin pipeline for cross-cutting concerns, with a per-message outcome for plugins to observe.
 - [OpenTelemetry tracing](#tracing-opentelemetry) from producer to consumer, as a plugin (`@loipv/nestjs-nats/otel`).
 - A [Terminus health indicator](#health-checks) (`@loipv/nestjs-nats/health`).
@@ -717,15 +717,16 @@ class OrderEvents {
 | `id` | `crypto.randomUUID()` | Must not be empty |
 | `time` | now | An ISO 8601 string or a `Date` |
 | `subject`, `dataschema` | none | CloudEvents attributes of the same name |
+| `datacontenttype` | the codec's content type, or none for `Uint8Array` data | The media type of the data, for example `text/plain` or `application/octet-stream` |
 | `extensions` | none | Extension attributes. A name must match `[a-z0-9]+` and must not be a standard attribute, or publishing throws a `NatsConfigError`. Values are strings |
 | `mode` | `'binary'` | `'binary'` or `'structured'` |
 
-`specversion` is always `'1.0'`, and `datacontenttype` is the content type of the codec (`application/json` by default).
+`specversion` is always `'1.0'`. Without a `datacontenttype` option, `datacontenttype` is the content type of the codec (`application/json` by default), except when the data is a `Uint8Array`: such bytes are sent as they are, and the event has no `datacontenttype`. Set it when you send bytes, so receivers know what they are (see [Receiving CloudEvents](#receiving-cloudevents)). The option does not change how the data is encoded: pass non-JSON data as a `Uint8Array`.
 
 - **Errors.** An invalid `cloudEvent` throws a `NatsConfigError`: synchronously from `NatsClient.publish()`, as a rejection from `JetStreamClient.publish()`. `NatsClient.request()` has no `cloudEvent` option.
-- **De-duplication.** `JetStreamClient.publish()` sets `Nats-Msg-Id` to the event's `id` unless you pass `msgId`, so the stream's duplicate window de-duplicates events with the same `id`.
+- **De-duplication.** `JetStreamClient.publish()` sets `Nats-Msg-Id` to the event's `id` unless you pass `msgId` or a `Nats-Msg-Id` header, so the stream's duplicate window de-duplicates events with the same `id`. `msgId` wins over the header.
 - **Structured data.** With the JSON codec the data is the envelope's `data` member. With another codec, or when the data is a `Uint8Array`, the encoded bytes go into `data_base64`.
-- **Outbound plugins** see the resolved event (`id`, `time` and `source` filled in) as `message.cloudEvent` of the `OutgoingMessage`, and the event is written to the wire after they have run.
+- **Outbound plugins** see the resolved event attributes (`id`, `time` and `source` filled in) as `message.cloudEvent.meta` of the `OutgoingMessage`, and the mode as `message.cloudEvent.mode`. The event is written to the wire after they have run.
 
 ### Receiving CloudEvents
 
@@ -779,6 +780,7 @@ class OrderProjector {
 | `unmatched` | What to do with an event no `@OnCloudEvent` matches: `'ack'` (default), `'term'` or `'dlq'` |
 
 - **Patterns.** A type is split on `.`. `*` matches exactly one segment, and a trailing `>` matches one or more. When several patterns match, an exact type wins over a pattern with `*`, which wins over one ending in `>`; among patterns of the same kind, the one with more literal segments wins, then the one declared first. An empty segment, a `>` that is not last or a repeated pattern fails startup with a `NatsConfigError`.
+- **Data.** `@Payload()` is the event's data. Inline structured `data` (a JSON value) is handed over as it is. Otherwise (the body of a binary event, or the `data_base64` of a structured one) the data is decoded with the handler's codec, unless the event declares a `datacontenttype` that is neither JSON (`application/json`, `text/json` or a `+json` suffix, in any case, parameters ignored) nor the codec's content type: then `@Payload()` is the raw bytes, a `Uint8Array`. So with the default JSON codec, an event with `datacontenttype: text/plain` gets its text as bytes (decode it with `new TextDecoder().decode(data)`), and an event without `datacontenttype` is decoded as JSON. The codec gets the declared type as the `Content-Type` header.
 - **Attributes first.** The router reads the attributes and picks the method before it decodes the event's data. An unmatched event follows `unmatched` even if its data cannot be decoded. If the data of a matched event cannot be decoded, that is a `NatsDecodeError`, handled like any decode failure.
 - **Not a CloudEvent.** A message without the required attributes (`id`, `source`, `type`, `specversion`), or with a structured body that is not a JSON object, fails with a `NatsDecodeError`. It is not retried: it is dead-lettered if a DLQ is configured, else terminated (JetStream) or dropped (core), and a request gets a `400` reply.
 - **Unmatched events.** `'ack'` acknowledges and skips the event (logged at debug level). `'term'` terminates a JetStream message, or drops a core one. `'dlq'` sends it to the [dead-letter queue](#dead-letter-queue); if none is configured, it behaves like `'term'` and logs a warning. An unmatched event is never retried. A request (a core message with a reply subject) that is unmatched gets a `404` error reply with the message `No handler for CloudEvent type "<type>"`, unless `unmatched` is `'ack'`, which sends no reply.
@@ -885,7 +887,11 @@ A message with no entry was not settled by the library, for example because an `
 npm install @opentelemetry/api
 ```
 
-**Setting up OpenTelemetry is your job.** The plugin only uses the API. Register a tracer provider with an exporter, a context manager (for example `AsyncLocalStorageContextManager`) so spans stay linked across `await`, and the W3C Trace Context propagator before the application starts. `NodeSDK` from `@opentelemetry/sdk-node` does all three by default. Without a registered SDK the plugin does nothing: no spans, no headers added.
+**Setting up OpenTelemetry is your job.** The plugin only uses the API. Register a tracer provider with an exporter, a context manager (for example `AsyncLocalStorageContextManager`) so spans stay linked across `await`, and the W3C Trace Context propagator before the application starts. `NodeSDK` from `@opentelemetry/sdk-node` does all three by default. Without a registered SDK the plugin does nothing: no spans, no headers added. The example below uses the Node SDK and the OTLP HTTP exporter:
+
+```bash
+npm install @opentelemetry/sdk-node @opentelemetry/exporter-trace-otlp-http
+```
 
 ```ts
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
@@ -915,9 +921,10 @@ NatsModule.forRoot({
 | `publish <subject>` | `PRODUCER` | `NatsClient.publish()` and `JetStreamClient.publish()`, including every item of `publishMany()` and `batcher()` |
 | `send <subject>` | `CLIENT` | `NatsClient.request()` |
 | `process <subject>` | `CONSUMER` | A message (or batch) handled by a `@Subscribe`, `@Consume` or `@CloudEventRouter` that sends no reply |
-| `process <subject>` | `SERVER` | A message that expects a reply: a `@ServiceEndpoint`, or a `@Subscribe` handler for a request |
+| `process <subject>` | `SERVER` | A message that expects a reply: a `@ServiceEndpoint`, or a request to a `@Subscribe` handler or to a `@CloudEventRouter` on a core subject |
 
-- **Propagation.** An outbound span's context is injected into the message headers (`traceparent`, `tracestate` and whatever else your propagator writes). A `process` span of a single message is a child of the context extracted from the message's headers, or starts a new trace if there is none. For a structured [CloudEvent](#cloudevents) without a `traceparent` header, the context is read from the envelope's `traceparent` and `tracestate` extension attributes.
+- **Propagation.** An outbound span's context is injected into the message headers (`traceparent`, `tracestate` and whatever else your propagator writes). A `process` span of a single message is a child of the context extracted from the message's headers, or starts a new trace if there is none. Without a `traceparent` header, the context comes from the [CloudEvents](#cloudevents) distributed tracing extension: the `ce-traceparent` and `ce-tracestate` headers of a binary event, else, for a structured event, the envelope's `traceparent` and `tracestate` attributes.
+- **Publish parent.** A `publish` or `send` span is a child of the span active where you called `publish()`, `request()`, `publishMany()` or `batcher().add()`. A batcher publishes each message in the context of the `add()` call that collected it, whichever call or timer triggers the flush.
 - **Batches.** A `process` span of a batch starts a new trace and has a link to the context of each message that carried one.
 - **Span scope.** The `process` span covers the handler and the settlement (ack, retry, dead-lettering), and spans you create in the handler are its children.
 - **Dead letters.** DLQ publishes do not go through plugins, so they have no `publish` span.
@@ -1129,6 +1136,8 @@ Notes:
 - Idempotency stores keep their state across the dispatches of one application, so dispatching the same message twice shows a duplicate.
 - Dead-letter publishes, and requests sent by your handlers, also appear in the `published` of the mock clients of the testing module.
 - A dispatched message is a fake message, so `ctx.raw` is a stand-in that records what you call on it. It is not a real `Msg` or `JsMsg`.
+- The fake JetStream accepts every publish: there are no streams, `expect` and `timeout` are ignored, and only a repeated `Nats-Msg-Id` is reported as a `duplicate`. In particular a dead letter of a handler with a JetStream-mode DLQ is published successfully in the harness even when no stream would capture its subject.
+- Await each `dispatch()` before starting the next one. The `dlq` of a result lists the dead letters published while that dispatch ran, so concurrent dispatches can see each other's.
 
 ## Errors
 
