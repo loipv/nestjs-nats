@@ -4,6 +4,7 @@ import {
   JetStreamApiError,
   type JsMsg,
 } from '@nats-io/jetstream';
+import { type ResolvedBatchOptions, resolveBatchOptions } from '../batch/collector.js';
 import type { Codec } from '../codec/codec.js';
 import { jsonCodec } from '../codec/codec.js';
 import type { ConnectionEntry } from '../connection/connection-manager.js';
@@ -14,15 +15,20 @@ import { resolveIdempotency } from '../idempotency/idempotency.js';
 import type { NatsStreamManager } from '../jetstream/stream-manager.js';
 import {
   buildInboundPipeline,
-  HANDLER_DEFINITION,
+  createDelivery,
   type HandlerInfo,
+  type InboundMessage,
   type InternalDelivery,
-  SKIPPED,
   toHandlerInfo,
 } from '../pipeline/delivery.js';
 import { invokeHandler } from '../pipeline/invoker.js';
 import { type DlqPolicy, resolveDlqPolicy } from '../settlement/dlq.js';
-import { type RetryPolicy, resolveRetryPolicy } from '../settlement/retry.js';
+import {
+  backoffDelay,
+  DEFAULT_RETRY,
+  type RetryPolicy,
+  resolveRetryPolicy,
+} from '../settlement/retry.js';
 import { createSettlement } from '../settlement/settlement.js';
 import { errorTrace } from '../util/errors.js';
 import type { ForceStopResult, HandlerAdapter } from './adapter.js';
@@ -43,10 +49,11 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
   private readonly info: HandlerInfo;
   private readonly label: string;
   private readonly concurrency: number;
+  private readonly batch?: ResolvedBatchOptions;
   private messages?: ConsumerMessages;
   private loop?: Promise<void>;
   private stopping = false;
-  /** Contexts of the messages being processed. */
+  /** Contexts of the messages being processed (every message of a batch). */
   private readonly inFlight = new Set<NatsJetStreamContext>();
 
   constructor(
@@ -61,8 +68,10 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     this.dlq = resolveDlqPolicy('consume', entry.options.dlq, def.options.dlq);
     this.run = this.buildPipeline(undefined);
     this.label = `${def.className}.${def.methodName} on "${def.options.stream}/${def.options.durable}"`;
+    this.batch = resolveBatchOptions(def.options.batch);
     this.dispatcher = new Dispatcher<JsMsg>({
       concurrency: this.concurrency,
+      ...(this.batch ? { batch: this.batch } : {}),
       process: (items) => this.process(items),
       logger: entry.logger,
       label: this.label,
@@ -81,7 +90,10 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     // `ack_wait` is in nanoseconds; extend the deadline twice per period.
     const ackWait = actual.ack_wait ?? 0;
     this.run = this.buildPipeline(ackWait > 0 ? ackWait / 1e6 / 2 : undefined);
-    const messages = await consumer.consume({ max_messages: Math.max(2 * this.concurrency, 2) });
+    // Enough buffered messages to keep every slot busy and to fill a batch.
+    const messages = await consumer.consume({
+      max_messages: Math.max(2 * this.concurrency, 2, this.batch?.maxSize ?? 0),
+    });
     if (this.stopping) {
       // stop() ran while start() was awaiting: nothing will ever read these messages.
       await messages.close();
@@ -94,7 +106,8 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
 
   stop(): Promise<void> {
     this.stopping = true;
-    this.dispatcher.stop();
+    // Hands the batch being collected to the handler; `idle()` waits for it.
+    void this.dispatcher.stop();
     const messages = this.messages;
     if (!messages) return Promise.resolve();
     // `close()` resolves only after every buffered message has been yielded, which waits
@@ -229,39 +242,51 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
   }
 
   private async process(items: DispatchItem<JsMsg>[]): Promise<void> {
-    for (const item of items) await this.handle(item);
+    if (this.batch) return this.handle(items, true);
+    for (const item of items) await this.handle([item], false);
   }
 
-  private async handle({ msg, attempt }: DispatchItem<JsMsg>): Promise<void> {
-    const context = new NatsJetStreamContext({
-      kind: 'jetstream',
-      connection: this.entry.name,
-      raw: msg,
-    });
-    const d: InternalDelivery = {
+  private async handle(items: DispatchItem<JsMsg>[], batch: boolean): Promise<void> {
+    const parts = items.map(({ msg, attempt }) => ({
+      message: {
+        subject: msg.subject,
+        data: msg.data,
+        headers: msg.headers,
+        raw: msg,
+        attempt,
+      } satisfies InboundMessage,
+      context: new NatsJetStreamContext({
+        kind: 'jetstream',
+        connection: this.entry.name,
+        raw: msg,
+      }),
+    }));
+    const d = createDelivery({
+      definition: this.def,
       handler: this.info,
-      [HANDLER_DEFINITION]: this.def,
-      [SKIPPED]: new Set(),
-      messages: [{ subject: msg.subject, data: msg.data, headers: msg.headers, raw: msg, attempt }],
-      context,
+      connection: this.entry.name,
+      batch,
+      parts,
       codec: this.codec,
       logger: this.entry.logger,
-    };
-    this.inFlight.add(context);
+    });
+    for (const { context } of parts) this.inFlight.add(context);
     try {
       await this.run(d);
     } catch (err) {
-      // Reached only when the pipeline failed outside settlement (e.g. a plugin threw).
+      // Reached only when the pipeline failed outside settlement (e.g. a plugin threw):
+      // hand the messages back with the retry backoff.
       this.entry.logger.error(`Handler ${this.label} failed`, errorTrace(err));
-      if (!context.settled) {
+      for (const { message, context } of parts) {
+        if (context.settled) continue;
         try {
-          context.nak();
+          context.nak(backoffDelay(this.retry || DEFAULT_RETRY, message.attempt));
         } catch (nakErr) {
           this.entry.logger.error(`Failed to nak message for ${this.label}`, errorTrace(nakErr));
         }
       }
     } finally {
-      this.inFlight.delete(context);
+      for (const { context } of parts) this.inFlight.delete(context);
     }
   }
 }

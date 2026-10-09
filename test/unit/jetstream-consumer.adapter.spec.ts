@@ -78,6 +78,7 @@ function setup(
     /** The consumer's config as reported by `consumer.info()`. */
     consumerConfig?: { ack_wait?: number; max_deliver?: number };
     retry?: unknown;
+    batch?: unknown;
   } = {},
 ) {
   const fake = fakeMessages();
@@ -99,7 +100,13 @@ function setup(
     connection: 'default',
     className: 'C',
     methodName: 'm',
-    options: { stream: 'ORD', durable: 'd', concurrency: opts.concurrency, retry: opts.retry },
+    options: {
+      stream: 'ORD',
+      durable: 'd',
+      concurrency: opts.concurrency,
+      retry: opts.retry,
+      batch: opts.batch,
+    },
     invoke,
   } as unknown as HandlerDefinition & { kind: 'consume' };
   const adapter = new JetStreamConsumerAdapter(def, entry, {} as NatsStreamManager);
@@ -153,20 +160,23 @@ describe('JetStreamConsumerAdapter', () => {
     await adapter.idle();
   });
 
-  it('naks the message when the pipeline fails outside settlement', async () => {
+  it('naks with the retry backoff when the pipeline fails outside settlement', async () => {
     const plugin = {
       inbound: {
         stage: 'outer',
         handle: () => Promise.reject(new Error('plugin boom')),
       },
     };
-    const { adapter, fake, logger } = setup(() => Promise.resolve(), { plugins: [plugin] });
+    const { adapter, fake, logger } = setup(() => Promise.resolve(), {
+      plugins: [plugin],
+      retry: { initialDelay: 50, jitter: 0 },
+    });
     await adapter.start();
-    const m = fakeMsg(1);
+    const m = fakeMsg(1, 2);
     fake.push(m as unknown as JsMsg);
     await tick();
     await tick();
-    expect(m.nak).toHaveBeenCalledTimes(1);
+    expect(m.nak).toHaveBeenCalledExactlyOnceWith(100);
     expect(m.ack).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalled();
     await adapter.stop();
@@ -388,5 +398,109 @@ describe('JetStreamConsumerAdapter', () => {
     else expect(logger.warn).not.toHaveBeenCalled();
     await adapter.stop();
     await adapter.idle();
+  });
+
+  it('naks with the default backoff when retries are disabled and the pipeline fails', async () => {
+    const plugin = { inbound: { stage: 'outer', handle: () => Promise.reject(new Error('p')) } };
+    const { adapter, fake } = setup(() => Promise.resolve(), { plugins: [plugin], retry: false });
+    await adapter.start();
+    const m = fakeMsg(1, 1);
+    fake.push(m as unknown as JsMsg);
+    await tick();
+    await tick();
+    const delay = m.nak.mock.calls[0]?.[0] as number;
+    // DEFAULT_RETRY: 1000 ms ± 20 % jitter.
+    expect(delay).toBeGreaterThanOrEqual(800);
+    expect(delay).toBeLessThanOrEqual(1200);
+    await adapter.stop();
+    await adapter.idle();
+  });
+
+  describe('batch', () => {
+    it('requests max(2 * concurrency, 2, maxSize) messages', async () => {
+      const { adapter, consume } = setup(() => Promise.resolve(), {
+        batch: { maxSize: 10 },
+        concurrency: 2,
+      });
+      await adapter.start();
+      expect(consume).toHaveBeenCalledWith({ max_messages: 10 });
+      await adapter.stop();
+      await adapter.idle();
+    });
+
+    it('delivers batches of maxSize and acks each message', async () => {
+      const batches: unknown[] = [];
+      const { adapter, fake } = setup(
+        async (payload) => {
+          batches.push(payload);
+        },
+        { batch: { maxSize: 2, maxWait: 60_000 } },
+      );
+      await adapter.start();
+      const msgs = [fakeMsg(1), fakeMsg(2), fakeMsg(3), fakeMsg(4)];
+      for (const m of msgs) fake.push(m as unknown as JsMsg);
+      await tick();
+      await tick();
+      await tick();
+      expect(batches).toEqual([
+        [1, 2],
+        [3, 4],
+      ]);
+      for (const m of msgs) expect(m.ack).toHaveBeenCalledTimes(1);
+      await adapter.stop();
+      await adapter.idle();
+    });
+
+    it('flushes the pending batch to the handler on stop', async () => {
+      const batches: unknown[] = [];
+      const { adapter, fake } = setup(
+        async (payload) => {
+          batches.push(payload);
+        },
+        { batch: { maxSize: 10, maxWait: 60_000 } },
+      );
+      await adapter.start();
+      const msgs = [fakeMsg(1), fakeMsg(2)];
+      for (const m of msgs) fake.push(m as unknown as JsMsg);
+      await tick();
+      expect(batches).toEqual([]);
+      await adapter.stop();
+      await adapter.idle();
+      expect(batches).toEqual([[1, 2]]);
+      for (const m of msgs) expect(m.ack).toHaveBeenCalledTimes(1);
+    });
+
+    it('forceStop naks every unsettled message of an in-flight batch', async () => {
+      const { adapter, fake } = setup(() => new Promise<void>(() => {}), {
+        batch: { maxSize: 2, maxWait: 60_000 },
+      });
+      await adapter.start();
+      const msgs = [fakeMsg(1), fakeMsg(2)];
+      for (const m of msgs) fake.push(m as unknown as JsMsg);
+      await tick();
+      await tick();
+      await adapter.stop();
+      expect(adapter.forceStop()).toEqual({ nakked: 2, cancelledRetries: 0 });
+      for (const m of msgs) expect(m.nak).toHaveBeenCalledTimes(1);
+    });
+
+    it('naks each message with its own backoff when the pipeline fails outside settlement', async () => {
+      const plugin = { inbound: { stage: 'outer', handle: () => Promise.reject(new Error('p')) } };
+      const { adapter, fake } = setup(() => Promise.resolve(), {
+        plugins: [plugin],
+        retry: { initialDelay: 50, jitter: 0 },
+        batch: { maxSize: 2 },
+      });
+      await adapter.start();
+      const [a, b] = [fakeMsg(1, 1), fakeMsg(2, 3)];
+      fake.push(a as unknown as JsMsg);
+      fake.push(b as unknown as JsMsg);
+      await tick();
+      await tick();
+      expect(a.nak).toHaveBeenCalledExactlyOnceWith(50);
+      expect(b.nak).toHaveBeenCalledExactlyOnceWith(200);
+      await adapter.stop();
+      await adapter.idle();
+    });
   });
 });

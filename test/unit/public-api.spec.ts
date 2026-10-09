@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { expect, expectTypeOf, it } from 'vitest';
-import type { Delivery, HandlerInfo } from '../../src/index.js';
+import type { Delivery, HandlerInfo, NatsBatchContext, NatsContext } from '../../src/index.js';
 import * as api from '../../src/index.js';
 
 it('exports the runtime API', () =>
@@ -19,6 +19,7 @@ it('exports the runtime API', () =>
       'NatsClient',
       'NatsConfigError',
       'NatsConnectionError',
+      'NatsBatchContext',
       'NatsConnectionManager',
       'NatsContext',
       'NatsDecodeError',
@@ -68,6 +69,7 @@ it('exposes a narrow handler description on Delivery', () => {
       readonly subject: string;
     }
   >();
+  expectTypeOf<Delivery['context']>().toEqualTypeOf<NatsContext | NatsBatchContext>();
   expectTypeOf<keyof Delivery>().toEqualTypeOf<
     'handler' | 'messages' | 'context' | 'codec' | 'logger' | 'result'
   >();

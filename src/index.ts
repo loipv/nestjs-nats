@@ -1,9 +1,11 @@
+export type { BatchOptions } from './batch/collector.js';
 export { NatsClient } from './client/nats-client.js';
 export type { Codec } from './codec/codec.js';
 export { jsonCodec } from './codec/codec.js';
 export type { HeadersInit } from './codec/headers.js';
 export type { NatsConnectionState, NatsStatusEvent } from './connection/connection-manager.js';
 export { NatsConnectionManager } from './connection/connection-manager.js';
+export { NatsBatchContext } from './context/nats-batch-context.js';
 export { NatsContext, NatsJetStreamContext } from './context/nats-context.js';
 export type {
   ConsumeOptions,

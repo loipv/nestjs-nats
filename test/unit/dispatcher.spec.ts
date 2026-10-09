@@ -230,4 +230,117 @@ describe('Dispatcher', () => {
       spy.mockRestore();
     }
   });
+
+  describe('batch', () => {
+    function batchSetup(
+      batch: { maxSize: number; maxWait: number },
+      process?: (items: DispatchItem<string>[]) => Promise<void>,
+      concurrency = 1,
+    ) {
+      const seen: DispatchItem<string>[][] = [];
+      const onRejected = vi.fn();
+      const d = new Dispatcher<string>({
+        concurrency,
+        batch,
+        process: async (items) => {
+          seen.push(items);
+          await process?.(items);
+        },
+        logger: { log: vi.fn(), error: vi.fn(), warn: vi.fn() },
+        label: 'L',
+        onRejected,
+      });
+      return { d, seen, onRejected };
+    }
+
+    it('processes collected items as one call holding one slot', async () => {
+      const gate = deferred();
+      const { d, seen } = batchSetup({ maxSize: 2, maxWait: 60_000 }, () => gate.promise);
+      await d.push('a');
+      expect(seen).toEqual([]);
+      await d.push('b', 3);
+      expect(seen).toEqual([
+        [
+          { msg: 'a', attempt: 1 },
+          { msg: 'b', attempt: 3 },
+        ],
+      ]);
+      expect(d.active).toBe(1);
+      gate.resolve();
+      await d.idle();
+      expect(d.active).toBe(0);
+    });
+
+    it('waits for a slot before processing the next batch (backpressure)', async () => {
+      const gate = deferred();
+      let n = 0;
+      const { d, seen } = batchSetup({ maxSize: 1, maxWait: 60_000 }, () =>
+        n++ === 0 ? gate.promise : Promise.resolve(),
+      );
+      await d.push('a');
+      let accepted = false;
+      const second = d.push('b').then(() => {
+        accepted = true;
+      });
+      await tick();
+      expect(accepted).toBe(false);
+      expect(seen).toHaveLength(1);
+      gate.resolve();
+      await second;
+      await d.idle();
+      expect(seen.map((items) => items.map((i) => i.msg))).toEqual([['a'], ['b']]);
+    });
+
+    it('flushes after maxWait', async () => {
+      vi.useFakeTimers();
+      const { d, seen } = batchSetup({ maxSize: 10, maxWait: 100 });
+      await d.push('a');
+      await vi.advanceTimersByTimeAsync(99);
+      expect(seen).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(seen).toEqual([[{ msg: 'a', attempt: 1 }]]);
+    });
+
+    it('stop() hands the pending batch to process and rejects later pushes', async () => {
+      const { d, seen, onRejected } = batchSetup({ maxSize: 10, maxWait: 60_000 });
+      await d.push('a');
+      await d.push('b');
+      await d.stop();
+      await d.idle();
+      expect(seen.map((items) => items.map((i) => i.msg))).toEqual([['a', 'b']]);
+      await d.push('c');
+      expect(onRejected).toHaveBeenCalledWith('c');
+    });
+
+    it('idle() waits for the batch flushed by stop()', async () => {
+      const gate = deferred();
+      const { d, seen } = batchSetup({ maxSize: 10, maxWait: 60_000 }, () => gate.promise);
+      await d.push('a');
+      void d.stop();
+      let idle = false;
+      const idling = d.idle().then(() => {
+        idle = true;
+      });
+      await tick();
+      expect(seen).toHaveLength(1);
+      expect(idle).toBe(false);
+      gate.resolve();
+      await idling;
+    });
+
+    it('returns a retried item to the collector with attempt + 1', async () => {
+      vi.useFakeTimers();
+      const { d, seen } = batchSetup({ maxSize: 2, maxWait: 1000 });
+      d.scheduleRetry({ msg: 'a', attempt: 1 }, 100);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(seen).toEqual([]);
+      await d.push('b');
+      expect(seen).toEqual([
+        [
+          { msg: 'a', attempt: 2 },
+          { msg: 'b', attempt: 1 },
+        ],
+      ]);
+    });
+  });
 });

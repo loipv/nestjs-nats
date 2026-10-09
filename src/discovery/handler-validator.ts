@@ -1,3 +1,4 @@
+import { MAX_TIMER_DELAY } from '../batch/collector.js';
 import type { NatsConnectionManager } from '../connection/connection-manager.js';
 import { NatsConfigError } from '../errors/errors.js';
 import { DEFAULT_IDEMPOTENCY_TTL } from '../idempotency/idempotency.js';
@@ -31,6 +32,7 @@ export function validateHandlers(defs: HandlerDefinition[], mgr: NatsConnectionM
     if (def.kind === 'subscribe' || def.kind === 'consume') {
       validateRetry(def, mgr);
       validateIdempotency(def, mgr);
+      validateBatch(def);
       const { concurrency } = def.options;
       if (concurrency !== undefined && (!Number.isInteger(concurrency) || concurrency < 1)) {
         throw new NatsConfigError(
@@ -87,6 +89,29 @@ function validateIdempotency(def: HandlerDefinition, mgr: NatsConnectionManager)
   if (!(Number.isFinite(ttl) && ttl > 0)) {
     throw new NatsConfigError(
       `NATS handler ${label(def)} has invalid idempotency.ttl ${String(ttl)}; expected a number > 0`,
+    );
+  }
+}
+
+/** Validates the batch options of a handler; a batch cannot be acked manually. */
+function validateBatch(def: HandlerDefinition): void {
+  if (def.kind === 'service-endpoint') return;
+  const { batch } = def.options;
+  if (batch === undefined) return;
+  if (def.kind === 'consume' && def.options.ack === 'manual') {
+    throw new NatsConfigError(
+      `NATS handler ${label(def)} combines batch with ack: 'manual'; batches are settled per message by the library (use ctx.fail() for partial failures)`,
+    );
+  }
+  const { maxSize, maxWait } = batch;
+  if (maxSize !== undefined && !(Number.isInteger(maxSize) && maxSize >= 1)) {
+    throw new NatsConfigError(
+      `NATS handler ${label(def)} has invalid batch.maxSize ${String(maxSize)}; expected an integer >= 1`,
+    );
+  }
+  if (maxWait !== undefined && !(maxWait >= 0 && maxWait <= MAX_TIMER_DELAY)) {
+    throw new NatsConfigError(
+      `NATS handler ${label(def)} has invalid batch.maxWait ${String(maxWait)}; expected a number in [0, ${MAX_TIMER_DELAY}]`,
     );
   }
 }
