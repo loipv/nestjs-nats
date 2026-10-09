@@ -45,12 +45,16 @@ function fakeMsg(payload: unknown) {
   };
 }
 
-function setup(invoke: (payload: unknown) => Promise<unknown>, plugins: unknown[] = []) {
+function setup(
+  invoke: (payload: unknown) => Promise<unknown>,
+  plugins: unknown[] = [],
+  moduleOptions: Record<string, unknown> = {},
+) {
   const fake = fakeSubscription();
   const logger = { log: vi.fn(), error: vi.fn(), warn: vi.fn() };
   const entry = {
     name: 'default',
-    options: { plugins },
+    options: { plugins, ...moduleOptions },
     logger,
     nc: {
       subscribe: vi.fn(() => fake.sub),
@@ -112,9 +116,11 @@ describe('CoreSubscriptionAdapter', () => {
     expect(handled).toEqual([1, 2]);
   });
 
-  it('logs handler failures and keeps going', async () => {
-    const { adapter, fake, logger } = setup((p) =>
-      p === 1 ? Promise.reject(new Error('boom')) : Promise.resolve(),
+  it('logs handler failures without retries and keeps going', async () => {
+    const { adapter, fake, logger } = setup(
+      (p) => (p === 1 ? Promise.reject(new Error('boom')) : Promise.resolve()),
+      [],
+      { retry: false },
     );
     await adapter.start();
     fake.push(fakeMsg(1));
@@ -122,10 +128,91 @@ describe('CoreSubscriptionAdapter', () => {
     await adapter.stop();
     await adapter.idle();
     expect(logger.error).toHaveBeenCalledTimes(1);
-    expect(logger.error).toHaveBeenCalledWith(
-      expect.stringContaining('C.m'),
-      expect.stringContaining('boom'),
+    expect(logger.error).toHaveBeenCalledWith('C.m on "a.b" failed, gave up after 1 attempt: boom');
+  });
+
+  it('retries a failing message in-process with the next attempt', async () => {
+    const attempts: number[] = [];
+    const plugin = {
+      inbound: {
+        async handle(d: { messages: Array<{ attempt: number }> }, next: () => Promise<void>) {
+          attempts.push(...d.messages.map((m) => m.attempt));
+          await next();
+        },
+      },
+    };
+    const invoke = vi.fn(() => Promise.reject(new Error('boom')));
+    const { adapter, fake, logger } = setup(invoke, [plugin], {
+      retry: { maxRetries: 2, initialDelay: 10, jitter: 0 },
+    });
+    await adapter.start();
+    fake.push(fakeMsg(1));
+    await vi.waitFor(() => expect(attempts).toEqual([1, 2, 3]));
+    await vi.waitFor(() =>
+      expect(logger.error).toHaveBeenCalledWith(
+        'C.m on "a.b" failed, gave up after 3 attempts: boom',
+      ),
     );
+    expect(logger.warn).toHaveBeenCalledTimes(2);
+    await adapter.stop();
+    await adapter.idle();
+  });
+
+  it('warns when a retry fires after the subscription stopped', async () => {
+    const { adapter, fake, logger } = setup(() => Promise.reject(new Error('boom')), [], {
+      retry: { initialDelay: 30, jitter: 0 },
+    });
+    await adapter.start();
+    fake.push(fakeMsg(1));
+    await tick();
+    await tick();
+    await adapter.stop();
+    await adapter.idle();
+    await vi.waitFor(() =>
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Dropped message on "a.b" for C.m on "a.b": the subscription is stopping',
+      ),
+    );
+  });
+
+  it('cancels pending retries on forceStop', async () => {
+    const { adapter, fake } = setup(() => Promise.reject(new Error('boom')), [], {
+      retry: { initialDelay: 10_000, jitter: 0 },
+    });
+    await adapter.start();
+    fake.push(fakeMsg(1));
+    await tick();
+    await tick();
+    await adapter.stop();
+    await adapter.idle();
+    expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 1 });
+  });
+
+  it('replies with an error and warns once for 5xx', async () => {
+    const { adapter, fake, logger } = setup(() => Promise.reject(new Error('internals')));
+    await adapter.start();
+    const msg = { ...fakeMsg(1), reply: '_INBOX.1' };
+    fake.push(msg);
+    await tick();
+    await tick();
+    expect(msg.respond).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith('Replied 500 to request on "a.b" for C.m: internals');
+    expect(logger.error).not.toHaveBeenCalled();
+    await adapter.stop();
+    await adapter.idle();
+  });
+
+  it('does not warn for 4xx replies', async () => {
+    const { BadRequestException } = await import('@nestjs/common');
+    const { adapter, fake, logger } = setup(() => Promise.reject(new BadRequestException('bad')));
+    await adapter.start();
+    fake.push({ ...fakeMsg(1), reply: '_INBOX.1' });
+    await tick();
+    await tick();
+    expect(logger.warn).not.toHaveBeenCalled();
+    await adapter.stop();
+    await adapter.idle();
   });
 
   it('forceStop has no messages to nak', async () => {
