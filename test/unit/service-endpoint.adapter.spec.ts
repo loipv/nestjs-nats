@@ -1,0 +1,197 @@
+import { describe, expect, it, vi } from 'vitest';
+import {
+  NatsServiceAdapter,
+  type ServiceEndpointDefinition,
+} from '../../src/adapters/service-endpoint.adapter.js';
+import type { ConnectionEntry } from '../../src/connection/connection-manager.js';
+
+const svcm = vi.hoisted(() => ({ add: vi.fn() }));
+vi.mock('@nats-io/services', () => ({
+  Svcm: class {
+    add = svcm.add;
+  },
+}));
+
+const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+/** Push-driven async iterable whose `stop()` ends iteration after buffered items. */
+function fakeIterator() {
+  const queue: unknown[] = [];
+  let wake: (() => void) | undefined;
+  let stopped = false;
+  const iterator = {
+    async *[Symbol.asyncIterator]() {
+      for (;;) {
+        const next = queue.shift();
+        if (next) yield next;
+        else if (stopped) return;
+        else await new Promise<void>((resolve) => (wake = resolve));
+      }
+    },
+  };
+  return {
+    iterator,
+    push(msg: unknown) {
+      queue.push(msg);
+      wake?.();
+    },
+    end() {
+      stopped = true;
+      wake?.();
+    },
+  };
+}
+
+function fakeMsg(payload: unknown) {
+  return {
+    subject: 'x',
+    reply: 'inbox',
+    data: new TextEncoder().encode(JSON.stringify(payload)),
+    headers: undefined,
+    respond: vi.fn(() => true),
+    respondError: vi.fn(() => true),
+  };
+}
+
+function setup(invoke: (payload: unknown) => Promise<unknown> = () => Promise.resolve()) {
+  const iterators = new Map<string, ReturnType<typeof fakeIterator>>();
+  const service = {
+    addEndpoint: vi.fn((name: string) => {
+      const it = fakeIterator();
+      iterators.set(name, it);
+      return it.iterator;
+    }),
+    stop: vi.fn(() => {
+      for (const it of iterators.values()) it.end();
+      return Promise.resolve(null);
+    }),
+  };
+  svcm.add.mockReset();
+  svcm.add.mockResolvedValue(service);
+  const logger = { log: vi.fn(), error: vi.fn(), warn: vi.fn() };
+  const entry = {
+    name: 'default',
+    options: {},
+    logger,
+    nc: { flush: () => Promise.resolve(), isClosed: () => false },
+  } as unknown as ConnectionEntry;
+  const endpoint = (name: string, options: object = {}) =>
+    ({
+      kind: 'service-endpoint',
+      connection: 'default',
+      className: 'S',
+      methodName: name,
+      endpoint: name,
+      options,
+      invoke,
+    }) as unknown as ServiceEndpointDefinition;
+  return { service, iterators, logger, entry, endpoint };
+}
+
+describe('NatsServiceAdapter', () => {
+  it('passes only the options that are set', async () => {
+    const { service, entry, endpoint } = setup();
+    const adapter = new NatsServiceAdapter(
+      { name: 'svc', version: '1.0.0' },
+      [endpoint('a'), endpoint('b', { subject: 's.b', queue: 'q', metadata: { k: 'v' } })],
+      entry,
+    );
+    await adapter.start();
+    expect(svcm.add).toHaveBeenCalledWith({ name: 'svc', version: '1.0.0' });
+    expect(service.addEndpoint).toHaveBeenNthCalledWith(1, 'a', {});
+    expect(service.addEndpoint).toHaveBeenNthCalledWith(2, 'b', {
+      subject: 's.b',
+      queue: 'q',
+      metadata: { k: 'v' },
+    });
+    await adapter.stop();
+    await adapter.idle();
+  });
+
+  it('responds with the encoded result, including an empty payload for undefined', async () => {
+    const { iterators, entry, endpoint } = setup((p) =>
+      Promise.resolve(p === 'void' ? undefined : { echo: p }),
+    );
+    const adapter = new NatsServiceAdapter({ name: 'svc', version: '1' }, [endpoint('a')], entry);
+    await adapter.start();
+    const [ok, empty] = [fakeMsg('hi'), fakeMsg('void')];
+    iterators.get('a')?.push(ok);
+    iterators.get('a')?.push(empty);
+    await tick();
+    await tick();
+    expect(ok.respond).toHaveBeenCalledWith(new TextEncoder().encode('{"echo":"hi"}'));
+    expect(empty.respond).toHaveBeenCalledWith(new Uint8Array(0));
+    await adapter.stop();
+    await adapter.idle();
+  });
+
+  it('responds with a service error and keeps serving after a failure', async () => {
+    const { iterators, entry, endpoint } = setup((p) =>
+      p === 'bad' ? Promise.reject(new Error('internal')) : Promise.resolve('fine'),
+    );
+    const adapter = new NatsServiceAdapter({ name: 'svc', version: '1' }, [endpoint('a')], entry);
+    await adapter.start();
+    const [bad, good] = [fakeMsg('bad'), fakeMsg('good')];
+    iterators.get('a')?.push(bad);
+    iterators.get('a')?.push(good);
+    await tick();
+    await tick();
+    expect(bad.respondError).toHaveBeenCalledWith(500, 'Internal Server Error');
+    expect(bad.respond).not.toHaveBeenCalled();
+    expect(good.respond).toHaveBeenCalledTimes(1);
+    await adapter.stop();
+    await adapter.idle();
+  });
+
+  it('logs an error when an endpoint iterator ends while not stopping', async () => {
+    const { iterators, logger, entry, endpoint } = setup();
+    const adapter = new NatsServiceAdapter({ name: 'svc', version: '1' }, [endpoint('a')], entry);
+    await adapter.start();
+    iterators.get('a')?.end();
+    await adapter.idle();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringMatching(/S\.a.*svc.*ended unexpectedly/),
+    );
+  });
+
+  it('does not log when iterators end because of stop()', async () => {
+    const { service, logger, entry, endpoint } = setup();
+    const adapter = new NatsServiceAdapter({ name: 'svc', version: '1' }, [endpoint('a')], entry);
+    await adapter.start();
+    await adapter.stop();
+    await adapter.idle();
+    expect(service.stop).toHaveBeenCalledTimes(1);
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  it('stops the service when stop() ran during start()', async () => {
+    const { service, entry, endpoint } = setup();
+    let resolveAdd!: () => void;
+    svcm.add.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveAdd = () => resolve(service);
+        }),
+    );
+    const adapter = new NatsServiceAdapter({ name: 'svc', version: '1' }, [endpoint('a')], entry);
+    const starting = adapter.start();
+    await tick();
+    await adapter.stop();
+    resolveAdd();
+    await starting;
+    expect(service.stop).toHaveBeenCalledTimes(1);
+    expect(service.addEndpoint).not.toHaveBeenCalled();
+    await adapter.idle();
+  });
+
+  it('stops the service when adding an endpoint fails', async () => {
+    const { service, entry, endpoint } = setup();
+    service.addEndpoint.mockImplementation(() => {
+      throw new Error('invalid endpoint');
+    });
+    const adapter = new NatsServiceAdapter({ name: 'svc', version: '1' }, [endpoint('a')], entry);
+    await expect(adapter.start()).rejects.toThrow('invalid endpoint');
+    await adapter.stop();
+    expect(service.stop).toHaveBeenCalledTimes(1);
+  });
+});
