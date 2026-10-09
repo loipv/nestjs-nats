@@ -3,7 +3,12 @@ import type {
   PubAck,
   StreamExpectations,
 } from '@nats-io/jetstream';
-import { Batcher, DEFAULT_BATCHER_MAX_SIZE, DEFAULT_BATCHER_MAX_WAIT } from '../batch/batcher.js';
+import {
+  Batcher,
+  type ContextRunner,
+  DEFAULT_BATCHER_MAX_SIZE,
+  DEFAULT_BATCHER_MAX_WAIT,
+} from '../batch/batcher.js';
 import type { CloudEventInit } from '../cloudevents/types.js';
 import type { Codec } from '../codec/codec.js';
 import type { HeadersInit } from '../codec/headers.js';
@@ -71,6 +76,19 @@ export class JetStreamClient {
     items: ReadonlyArray<{ subject: string; data?: unknown; opts?: JetStreamPublishOptions }>,
     opts: { window?: number } = {},
   ): Promise<PublishManyResult[]> {
+    return this.#publishMany(items, opts);
+  }
+
+  /** `publishMany`, running an item's publish through its `run` when it has one. */
+  async #publishMany(
+    items: ReadonlyArray<{
+      subject: string;
+      data?: unknown;
+      opts?: JetStreamPublishOptions;
+      run?: ContextRunner;
+    }>,
+    opts: { window?: number },
+  ): Promise<PublishManyResult[]> {
     const window = opts.window ?? DEFAULT_PUBLISH_WINDOW;
     if (!(window >= 1)) throw new NatsConfigError('publishMany window must be >= 1');
     const results = new Array<PublishManyResult>(items.length);
@@ -80,8 +98,9 @@ export class JetStreamClient {
         const i = next++;
         const item = items[i];
         if (!item) continue;
+        const publish = () => this.publish(item.subject, item.data, item.opts);
         try {
-          results[i] = { ok: true, ack: await this.publish(item.subject, item.data, item.opts) };
+          results[i] = { ok: true, ack: await (item.run ? item.run(publish) : publish()) };
         } catch (err) {
           results[i] = { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
         }
@@ -98,7 +117,7 @@ export class JetStreamClient {
   batcher(opts: { maxSize?: number; maxWait?: number; window?: number } = {}): Batcher {
     let off: (() => void) | undefined;
     const batcher = new Batcher(
-      (items, o) => this.publishMany(items, o),
+      (items, o) => this.#publishMany(items, o ?? {}),
       {
         maxSize: opts.maxSize ?? DEFAULT_BATCHER_MAX_SIZE,
         maxWait: opts.maxWait ?? DEFAULT_BATCHER_MAX_WAIT,

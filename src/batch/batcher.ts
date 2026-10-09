@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { PubAck } from '@nats-io/jetstream';
 import { NatsConfigError, NatsModuleError } from '../errors/errors.js';
 import type { JetStreamPublishOptions, PublishManyResult } from '../jetstream/jetstream-client.js';
@@ -15,9 +16,21 @@ export interface BatcherOptions {
   window?: number;
 }
 
-/** The `publishMany` a batcher flushes through. It never rejects for an item's failure. */
+/** Runs `fn` in the async context captured when a message was added (see `AsyncLocalStorage.snapshot`). */
+export type ContextRunner = <R>(fn: () => R) => R;
+
+/**
+ * The `publishMany` a batcher flushes through. It runs each item's publish through its
+ * `run` (so it happens in the async context the item was added in) and never rejects for
+ * an item's failure.
+ */
 export type PublishManyFn = (
-  items: ReadonlyArray<{ subject: string; data?: unknown; opts?: JetStreamPublishOptions }>,
+  items: ReadonlyArray<{
+    subject: string;
+    data?: unknown;
+    opts?: JetStreamPublishOptions;
+    run: ContextRunner;
+  }>,
   opts?: { window?: number },
 ) => Promise<PublishManyResult[]>;
 
@@ -25,6 +38,7 @@ interface BatchItem {
   subject: string;
   data: unknown;
   opts: JetStreamPublishOptions | undefined;
+  run: ContextRunner;
   resolve: (ack: PubAck) => void;
   reject: (err: Error) => void;
 }
@@ -71,6 +85,9 @@ export class Batcher {
         subject,
         data,
         opts,
+        // The flush runs in whichever context triggered it; each publish (and the trace
+        // context a tracing plugin injects) must belong to the caller that added it.
+        run: AsyncLocalStorage.snapshot(),
         resolve: (ack) => {
           this.unsettled--;
           resolve(ack);
@@ -119,7 +136,7 @@ export class Batcher {
     try {
       const window = this.opts.window;
       results = await this.publishMany(
-        batch.map(({ subject, data, opts }) => ({ subject, data, opts })),
+        batch.map(({ subject, data, opts, run }) => ({ subject, data, opts, run })),
         window === undefined ? undefined : { window },
       );
     } catch (err) {

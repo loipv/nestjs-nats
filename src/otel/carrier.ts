@@ -46,23 +46,34 @@ export const msgHdrsSetter: TextMapSetter<MsgHdrs> = {
   },
 };
 
+/** `traceparent` and, when present, `tracestate` from `read`, as a propagation carrier. */
+function traceCarrier(
+  read: (name: string) => string | undefined,
+): Record<string, string> | undefined {
+  const traceparent = read(TRACEPARENT);
+  if (traceparent === undefined) return undefined;
+  const carrier: Record<string, string> = { [TRACEPARENT]: traceparent };
+  const tracestate = read(TRACESTATE);
+  if (tracestate !== undefined) carrier[TRACESTATE] = tracestate;
+  return carrier;
+}
+
 /**
- * The context propagated with an inbound message: from its NATS headers, or, when they
- * carry no `traceparent` and the message is a structured CloudEvent, from the
- * `traceparent` / `tracestate` extensions of its envelope (other fields, like baggage,
- * still come from the headers).
+ * The context propagated with an inbound message: from its NATS headers; when they carry
+ * no `traceparent`, from the CloudEvents distributed-tracing extension instead: the
+ * binary-mode `ce-traceparent` / `ce-tracestate` headers, else, for a structured
+ * CloudEvent, the `traceparent` / `tracestate` attributes of its envelope. Other fields,
+ * like baggage, still come from the headers.
  */
 export function extractContext(message: InboundMessage, ctx: NatsContext): Context {
   const { headers } = message;
   const fromHeaders = propagation.extract(ROOT_CONTEXT, headers, msgHdrsGetter);
-  if (headerValues(headers, TRACEPARENT).length > 0 || cloudEventMode(headers) !== 'structured') {
-    return fromHeaders;
+  if (headerValues(headers, TRACEPARENT).length > 0) return fromHeaders;
+  let carrier = traceCarrier((name) => headerValues(headers, `ce-${name}`)[0]);
+  if (carrier === undefined && cloudEventMode(headers) === 'structured') {
+    const extensions = ctx.cloudEvent?.extensions;
+    carrier = traceCarrier((name) => extensions?.[name]);
   }
-  const extensions = ctx.cloudEvent?.extensions;
-  const traceparent = extensions?.[TRACEPARENT];
-  if (traceparent === undefined) return fromHeaders;
-  const carrier: Record<string, string> = { [TRACEPARENT]: traceparent };
-  const tracestate = extensions?.[TRACESTATE];
-  if (tracestate !== undefined) carrier[TRACESTATE] = tracestate;
+  if (carrier === undefined) return fromHeaders;
   return propagation.extract(fromHeaders, carrier, defaultTextMapGetter);
 }
