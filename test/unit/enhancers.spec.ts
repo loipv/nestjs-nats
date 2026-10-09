@@ -213,6 +213,7 @@ describe('HandlerExplorer', () => {
         'subscribe:Filtered.fail@other',
         'consume:Filtered.consume@js',
         'service-endpoint:Svc.get@svcconn',
+        'service-endpoint:Orphan.orphan@default',
         'subscribe:Svc.plain@svcconn',
         'subscribe:Scoped.on@default',
         'subscribe:Piped.piped@default',
@@ -260,6 +261,10 @@ describe('HandlerExplorer', () => {
       subject: 'not-endpoint',
       options: {},
     });
+  });
+
+  it('returns endpoints of classes without @NatsService for validation', () => {
+    expect(find('orphan')).toMatchObject({ kind: 'service-endpoint', service: undefined });
   });
 
   it('returns request-scoped handlers instead of skipping them', () => {
