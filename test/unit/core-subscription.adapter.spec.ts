@@ -312,5 +312,28 @@ describe('CoreSubscriptionAdapter', () => {
       await adapter.stop();
       await adapter.idle();
     });
+
+    it('forceStop drops collected messages and warns with their count', async () => {
+      const invoke = vi.fn(() => Promise.resolve());
+      const { adapter, fake, logger } = setup(
+        invoke,
+        [],
+        {},
+        {
+          batch: { maxSize: 10, maxWait: 60_000 },
+        },
+      );
+      await adapter.start();
+      fake.push(fakeMsg(1));
+      fake.push(fakeMsg(2));
+      await tick();
+      expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0 });
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Dropped 2 collected messages for C.m on "a.b" at forced stop',
+      );
+      await adapter.stop();
+      await adapter.idle();
+      expect(invoke).not.toHaveBeenCalled();
+    });
   });
 });

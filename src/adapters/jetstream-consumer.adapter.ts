@@ -89,6 +89,7 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     this.checkMaxDeliver(actual.max_deliver);
     // `ack_wait` is in nanoseconds; extend the deadline twice per period.
     const ackWait = actual.ack_wait ?? 0;
+    this.checkBatchWait(ackWait / 1e6);
     this.run = this.buildPipeline(ackWait > 0 ? ackWait / 1e6 / 2 : undefined);
     // Enough buffered messages to keep every slot busy and to fill a batch.
     const messages = await consumer.consume({
@@ -127,15 +128,19 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
 
   forceStop(): ForceStopResult {
     let nakked = 0;
-    for (const context of this.inFlight) {
-      if (context.settled) continue;
+    const nak = (settle: () => void) => {
       try {
-        context.nak();
+        settle();
         nakked++;
       } catch (err) {
         this.entry.logger.error(`Failed to nak message for ${this.label}`, errorTrace(err));
       }
+    };
+    for (const context of this.inFlight) {
+      if (!context.settled) nak(() => context.nak());
     }
+    // Received but not started (collected, or in a batch waiting for a slot).
+    for (const msg of this.dispatcher.abandon()) nak(() => msg.nak());
     return { nakked, cancelledRetries: this.dispatcher.cancelRetries() };
   }
 
@@ -163,6 +168,18 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     const { stream, durable } = this.def.options;
     this.entry.logger.warn(
       `Consumer ${stream}/${durable} for ${this.def.className}.${this.def.methodName} has max_deliver ${maxDeliver} ≤ maxRetries ${this.retry.maxRetries}; the server will stop redelivering before the DLQ is reached`,
+    );
+  }
+
+  /**
+   * Collected messages are not heartbeated: when a batch can wait as long as `ack_wait`,
+   * the server may redeliver its messages while they are still collected.
+   */
+  private checkBatchWait(ackWaitMs: number): void {
+    if (!this.batch || ackWaitMs <= 0 || this.batch.maxWait < ackWaitMs) return;
+    const { stream, durable } = this.def.options;
+    this.entry.logger.warn(
+      `${this.def.className}.${this.def.methodName} on "${stream}/${durable}" has batch.maxWait ${this.batch.maxWait} ms >= the consumer's ack_wait ${ackWaitMs} ms; collected messages may be redelivered and processed twice. Lower batch.maxWait or raise ack_wait`,
     );
   }
 

@@ -129,4 +129,14 @@ describe('BatchCollector', () => {
     await vi.advanceTimersByTimeAsync(10);
     expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'boom' }));
   });
+
+  it('take removes the collected items without flushing them', async () => {
+    const { collector, flushed } = setup(10, 100);
+    await collector.add('a');
+    await collector.add('b');
+    expect(collector.take()).toEqual(['a', 'b']);
+    expect(collector.size).toBe(0);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(flushed).toEqual([]);
+  });
 });

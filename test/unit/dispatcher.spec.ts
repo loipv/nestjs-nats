@@ -342,5 +342,58 @@ describe('Dispatcher', () => {
         ],
       ]);
     });
+
+    it('abandon returns collected items and waiting batches, which never start', async () => {
+      const gate = deferred();
+      let n = 0;
+      const { d, seen, onRejected } = batchSetup({ maxSize: 2, maxWait: 60_000 }, () =>
+        n++ === 0 ? gate.promise : Promise.resolve(),
+      );
+      await d.push('a');
+      await d.push('b'); // first batch running
+      await d.push('c');
+      void d.stop(); // flushes ['c'], waiting for the slot
+      await tick();
+      expect(d.abandon()).toEqual(['c']);
+      gate.resolve();
+      await d.idle();
+      expect(seen.map((items) => items.map((i) => i.msg))).toEqual([['a', 'b']]);
+      expect(d.active).toBe(0);
+      expect(onRejected).not.toHaveBeenCalled();
+      expect(d.abandon()).toEqual([]);
+    });
+
+    it('abandon returns items still being collected', async () => {
+      vi.useFakeTimers();
+      const { d, seen, onRejected } = batchSetup({ maxSize: 10, maxWait: 100 });
+      await d.push('a');
+      await d.push('b');
+      expect(d.abandon()).toEqual(['a', 'b']);
+      await vi.advanceTimersByTimeAsync(1000);
+      await d.idle();
+      expect(seen).toEqual([]);
+      await d.push('c');
+      expect(onRejected).toHaveBeenCalledWith('c');
+    });
+
+    it('rejects a push that was waiting behind a flush when abandon() ran', async () => {
+      const gate = deferred();
+      let n = 0;
+      const { d, seen, onRejected } = batchSetup({ maxSize: 1, maxWait: 60_000 }, () =>
+        n++ === 0 ? gate.promise : Promise.resolve(),
+      );
+      await d.push('a'); // running
+      const waiting = d.push('b'); // flush of ['b'] waits for the slot
+      await tick();
+      const late = d.push('c'); // waits behind that flush
+      await tick();
+      expect(d.abandon()).toEqual(['b']);
+      gate.resolve();
+      await waiting;
+      await late;
+      await d.idle();
+      expect(seen.map((items) => items.map((i) => i.msg))).toEqual([['a']]);
+      expect(onRejected).toHaveBeenCalledWith('c');
+    });
   });
 });

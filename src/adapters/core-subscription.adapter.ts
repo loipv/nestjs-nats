@@ -102,7 +102,13 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
   }
 
   forceStop(): ForceStopResult {
-    // Core messages cannot be handed back to the server; only pending retries are left.
+    // Core messages cannot be handed back to the server: collected ones are lost.
+    const dropped = this.dispatcher.abandon().length;
+    if (dropped > 0) {
+      this.entry.logger.warn(
+        `Dropped ${dropped} collected message${dropped === 1 ? '' : 's'} for ${this.label} at forced stop`,
+      );
+    }
     return { nakked: 0, cancelledRetries: this.dispatcher.cancelRetries() };
   }
 

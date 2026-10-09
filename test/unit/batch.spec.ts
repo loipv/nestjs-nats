@@ -22,6 +22,7 @@ import {
   SKIPPED,
 } from '../../src/pipeline/delivery.js';
 import { invokeHandler } from '../../src/pipeline/invoker.js';
+import { type DlqPolicy, resolveDlqPolicy } from '../../src/settlement/dlq.js';
 import { type RetryPolicy, resolveRetryPolicy } from '../../src/settlement/retry.js';
 import { createSettlement } from '../../src/settlement/settlement.js';
 
@@ -276,6 +277,39 @@ describe('batch settlement', () => {
     // Undecodable: non-retryable, so it is dropped rather than retried with the batch.
     expect(raws[1]?.term).toHaveBeenCalledTimes(1);
     expect(raws[1]?.nak).not.toHaveBeenCalled();
+  });
+
+  it('dead-letters an exhausted failed message and acks the others', async () => {
+    const jsPublish = vi.fn(() => Promise.resolve({ stream: 'DLQ', seq: 1 }));
+    const entry = {
+      name: 'default',
+      options: {},
+      logger: logger(),
+      js: () => ({ publish: jsPublish }),
+    } as unknown as ConnectionEntry;
+    const { d, raws } = jsBatch(
+      ['1', '2', '3'],
+      async (_p, ctx) => {
+        (ctx as NatsBatchContext).fail(1, new Error('poison'));
+      },
+      [1, 6, 1],
+    );
+    const dlq = resolveDlqPolicy('consume', true) as DlqPolicy;
+    await pipeline(toMw(createSettlement({ entry, retry, dlq })))(d);
+    expect(jsPublish).toHaveBeenCalledTimes(1);
+    const [subject, data, opts] = jsPublish.mock.calls[0] as unknown as [
+      string,
+      Uint8Array,
+      { headers: { get(k: string): string } },
+    ];
+    expect(subject).toBe('dlq.ORD.d');
+    expect(data).toBe(raws[1]?.data);
+    expect(opts.headers.get('Nats-DLQ-Error')).toBe('poison');
+    expect(opts.headers.get('Nats-DLQ-Deliveries')).toBe('6');
+    expect(raws[1]?.term).toHaveBeenCalledTimes(1);
+    expect(raws[1]?.ack).not.toHaveBeenCalled();
+    expect(raws[0]?.ack).toHaveBeenCalledTimes(1);
+    expect(raws[2]?.ack).toHaveBeenCalledTimes(1);
   });
 
   it('heartbeats every message of the batch', async () => {
