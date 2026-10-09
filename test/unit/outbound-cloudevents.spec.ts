@@ -106,6 +106,53 @@ describe('NatsClient.publish with cloudEvent', () => {
   });
 });
 
+describe('CloudEvent datacontenttype on publish', () => {
+  const bytes = new Uint8Array([1, 2, 3]);
+
+  it('omits datacontenttype for Uint8Array data unless given (binary)', async () => {
+    const { entry, published } = fakeEntry();
+    const client = new NatsClient(entry);
+    client.publish('o.c', bytes, { cloudEvent: { type: 't', source: 's' } });
+    client.publish('o.c', bytes, {
+      cloudEvent: { type: 't', source: 's', datacontenttype: 'application/octet-stream' },
+    });
+    await client.flush();
+    expect(published[0]?.opts.headers?.has('Content-Type', 'insensitive')).toBe(false);
+    expect(published[0]?.data).toEqual(bytes);
+    expect(published[1]?.opts.headers?.get('Content-Type')).toBe('application/octet-stream');
+  });
+
+  it('omits datacontenttype for Uint8Array data unless given (structured)', async () => {
+    const { entry, published } = fakeEntry();
+    const client = new NatsClient(entry);
+    const ce = { type: 't', source: 's', mode: 'structured' } as const;
+    client.publish('o.c', bytes, { cloudEvent: ce });
+    client.publish('o.c', bytes, { cloudEvent: { ...ce, datacontenttype: 'image/png' } });
+    await client.flush();
+    const env0 = JSON.parse(text(published[0]?.data as Uint8Array));
+    expect('datacontenttype' in env0).toBe(false);
+    expect(env0.data_base64).toBe(Buffer.from(bytes).toString('base64'));
+    const env1 = JSON.parse(text(published[1]?.data as Uint8Array));
+    expect(env1.datacontenttype).toBe('image/png');
+  });
+
+  it("uses the given datacontenttype, else the codec's, for other data", async () => {
+    const { entry, published } = fakeEntry();
+    const client = new NatsClient(entry);
+    client.publish('o.c', { a: 1 }, { cloudEvent: { type: 't', source: 's' } });
+    client.publish(
+      'o.c',
+      { a: 1 },
+      {
+        cloudEvent: { type: 't', source: 's', datacontenttype: 'application/vnd.acme+json' },
+      },
+    );
+    await client.flush();
+    expect(published[0]?.opts.headers?.get('Content-Type')).toBe('application/json');
+    expect(published[1]?.opts.headers?.get('Content-Type')).toBe('application/vnd.acme+json');
+  });
+});
+
 describe('JetStreamClient.publish with cloudEvent', () => {
   it('sets Nats-Msg-Id from the CloudEvent id, keeping an explicit msgId', async () => {
     const { entry, jsPublished } = fakeEntry();
@@ -119,6 +166,25 @@ describe('JetStreamClient.publish with cloudEvent', () => {
     expect(jsPublished[0]?.opts.headers?.get('ce-id')).toBe('ce-1');
     expect(jsPublished[1]?.opts.headers?.get('Nats-Msg-Id')).toBe('mine');
     expect(jsPublished[1]?.opts.headers?.get('ce-id')).toBe('ce-2');
+  });
+
+  it('keeps a Nats-Msg-Id header given by the caller over the CloudEvent id', async () => {
+    const { entry, jsPublished } = fakeEntry();
+    const js = new JetStreamClient(entry);
+    const cloudEvent = { type: 't', source: 's', id: 'ce-1' };
+    await js.publish('o.c', 1, { cloudEvent, headers: { 'Nats-Msg-Id': 'from-header' } });
+    await js.publish('o.c', 1, { cloudEvent, headers: { 'nats-msg-id': 'lower' } });
+    await js.publish('o.c', 1, {
+      cloudEvent,
+      headers: { 'Nats-Msg-Id': 'from-header' },
+      msgId: 'opt',
+    });
+    await js.publish('o.c', 1, { headers: { 'Nats-Msg-Id': 'plain' } });
+    const ids = (i: number) => jsPublished[i]?.opts.headers?.values('Nats-Msg-Id', 'insensitive');
+    expect(ids(0)).toEqual(['from-header']);
+    expect(ids(1)).toEqual(['lower']);
+    expect(ids(2)).toEqual(['opt']);
+    expect(ids(3)).toEqual(['plain']);
   });
 
   it('rejects without a source', async () => {

@@ -17,6 +17,11 @@ export interface CloudEventInit {
   id?: string;
   time?: string | Date;
   dataschema?: string;
+  /**
+   * The media type of the data. Default: the codec's content type, or none when the data
+   * is a `Uint8Array` (the library cannot tell what the bytes are).
+   */
+  datacontenttype?: string;
   extensions?: Record<string, string>;
   mode?: 'binary' | 'structured';
 }

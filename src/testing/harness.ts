@@ -289,9 +289,9 @@ export class NatsTestHarness {
     const h = toMsgHdrs(options.headers);
     let data: Uint8Array;
     if (options.cloudEvent) {
-      const defaults: { source?: string; contentType: string } = {
-        contentType: codec.contentType,
-      };
+      // As on publish: bytes get no default datacontenttype.
+      const defaults: { source?: string; contentType?: string } = {};
+      if (!(payload instanceof Uint8Array)) defaults.contentType = codec.contentType;
       const source = entry.options.cloudEvents?.source;
       if (source !== undefined) defaults.source = source;
       const meta = resolveCloudEvent(options.cloudEvent, defaults);

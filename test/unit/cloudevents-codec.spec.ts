@@ -329,6 +329,95 @@ describe('writeCloudEvent / readCloudEvent', () => {
   });
 });
 
+describe('readCloudEvent data and datacontenttype', () => {
+  const enc = new TextEncoder();
+  const jsonish: Codec = { ...jsonCodec(), contentType: 'application/json; charset=utf-8' };
+
+  function binaryWithType(contentType: string | undefined, body: string) {
+    const msg = binaryMsg({ id: '1', source: 's' }, enc.encode(body));
+    if (contentType !== undefined) msg.headers.set('Content-Type', contentType);
+    return msg;
+  }
+
+  function structuredBase64(datacontenttype: string | undefined, body: string) {
+    const env: Record<string, string> = {
+      ...fullEnv,
+      data_base64: Buffer.from(body).toString('base64'),
+    };
+    if (datacontenttype !== undefined) env.datacontenttype = datacontenttype;
+    return structuredMsg(env);
+  }
+
+  it('hands over the raw bytes of a binary event with a non-JSON content type', () => {
+    const out = readCloudEvent(binaryWithType('text/plain', 'hello'), jsonCodec());
+    expect(out.data).toBeInstanceOf(Uint8Array);
+    expect(new TextDecoder().decode(out.data as Uint8Array)).toBe('hello');
+    const numeric = readCloudEvent(binaryWithType('text/plain', '123'), jsonCodec());
+    expect(numeric.data).toEqual(enc.encode('123'));
+  });
+
+  it('hands over the raw bytes of structured data_base64 with a non-JSON content type', () => {
+    const out = readCloudEvent(structuredBase64('text/plain', 'hello'), jsonCodec());
+    expect(out.data).toEqual(enc.encode('hello'));
+    const bin = readCloudEvent(structuredBase64('application/octet-stream', '\x01'), jsonCodec());
+    expect(bin.data).toBeInstanceOf(Uint8Array);
+  });
+
+  it.each([
+    'application/json',
+    'Application/JSON; charset=utf-8',
+    'text/json',
+    'application/vnd.acme+json',
+    'application/cloudevents+json',
+  ])('decodes %s data with the codec', (contentType) => {
+    expect(readCloudEvent(binaryWithType(contentType, '{"a":1}'), jsonCodec()).data).toEqual({
+      a: 1,
+    });
+    expect(readCloudEvent(structuredBase64(contentType, '{"a":1}'), jsonCodec()).data).toEqual({
+      a: 1,
+    });
+  });
+
+  it('decodes with the codec when no content type is declared', () => {
+    expect(readCloudEvent(binaryWithType(undefined, '"123"'), jsonCodec()).data).toBe('123');
+    expect(readCloudEvent(structuredBase64(undefined, '{"a":1}'), jsonCodec()).data).toEqual({
+      a: 1,
+    });
+  });
+
+  it('decodes with a codec whose content type matches (case and parameters aside)', () => {
+    expect(readCloudEvent(binaryWithType('text/plain', 'hi'), textCodec).data).toBe('hi');
+    expect(readCloudEvent(binaryWithType('Text/Plain; charset=utf-8', 'hi'), textCodec).data).toBe(
+      'hi',
+    );
+    expect(readCloudEvent(structuredBase64('text/plain', 'hi'), textCodec).data).toBe('hi');
+    expect(readCloudEvent(binaryWithType('application/json', '{}'), jsonish).data).toEqual({});
+  });
+
+  it('hands the declared content type to the codec in the data_base64 path', () => {
+    const seen: Array<string | undefined> = [];
+    const spy: Codec = {
+      contentType: 'application/x-proto',
+      encode: () => new Uint8Array(),
+      decode: (_bytes, h) => {
+        seen.push(h?.get('Content-Type'));
+        return 'decoded';
+      },
+    };
+    expect(readCloudEvent(structuredBase64('application/x-proto', 'x'), spy).data).toBe('decoded');
+    expect(readCloudEvent(structuredBase64('application/json', '{}'), spy).data).toBe('decoded');
+    expect(seen).toEqual(['application/x-proto', 'application/json']);
+  });
+
+  it('keeps inline structured data as is, whatever the content type', () => {
+    const out = readCloudEvent(
+      structuredMsg({ ...fullEnv, datacontenttype: 'text/plain', data: '123' }),
+      jsonCodec(),
+    );
+    expect(out.data).toBe('123');
+  });
+});
+
 describe('readCloudEventMeta', () => {
   it('returns meta without decoding data', () => {
     const msg = binaryMsg({ id: '1', source: 's' }, new TextEncoder().encode('{bad'));
@@ -430,6 +519,27 @@ describe('resolveCloudEvent', () => {
     expect(() => resolveCloudEvent({ type: 't' }, { contentType: 'x' })).toThrow(
       'CloudEvent source is required: set cloudEvent.source or NatsModule cloudEvents.source',
     );
+  });
+});
+
+describe('resolveCloudEvent datacontenttype', () => {
+  it('prefers the given datacontenttype over the default', () => {
+    const m = resolveCloudEvent(
+      { type: 't', datacontenttype: 'text/plain' },
+      { source: 's', contentType: 'application/json' },
+    );
+    expect(m.datacontenttype).toBe('text/plain');
+  });
+
+  it('omits datacontenttype when neither is given', () => {
+    const m = resolveCloudEvent({ type: 't' }, { source: 's' });
+    expect('datacontenttype' in m).toBe(false);
+  });
+
+  it('rejects an empty datacontenttype', () => {
+    expect(() =>
+      resolveCloudEvent({ type: 't', datacontenttype: '' }, { source: 's', contentType: 'x' }),
+    ).toThrow(NatsConfigError);
   });
 });
 
