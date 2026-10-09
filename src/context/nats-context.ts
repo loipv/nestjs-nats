@@ -51,8 +51,15 @@ export class NatsContext<R extends NatsMsg | JsMsg = NatsMsg | JsMsg> {
   }
 }
 
+/** Internal: key of the settle call made on a JetStream context (see `NatsJetStreamContext`). */
+export const SETTLED_BY: unique symbol = Symbol('nats.settledBy');
+
+/** Internal: the settle call (`ack`/`nak`/`term`) that settled a JetStream message. */
+export type SettleCall = { op: 'ack' } | { op: 'nak'; delayMs: number } | { op: 'term' };
+
 export class NatsJetStreamContext extends NatsContext<JsMsg> {
   #settled = false;
+  #settledBy?: SettleCall;
 
   /**
    * Always `undefined`: a JetStream message's reply subject is its `$JS.ACK...` subject,
@@ -78,6 +85,11 @@ export class NatsJetStreamContext extends NatsContext<JsMsg> {
     return this.#settled;
   }
 
+  /** Internal: which call settled the message (`undefined` while unsettled); read by the settlement. */
+  get [SETTLED_BY](): SettleCall | undefined {
+    return this.#settledBy;
+  }
+
   // Each settle call marks the message settled only once the raw call succeeded: if it
   // throws, the error reaches the caller and the message can still be settled later.
 
@@ -85,18 +97,21 @@ export class NatsJetStreamContext extends NatsContext<JsMsg> {
     if (this.#settled) return;
     this.raw.ack();
     this.#settled = true;
+    this.#settledBy = { op: 'ack' };
   }
 
   nak(delayMs?: number): void {
     if (this.#settled) return;
     this.raw.nak(delayMs);
     this.#settled = true;
+    this.#settledBy = { op: 'nak', delayMs: delayMs ?? 0 };
   }
 
   term(reason?: string): void {
     if (this.#settled) return;
     this.raw.term(reason);
     this.#settled = true;
+    this.#settledBy = { op: 'term' };
   }
 
   working(): void {

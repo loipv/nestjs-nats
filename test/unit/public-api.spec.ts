@@ -88,7 +88,7 @@ it('exposes a narrow handler description on Delivery', () => {
   >();
   expectTypeOf<Delivery['context']>().toEqualTypeOf<NatsContext | NatsBatchContext>();
   expectTypeOf<keyof Delivery>().toEqualTypeOf<
-    'handler' | 'messages' | 'context' | 'codec' | 'logger' | 'result'
+    'handler' | 'messages' | 'outcomes' | 'context' | 'codec' | 'logger' | 'result'
   >();
 });
 

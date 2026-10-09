@@ -76,6 +76,7 @@ function consumeDelivery(attempt = 1, ack?: 'auto' | 'manual') {
     handler,
     [HANDLER_DEFINITION]: { ...handler, options: { stream: 'ORD', durable: 'd', ack } },
     messages: [msg],
+    outcomes: new Map(),
     context,
     logger: log,
   } as unknown as Delivery;
@@ -104,6 +105,7 @@ function coreDelivery(opts: { reply?: string; attempt?: number; kind?: string } 
     [HANDLER_DEFINITION]: { ...handler, options: {} },
     [RETRY_SCHEDULER]: schedule,
     messages: [msg],
+    outcomes: new Map(),
     context,
     logger: log,
   } as unknown as Delivery;
@@ -122,6 +124,39 @@ const settled = (raw: ReturnType<typeof fakeJsMsg>) => ({
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe('createSettlement — outcomes', () => {
+  it('records the decision it settled with, next to the raw call', async () => {
+    const { entry } = fakeEntry();
+    const failing = consumeDelivery(1);
+    const err = new Error('x');
+    await createSettlement({ entry, retry, dlq: false }).handle(failing.d, nextWith(err));
+    expect(failing.d.outcomes.get(failing.msg)).toEqual({
+      action: 'retry',
+      delayMs: 100,
+      error: err,
+    });
+    expect(failing.raw.nak).toHaveBeenCalledExactlyOnceWith(100);
+
+    const ok = consumeDelivery(1);
+    await createSettlement({ entry, retry, dlq: false }).handle(ok.d, nextWith(undefined));
+    expect(ok.d.outcomes.get(ok.msg)).toEqual({ action: 'ack' });
+  });
+
+  it('records a core retry and a replied request', async () => {
+    const { entry } = fakeEntry();
+    const core = coreDelivery();
+    const err = new Error('x');
+    await createSettlement({ entry, retry, dlq: false }).handle(core.d, nextWith(err));
+    expect(core.d.outcomes.get(core.msg)).toEqual({ action: 'retry', delayMs: 100, error: err });
+
+    const reply = coreDelivery({ reply: '_INBOX.1' });
+    await expect(
+      createSettlement({ entry, retry, dlq: false }).handle(reply.d, nextWith(err)),
+    ).rejects.toBe(err);
+    expect(reply.d.outcomes.get(reply.msg)).toEqual({ action: 'replied', error: err });
+  });
 });
 
 describe('createSettlement — consume', () => {
