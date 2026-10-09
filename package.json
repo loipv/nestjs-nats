@@ -1,7 +1,27 @@
 {
   "name": "@loipv/nestjs-nats",
   "version": "0.1.0",
-  "description": "NestJS integration for NATS",
+  "description": "Decorator-driven NATS and JetStream integration for NestJS: subscribers, consumers, services, CloudEvents, retry/DLQ, idempotency, batching, OpenTelemetry, health checks and testing utilities",
+  "keywords": [
+    "nestjs",
+    "nats",
+    "jetstream",
+    "microservices",
+    "messaging",
+    "cloudevents",
+    "opentelemetry",
+    "dead-letter-queue",
+    "idempotency"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/loipv/nestjs-nats.git"
+  },
+  "homepage": "https://github.com/loipv/nestjs-nats#readme",
+  "bugs": {
+    "url": "https://github.com/loipv/nestjs-nats/issues"
+  },
+  "author": "loipv",
   "license": "MIT",
   "type": "module",
   "sideEffects": false,
@@ -27,8 +47,13 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "src"
   ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "prebuild": "node --input-type=commonjs -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "tsc -p tsconfig.build.json",
@@ -36,8 +61,9 @@
     "test": "vitest run --project unit",
     "test:int": "vitest run --project integration",
     "lint": "biome check .",
+    "check:pack": "node scripts/check-pack.mjs",
     "check:pkg": "publint && attw --pack . --profile esm-only",
-    "prepublishOnly": "npm run build && npm run check:pkg && npm run typecheck && npm test"
+    "prepublishOnly": "npm run build && npm run check:pack && npm run check:pkg && npm run typecheck && npm test"
   },
   "peerDependencies": {
     "@nats-io/jetstream": "^3.0.0",
