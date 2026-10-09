@@ -1,16 +1,9 @@
-// Module
-
-// Clients
 export { NatsClient } from './client/nats-client.js';
 export type { Codec } from './codec/codec.js';
-// Codec
 export { jsonCodec } from './codec/codec.js';
 export type { HeadersInit } from './codec/headers.js';
 export type { NatsConnectionState, NatsStatusEvent } from './connection/connection-manager.js';
-
-// Connection
 export { NatsConnectionManager } from './connection/connection-manager.js';
-// Context
 export { NatsContext, NatsJetStreamContext } from './context/nats-context.js';
 export type {
   ConsumeOptions,
@@ -18,7 +11,6 @@ export type {
   ServiceEndpointOptions,
   SubscribeOptions,
 } from './decorators/handler.decorators.js';
-// Decorators
 export {
   Consume,
   NatsService,
@@ -27,7 +19,6 @@ export {
 } from './decorators/handler.decorators.js';
 export { Ctx, Headers, Msg, Payload, Subject } from './decorators/param.decorators.js';
 export type { NatsRequestErrorCode } from './errors/errors.js';
-// Errors
 export {
   NatsConfigError,
   NatsConnectionError,
@@ -62,7 +53,6 @@ export {
   getStreamManagerToken,
 } from './module/tokens.js';
 export type { HandlerInfo, InboundMessage } from './pipeline/delivery.js';
-// Pipeline
 export type {
   Delivery,
   InboundMiddleware,

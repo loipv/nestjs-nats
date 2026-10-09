@@ -5,6 +5,7 @@ import type { ConnectionEntry } from '../connection/connection-manager.js';
 import { NatsContext } from '../context/nats-context.js';
 import type { NatsServiceOptions } from '../decorators/handler.decorators.js';
 import type { HandlerDefinition } from '../discovery/handler-explorer.js';
+import { NatsConfigError } from '../errors/errors.js';
 import { basicSettlement } from '../pipeline/basic-settlement.js';
 import {
   buildInboundPipeline,
@@ -81,11 +82,21 @@ export class NatsServiceAdapter implements HandlerAdapter {
     }
     for (const endpoint of this.endpoints) {
       const { subject, queue: endpointQueue, metadata: endpointMetadata } = endpoint.def.options;
-      const iterator = service.addEndpoint(endpoint.def.endpoint, {
-        ...(subject !== undefined ? { subject } : {}),
-        ...(endpointQueue !== undefined ? { queue: endpointQueue } : {}),
-        ...(endpointMetadata !== undefined ? { metadata: endpointMetadata } : {}),
-      });
+      let iterator: QueuedIterator<ServiceMsg>;
+      try {
+        iterator = service.addEndpoint(endpoint.def.endpoint, {
+          ...(subject !== undefined ? { subject } : {}),
+          ...(endpointQueue !== undefined ? { queue: endpointQueue } : {}),
+          ...(endpointMetadata !== undefined ? { metadata: endpointMetadata } : {}),
+        });
+      } catch (err) {
+        // `this.service` is set, so the bootstrap cleanup stops the service.
+        const { className, methodName } = endpoint.def;
+        throw new NatsConfigError(
+          `Invalid @ServiceEndpoint ${className}.${methodName} ("${endpoint.def.endpoint}") of service "${name}": ${err instanceof Error ? err.message : String(err)}`,
+          { cause: err },
+        );
+      }
       this.loops.push(this.consume(iterator, endpoint));
     }
     // Make sure the server knows about the subscriptions before bootstrap completes.

@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import { NatsClient } from '../client/nats-client.js';
 import { NatsConnectionManager } from '../connection/connection-manager.js';
+import { NatsConfigError } from '../errors/errors.js';
 import { JetStreamClient } from '../jetstream/jetstream-client.js';
 import { NatsStreamManager } from '../jetstream/stream-manager.js';
 import { NatsCoreModule } from './nats-core.module.js';
@@ -75,7 +76,9 @@ export class NatsModule {
         inject: [factoryType],
       });
     } else {
-      throw new TypeError('NatsModule.forRootAsync requires useFactory, useClass or useExisting');
+      throw new NatsConfigError(
+        'NatsModule.forRootAsync requires useFactory, useClass or useExisting',
+      );
     }
     return NatsModule.build(name, options.imports ?? [], providers);
   }
