@@ -61,16 +61,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
         node: ['22.12', 24]
     steps:
       - uses: actions/checkout@v5
+      # Install the root devDependencies with Node 24 (some need a newer Node than 22.12),
+      # then run the smoke fixtures on the matrix Node.
       - uses: actions/setup-node@v5
         with:
-          node-version: ${{ matrix.node }}
+          node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm run test:smoke
+      - name: Switch to Node ${{ matrix.node }}
+        if: matrix.node != 24
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+      - run: node --version
+      - run: node scripts/smoke.mjs
 
   example:
     runs-on: ubuntu-latest
@@ -83,3 +92,22 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run example:check
+
+  # Single required status check for branch protection: fails unless every job above succeeded.
+  ci-ok:
+    if: always()
+    needs: [checks, test, smoke, example]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every CI job to succeed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "needs results: $RESULTS"
+          for r in $RESULTS; do
+            if [ "$r" != "success" ]; then
+              echo "::error::a required CI job did not succeed (result: $r)"
+              exit 1
+            fi
+          done
