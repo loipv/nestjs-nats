@@ -135,10 +135,16 @@ export function readCloudEventMeta(msg: CeMessage): CloudEventMeta | undefined {
   return undefined;
 }
 
-export function readCloudEvent(
-  msg: CeMessage,
-  codec: Codec,
-): { meta: CloudEventMeta; data: unknown } {
+/**
+ * Reads and validates the attributes of a CloudEvent (binary or structured) without
+ * decoding its data; `data(codec)` decodes it on demand. Throws a `NatsDecodeError` when
+ * the message is not a CloudEvent, a structured envelope is not a JSON object, or a
+ * required attribute is missing.
+ */
+export function parseCloudEvent(msg: CeMessage): {
+  meta: CloudEventMeta;
+  data: (codec: Codec) => unknown;
+} {
   const mode = cloudEventMode(msg.headers);
   if (mode === undefined) {
     throw new NatsDecodeError('Message is not a CloudEvent');
@@ -150,7 +156,7 @@ export function readCloudEvent(
       throw new NatsDecodeError(`Invalid CloudEvent: missing required attribute "${absent}"`);
     return {
       meta: buildMeta(attrs, ext),
-      data: decodePayload(codec, msg.data, msg.headers),
+      data: (codec) => decodePayload(codec, msg.data, msg.headers),
     };
   }
   const env = parseEnvelope(msg.data);
@@ -158,15 +164,24 @@ export function readCloudEvent(
   const absent = missing(attrs);
   if (absent)
     throw new NatsDecodeError(`Invalid CloudEvent: missing required attribute "${absent}"`);
-  const meta = buildMeta(attrs, ext);
-  let data: unknown;
-  if (typeof env.data_base64 === 'string') {
-    const bytes = new Uint8Array(Buffer.from(env.data_base64, 'base64'));
-    data = decodePayload(codec, bytes);
-  } else {
-    data = env.data;
-  }
-  return { meta, data };
+  return {
+    meta: buildMeta(attrs, ext),
+    data: (codec) => {
+      if (typeof env.data_base64 === 'string') {
+        const bytes = new Uint8Array(Buffer.from(env.data_base64, 'base64'));
+        return decodePayload(codec, bytes);
+      }
+      return env.data;
+    },
+  };
+}
+
+export function readCloudEvent(
+  msg: CeMessage,
+  codec: Codec,
+): { meta: CloudEventMeta; data: unknown } {
+  const { meta, data } = parseCloudEvent(msg);
+  return { meta, data: data(codec) };
 }
 
 export function resolveCloudEvent(

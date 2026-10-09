@@ -15,7 +15,7 @@ import {
 import { Subscribe } from '../../src/decorators/handler.decorators.js';
 import { CloudEvent, Payload } from '../../src/decorators/param.decorators.js';
 import { type HandlerDefinition, HandlerExplorer } from '../../src/discovery/handler-explorer.js';
-import { NatsConfigError } from '../../src/errors/errors.js';
+import { NatsConfigError, NatsDecodeError } from '../../src/errors/errors.js';
 import { compose } from '../../src/pipeline/compose.js';
 import {
   createDelivery,
@@ -27,7 +27,11 @@ import {
 import { invokeHandler } from '../../src/pipeline/invoker.js';
 import { toServiceError } from '../../src/pipeline/reply.js';
 import { resolveDlqPolicy } from '../../src/settlement/dlq.js';
+import { type RetryPolicy, resolveRetryPolicy } from '../../src/settlement/retry.js';
 import { createSettlement } from '../../src/settlement/settlement.js';
+
+const RETRY_ON = resolveRetryPolicy({ maxRetries: 5, initialDelay: 100, jitter: 0 }) as RetryPolicy;
+const NOT_JSON = new TextEncoder().encode('not json{');
 
 const calls: Array<{ handler: string; data: unknown; type?: string }> = [];
 
@@ -101,6 +105,20 @@ class BadPolicyRouter {
   on() {}
 }
 
+@CloudEventRouter({ subscribe: 'x', batch: { maxSize: 10 } } as never)
+@Injectable()
+class BatchRouter {
+  @OnCloudEvent('a.b')
+  on() {}
+}
+
+@CloudEventRouter({ consume: { stream: 'S', durable: 'd' }, ack: 'manual' } as never)
+@Injectable()
+class ManualAckRouter {
+  @OnCloudEvent('a.b')
+  on() {}
+}
+
 async function explore(...providers: Array<new (...args: never[]) => unknown>) {
   const moduleRef = await Test.createTestingModule({
     imports: [DiscoveryModule],
@@ -168,11 +186,11 @@ function corePart(attrs: Record<string, string>, reply = ''): DeliveryPart {
   };
 }
 
-function jsPart(attrs: Record<string, string>) {
+function jsPart(attrs: Record<string, string>, data = body) {
   const raw = {
     subject: 'events.o',
     reply: '$JS.ACK.S.d.1.1.1.0.0',
-    data: body,
+    data,
     headers: ceHeaders(attrs),
     ack: vi.fn(),
     nak: vi.fn(),
@@ -197,12 +215,17 @@ function jsPart(attrs: Record<string, string>) {
   return { part, raw };
 }
 
-async function run(def: HandlerDefinition, part: DeliveryPart, dlq = false) {
+async function run(
+  def: HandlerDefinition,
+  part: DeliveryPart,
+  dlq = false,
+  retry: RetryPolicy | false = false,
+) {
   const entry = fakeEntry();
   const kind = def.kind === 'consume' ? 'consume' : 'subscribe';
   const settlement = createSettlement({
     entry,
-    retry: false,
+    retry,
     dlq: resolveDlqPolicy(kind, dlq),
   });
   const d = createDelivery({
@@ -265,6 +288,8 @@ describe('@CloudEventRouter discovery', () => {
     ['@OnCloudEvent combined with @Subscribe', MixedRouter],
     ['both subscribe and consume', BothRouter],
     ['an invalid unmatched policy', BadPolicyRouter],
+    ['batch', BatchRouter],
+    ['ack', ManualAckRouter],
   ])('rejects %s', async (_, cls) => {
     await expect(explore(cls)).rejects.toThrow(NatsConfigError);
   });
@@ -366,5 +391,53 @@ describe('@CloudEventRouter dispatch', () => {
     const { d, error } = await run(def, corePart({ ...BASE, type: 'com.other' }, '_INBOX.1'));
     expect(error).toBeUndefined();
     expect(d.result).toBeUndefined();
+  });
+
+  it('never decodes the data of an unmatched CloudEvent', async () => {
+    const def = await routerDef({ consume: { stream: 'S', durable: 'd' } });
+    const { part, raw } = jsPart({ ...BASE, type: 'com.other' }, NOT_JSON);
+    const { outcome, entry } = await run(def, part);
+    expect(outcome).toEqual({ action: 'ack' });
+    expect(raw.ack).toHaveBeenCalledTimes(1);
+    expect(entry.logger.error).not.toHaveBeenCalled();
+  });
+
+  it('fails a matched CloudEvent whose data cannot be decoded', async () => {
+    const def = await routerDef({ consume: { stream: 'S', durable: 'd' } });
+    calls.length = 0;
+    const { part, raw } = jsPart({ ...BASE, type: 'com.o.created' }, NOT_JSON);
+    const { outcome } = await run(def, part, false, RETRY_ON);
+    expect(calls).toEqual([]);
+    expect(outcome).toMatchObject({ action: 'term' });
+    expect((outcome as { error?: unknown }).error).toBeInstanceOf(NatsDecodeError);
+    expect(raw.term).toHaveBeenCalledTimes(1);
+    expect(raw.nak).not.toHaveBeenCalled();
+  });
+
+  it('terms without retrying when retries are on', async () => {
+    const def = await routerDef({ consume: { stream: 'S', durable: 'd' }, unmatched: 'term' });
+    const invalid = jsPart({ specversion: '1.0', id: 'e1', type: 'com.o.created' });
+    const missing = await run(def, invalid.part, false, RETRY_ON);
+    expect(missing.outcome).toMatchObject({ action: 'term' });
+    expect((missing.outcome as { error?: unknown }).error).toBeInstanceOf(NatsDecodeError);
+    expect(invalid.raw.nak).not.toHaveBeenCalled();
+    expect(invalid.raw.term).toHaveBeenCalledTimes(1);
+
+    const unmatched = jsPart({ ...BASE, type: 'com.other' });
+    const result = await run(def, unmatched.part, false, RETRY_ON);
+    expect(result.outcome).toMatchObject({ action: 'term' });
+    expect(unmatched.raw.nak).not.toHaveBeenCalled();
+    expect(unmatched.raw.term).toHaveBeenCalledTimes(1);
+  });
+
+  it('logs an unmatched dead letter as a routing decision, not a handler failure', async () => {
+    const def = await routerDef({ consume: { stream: 'S', durable: 'd' }, unmatched: 'dlq' });
+    const { part } = jsPart({ ...BASE, type: 'com.other' });
+    const { outcome, entry } = await run(def, part, true);
+    expect(outcome).toMatchObject({ action: 'dlq', subject: 'dlq.S.d' });
+    expect(entry.logger.error).not.toHaveBeenCalled();
+    expect(entry.logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('No handler for CloudEvent type "com.other"'),
+    );
   });
 });

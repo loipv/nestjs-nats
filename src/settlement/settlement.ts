@@ -143,13 +143,22 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
     }
   }
 
+  /** Logs a successful dead letter: a handler failure, or an unmatched routing decision. */
+  function logDeadLettered(d: Delivery, msg: InboundMessage, subject: string, err: unknown) {
+    if (err instanceof UnmatchedCloudEventError) {
+      d.logger.warn(`${label(d, msg)}: ${err.message}; sent to DLQ ${subject} (unmatched: 'dlq')`);
+    } else {
+      d.logger.error(
+        `${label(d, msg)} failed, sent to DLQ ${subject} after ${attempts(msg.attempt)}: ${errorMessage(err)}`,
+      );
+    }
+  }
+
   /** Dead-letters then terms a JetStream message; naks it when the DLQ publish fails. */
   async function deadLetterConsume(d: Delivery, { msg, ctx }: JsTarget, err: unknown) {
     const { subject, error } = await deadLetter(d, msg, err);
     if (error === undefined) {
-      d.logger.error(
-        `${label(d, msg)} failed, sent to DLQ ${subject} after ${attempts(msg.attempt)}: ${errorMessage(err)}`,
-      );
+      logDeadLettered(d, msg, subject, err);
       settle(d, msg, 'term', () => ctx.term());
       recordOutcome(d, msg, { action: 'dlq', subject, error: err });
       return;
@@ -228,9 +237,7 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
   async function deadLetterSubscribe(d: Delivery, msg: InboundMessage, err: unknown) {
     const { subject, error } = await deadLetter(d, msg, err);
     if (error === undefined) {
-      d.logger.error(
-        `${label(d, msg)} failed, sent to DLQ ${subject} after ${attempts(msg.attempt)}: ${errorMessage(err)}`,
-      );
+      logDeadLettered(d, msg, subject, err);
     } else {
       d.logger.error(
         `${label(d, msg)} failed after ${attempts(msg.attempt)} and could not be sent to DLQ ${subject}: ${errorMessage(error)}`,
