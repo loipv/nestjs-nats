@@ -12,7 +12,13 @@ import type { HandlerDefinition } from '../discovery/handler-explorer.js';
 import { NatsConfigError } from '../errors/errors.js';
 import type { NatsStreamManager } from '../jetstream/stream-manager.js';
 import { basicSettlement } from '../pipeline/basic-settlement.js';
-import { buildInboundPipeline, type Delivery } from '../pipeline/delivery.js';
+import {
+  buildInboundPipeline,
+  HANDLER_DEFINITION,
+  type HandlerInfo,
+  type InternalDelivery,
+  toHandlerInfo,
+} from '../pipeline/delivery.js';
 import { invokeHandler } from '../pipeline/invoker.js';
 import type { HandlerAdapter } from './adapter.js';
 import { createLimiter, type Limiter } from './limiter.js';
@@ -29,7 +35,8 @@ const isPowerOfTwo = (n: number): boolean => n >= 1 && (n & (n - 1)) === 0;
 export class JetStreamConsumerAdapter implements HandlerAdapter {
   private readonly limiter: Limiter;
   private readonly codec: Codec;
-  private readonly run: (d: Delivery) => Promise<void>;
+  private readonly run: (d: InternalDelivery) => Promise<void>;
+  private readonly info: HandlerInfo;
   private readonly label: string;
   private readonly concurrency: number;
   private messages?: ConsumerMessages;
@@ -44,6 +51,7 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     this.concurrency = def.options.concurrency ?? 1;
     this.limiter = createLimiter(this.concurrency);
     this.codec = def.options.codec ?? entry.options.codec ?? jsonCodec();
+    this.info = toHandlerInfo(def);
     this.run = buildInboundPipeline(
       { plugins: entry.options.plugins ?? [], core: [basicSettlement] },
       invokeHandler,
@@ -180,8 +188,9 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
       connection: this.entry.name,
       raw: msg,
     });
-    const d: Delivery = {
-      handler: this.def,
+    const d: InternalDelivery = {
+      handler: this.info,
+      [HANDLER_DEFINITION]: this.def,
       messages: [{ subject: msg.subject, data: msg.data, headers: msg.headers, raw: msg }],
       context,
       codec: this.codec,

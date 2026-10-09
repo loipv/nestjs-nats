@@ -6,7 +6,13 @@ import { NatsContext } from '../context/nats-context.js';
 import type { NatsServiceOptions } from '../decorators/handler.decorators.js';
 import type { HandlerDefinition } from '../discovery/handler-explorer.js';
 import { basicSettlement } from '../pipeline/basic-settlement.js';
-import { buildInboundPipeline, type Delivery } from '../pipeline/delivery.js';
+import {
+  buildInboundPipeline,
+  HANDLER_DEFINITION,
+  type HandlerInfo,
+  type InternalDelivery,
+  toHandlerInfo,
+} from '../pipeline/delivery.js';
 import { invokeHandler } from '../pipeline/invoker.js';
 import { toServiceError } from '../pipeline/reply.js';
 import type { HandlerAdapter } from './adapter.js';
@@ -20,6 +26,7 @@ function errorTrace(err: unknown): string {
 
 interface EndpointRuntime {
   def: ServiceEndpointDefinition;
+  info: HandlerInfo;
   limiter: Limiter;
   codec: Codec;
   label: string;
@@ -30,7 +37,7 @@ interface EndpointRuntime {
  * `@ServiceEndpoint` handlers (one at a time per endpoint) on the service's endpoints.
  */
 export class NatsServiceAdapter implements HandlerAdapter {
-  private readonly run: (d: Delivery) => Promise<void>;
+  private readonly run: (d: InternalDelivery) => Promise<void>;
   private readonly endpoints: EndpointRuntime[];
   private service?: Service;
   private loops: Array<Promise<void>> = [];
@@ -47,6 +54,7 @@ export class NatsServiceAdapter implements HandlerAdapter {
     );
     this.endpoints = endpoints.map((def) => ({
       def,
+      info: toHandlerInfo(def, options),
       limiter: createLimiter(1),
       codec: def.options.codec ?? entry.options.codec ?? jsonCodec(),
       label: `${def.className}.${def.methodName} on service "${options.name}" endpoint "${def.endpoint}"`,
@@ -136,8 +144,9 @@ export class NatsServiceAdapter implements HandlerAdapter {
 
   private async handle(msg: ServiceMsg, endpoint: EndpointRuntime): Promise<void> {
     const context = new NatsContext({ kind: 'service', connection: this.entry.name, raw: msg });
-    const d: Delivery = {
-      handler: endpoint.def,
+    const d: InternalDelivery = {
+      handler: endpoint.info,
+      [HANDLER_DEFINITION]: endpoint.def,
       messages: [{ subject: msg.subject, data: msg.data, headers: msg.headers, raw: msg }],
       context,
       codec: endpoint.codec,
