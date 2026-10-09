@@ -17,21 +17,56 @@ export interface ConfigDiff {
   immutable: boolean;
 }
 
-function deepEqual(a: unknown, b: unknown): boolean {
-  if (Object.is(a, b)) return true;
-  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
-  if (Array.isArray(a) !== Array.isArray(b)) return false;
-  if (Array.isArray(a) && Array.isArray(b)) {
-    return a.length === b.length && a.every((v, i) => deepEqual(v, b[i]));
-  }
-  const ao = a as Record<string, unknown>;
-  const bo = b as Record<string, unknown>;
-  const keys = Object.keys(ao).filter((k) => ao[k] !== undefined);
-  const otherKeys = Object.keys(bo).filter((k) => bo[k] !== undefined);
-  return keys.length === otherKeys.length && keys.every((k) => deepEqual(ao[k], bo[k]));
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/** The zero value the server omits from its JSON for a declared value of the same type. */
+function zeroValueOf(declared: unknown): unknown {
+  if (typeof declared === 'boolean') return false;
+  if (typeof declared === 'number') return 0;
+  if (typeof declared === 'string') return '';
+  if (Array.isArray(declared)) return [];
+  if (isPlainObject(declared)) return {};
+  return undefined;
 }
 
-/** Compares only the keys present in `declared`; arrays are compared in order. */
+/**
+ * Whether the server's `current` value satisfies the `declared` one. The server omits
+ * zero values (`false`, `0`, `''`, `[]`, `{}`) and fills in defaults, so an absent current
+ * value matches a declared zero value, and objects (also inside arrays) only need to
+ * contain the declared keys. Arrays are compared in order.
+ */
+function matches(current: unknown, declared: unknown): boolean {
+  if (declared === undefined) return true;
+  const cur = current === undefined ? zeroValueOf(declared) : current;
+  if (Object.is(cur, declared)) return true;
+  if (Array.isArray(declared)) {
+    return (
+      Array.isArray(cur) &&
+      cur.length === declared.length &&
+      declared.every((v, i) => matches(cur[i], v))
+    );
+  }
+  if (isPlainObject(declared)) {
+    return isPlainObject(cur) && Object.keys(declared).every((k) => matches(cur[k], declared[k]));
+  }
+  return false;
+}
+
+/** Metadata keys the server adds to every stream/consumer (`_nats.level`, `_nats.ver`, ...). */
+const SERVER_METADATA_PREFIX = '_nats.';
+
+function withoutServerMetadata(field: string, value: unknown): unknown {
+  if (field !== 'metadata' || !isPlainObject(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value).filter(([k]) => !k.startsWith(SERVER_METADATA_PREFIX)),
+  );
+}
+
+/**
+ * Compares only the keys present in `declared` (see `matches` for the rules), ignoring
+ * the server's own `_nats.` metadata keys.
+ */
 export function diffConfig(
   current: object,
   declared: object,
@@ -41,10 +76,11 @@ export function diffConfig(
   const diffs: ConfigDiff[] = [];
   for (const [field, value] of Object.entries(declared)) {
     if (value === undefined) continue;
-    if (!deepEqual(cur[field], value)) {
+    const currentValue = withoutServerMetadata(field, cur[field]);
+    if (!matches(currentValue, value)) {
       diffs.push({
         field,
-        current: cur[field],
+        current: currentValue,
         declared: value,
         immutable: immutable.includes(field),
       });
@@ -53,6 +89,7 @@ export function diffConfig(
   return diffs;
 }
 
+/** Defaults for consumers the library creates; never applied to existing consumers. */
 export function withConsumerDefaults(cfg: Partial<ConsumerConfig>): Partial<ConsumerConfig> {
   return {
     ...cfg,

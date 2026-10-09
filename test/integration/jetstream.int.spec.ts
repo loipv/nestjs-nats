@@ -1,5 +1,6 @@
-import { StorageType } from '@nats-io/jetstream';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { AckPolicy, StorageType } from '@nats-io/jetstream';
+import type { LoggerService } from '@nestjs/common';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { NatsConnectionManager } from '../../src/connection/connection-manager.js';
 import { NatsConfigError } from '../../src/errors/errors.js';
 import type { JetStreamClient } from '../../src/jetstream/jetstream-client.js';
@@ -167,7 +168,9 @@ describe('JetStream', () => {
     try {
       await sm.ensureStream({ name: 'S4C', subjects: ['s4c.>'] });
       await sm.ensureConsumer('S4C', { durable_name: 'd', ack_policy: 'none' as never });
-      await expect(sm.ensureConsumer('S4C', { durable_name: 'd' })).rejects.toMatchObject({
+      await expect(
+        sm.ensureConsumer('S4C', { durable_name: 'd', ack_policy: AckPolicy.Explicit }),
+      ).rejects.toMatchObject({
         name: 'StreamConfigConflictError',
         stream: 'S4C',
         consumer: 'd',
@@ -208,6 +211,137 @@ describe('JetStream', () => {
         'verify',
       );
       expect(info?.config.max_msgs).toBe(10);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('verify mode passes for a stream declared with metadata and false/empty fields', async () => {
+    const { app, sm } = await bareApp();
+    try {
+      const cfg = {
+        name: 'SMD',
+        subjects: ['smd.>'],
+        description: '',
+        metadata: { team: 'x' },
+        discard_new_per_subject: false,
+        allow_rollup_hdrs: false,
+        deny_delete: false,
+        allow_msg_ttl: false,
+      };
+      await sm.ensureStream(cfg);
+      const info = await sm.ensureStream(cfg, 'verify');
+      expect(info?.config.metadata?.team).toBe('x');
+      const jsm = await sm.jsm();
+      const update = vi.spyOn(jsm.streams, 'update');
+      await sm.ensureStream(cfg, 'create-or-update');
+      expect(update).not.toHaveBeenCalled();
+      update.mockRestore();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('verify mode passes for a consumer declared with metadata and false/empty fields', async () => {
+    const { app, sm } = await bareApp();
+    try {
+      await sm.ensureStream({ name: 'SMDC', subjects: ['smdc.>'] });
+      const cfg = {
+        durable_name: 'd',
+        description: '',
+        metadata: { team: 'x' },
+        headers_only: false,
+        mem_storage: false,
+        backoff: [],
+        filter_subjects: [],
+      };
+      await sm.ensureConsumer('SMDC', cfg);
+      const info = await sm.ensureConsumer('SMDC', cfg, 'verify');
+      expect(info?.config.metadata?.team).toBe('x');
+      const jsm = await sm.jsm();
+      const update = vi.spyOn(jsm.consumers, 'update');
+      await sm.ensureConsumer('SMDC', cfg, 'create-or-update');
+      expect(update).not.toHaveBeenCalled();
+      update.mockRestore();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('verify mode fails on a drifted consumer', async () => {
+    const { app, sm } = await bareApp();
+    try {
+      await sm.ensureStream({ name: 'SDC', subjects: ['sdc.>'] });
+      await sm.ensureConsumer('SDC', { durable_name: 'd', max_ack_pending: 10 });
+      await expect(
+        sm.ensureConsumer('SDC', { durable_name: 'd', max_ack_pending: 20 }, 'verify'),
+      ).rejects.toThrow(/max_ack_pending/);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('create-only leaves an existing consumer untouched', async () => {
+    const { app, sm } = await bareApp();
+    try {
+      await sm.ensureStream({ name: 'SCO', subjects: ['sco.>'] });
+      await sm.ensureConsumer('SCO', { durable_name: 'd', max_ack_pending: 10 });
+      const ci = await sm.ensureConsumer(
+        'SCO',
+        { durable_name: 'd', max_ack_pending: 20 },
+        'create-only',
+      );
+      expect(ci?.config.max_ack_pending).toBe(10);
+      expect((await (await sm.jsm()).consumers.info('SCO', 'd')).config.max_ack_pending).toBe(10);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('does not apply consumer defaults to an existing consumer', async () => {
+    const { app, sm } = await bareApp();
+    try {
+      await sm.ensureStream({ name: 'SXD', subjects: ['sxd.>'] });
+      const jsm = await sm.jsm();
+      await jsm.consumers.add('SXD', {
+        durable_name: 'd',
+        ack_policy: AckPolicy.Explicit,
+        max_deliver: 5,
+      });
+      const ci = await sm.ensureConsumer('SXD', { durable_name: 'd', max_ack_pending: 50 });
+      expect(ci?.config.max_deliver).toBe(5);
+      expect(ci?.config.max_ack_pending).toBe(50);
+      expect((await jsm.consumers.info('SXD', 'd')).config.max_deliver).toBe(5);
+      await expect(
+        sm.ensureConsumer('SXD', { durable_name: 'd', max_ack_pending: 50 }, 'verify'),
+      ).resolves.toBeDefined();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('applies consumer defaults to a consumer it creates', async () => {
+    const { app, sm } = await bareApp();
+    try {
+      await sm.ensureStream({ name: 'SND', subjects: ['snd.>'] });
+      const ci = await sm.ensureConsumer('SND', { durable_name: 'd' });
+      expect(ci?.config.max_deliver).toBe(-1);
+      expect(ci?.config.ack_policy).toBe('explicit');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('warns instead of failing when an existing consumer does not use explicit acks', async () => {
+    const logger: LoggerService = { log: vi.fn(), error: vi.fn(), warn: vi.fn() };
+    const { app, sm } = await bareApp({ logger });
+    try {
+      await sm.ensureStream({ name: 'SNA', subjects: ['sna.>'] });
+      const jsm = await sm.jsm();
+      await jsm.consumers.add('SNA', { durable_name: 'd', ack_policy: AckPolicy.None });
+      const ci = await sm.ensureConsumer('SNA', { durable_name: 'd' });
+      expect(ci?.config.ack_policy).toBe('none');
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/SNA\/d.*ack_policy.*none/));
     } finally {
       await app.close();
     }

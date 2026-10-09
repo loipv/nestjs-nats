@@ -1,4 +1,5 @@
 import {
+  AckPolicy,
   type ConsumerConfig,
   type ConsumerInfo,
   type ConsumerUpdateConfig,
@@ -101,7 +102,6 @@ export class NatsStreamManager {
   ): Promise<ConsumerInfo | undefined> {
     if (mode === 'none') return undefined;
     const jsm = await this.jsm();
-    const declared = withConsumerDefaults(cfg);
     const durable = cfg.durable_name;
     const label = `${stream}/${durable}`;
     let current: ConsumerInfo;
@@ -118,11 +118,15 @@ export class NatsStreamManager {
       if (mode === 'verify') {
         throw new NatsConfigError(`JetStream consumer "${label}" does not exist`, { cause: err });
       }
-      return jsm.consumers.add(stream, declared as ConsumerConfig);
+      // Defaults apply only to consumers the library creates (spec §7).
+      return jsm.consumers.add(stream, withConsumerDefaults(cfg) as ConsumerConfig);
     }
+    this.warnOnNonExplicitAck(label, current);
     if (mode === 'create-only') return current;
 
-    const diffs = diffConfig(current.config, declared, CONSUMER_IMMUTABLE_FIELDS);
+    // Existing consumers are compared with the declaration as written: library defaults
+    // must not override what the server already has.
+    const diffs = diffConfig(current.config, cfg, CONSUMER_IMMUTABLE_FIELDS);
     if (mode === 'verify') {
       if (diffs.length > 0) {
         throw new NatsConfigError(
@@ -145,7 +149,15 @@ export class NatsStreamManager {
       );
     }
     if (diffs.length === 0) return current;
-    return jsm.consumers.update(stream, durable, declared as ConsumerUpdateConfig);
+    return jsm.consumers.update(stream, durable, cfg as ConsumerUpdateConfig);
+  }
+
+  private warnOnNonExplicitAck(label: string, current: ConsumerInfo): void {
+    const { ack_policy } = current.config;
+    if (ack_policy === AckPolicy.Explicit) return;
+    this.entry.logger.warn(
+      `JetStream consumer "${label}" uses ack_policy "${ack_policy}"; the library settles messages individually and expects "explicit"`,
+    );
   }
 
   async info(stream: string): Promise<StreamInfo> {
