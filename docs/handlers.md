@@ -24,6 +24,8 @@ onOrderEvent(@Payload() event: OrderEvent, @Subject() subject: string) {
 
 **Request/reply.** If the incoming message has a reply subject and the handler returns something other than `undefined`, the return value is encoded and sent back. If the handler throws, the requester gets an error reply and the message is not retried. See [Errors](./errors.md).
 
+**Keep request subjects out of streams.** If a JetStream stream's subjects capture a request subject (a stream on `orders.>` captures `orders.get`), the stream stores the request and answers it with a PubAck, so the requester gets that PubAck (`{ stream, seq }`) instead of the handler's reply. Use request subjects that no stream captures, as the [orders example](../examples/orders) does with `query.orders.get` next to its `orders.>` stream. See [Streams and consumers](./streams.md).
+
 ## `@Consume(options)`: JetStream pull consumer
 
 ```ts

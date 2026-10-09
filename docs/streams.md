@@ -30,4 +30,6 @@ NatsModule.forFeature({ connection: 'default', streams: [{ name: 'PAYMENTS', sub
 - **Only declared fields are compared.** Values the server fills in are ignored: its own `_nats.*` metadata keys, and fields that are absent but declared as `false`, `0`, `''`, `[]` or `{}`.
 - **Duration units.** Durations such as `max_age` are in nanoseconds, as in the NATS API.
 
+**Stream subjects and request/reply.** A stream captures every message published on its subjects, core NATS requests included, and answers a message that has a reply subject with a PubAck. A request sent with `NatsClient.request()` to a subject a stream captures therefore gets the stream's PubAck, not the `@Subscribe` handler's reply. Keep request/reply subjects outside every stream's subjects, as the [orders example](../examples/orders) does (`query.orders.get` next to the `orders.>` stream).
+
 `NatsStreamManager` (inject it by class, or with `@InjectStreamManager(name?)` for a named connection) is available for runtime work: `ensureStream()`, `ensureConsumer()`, `info()`, `purge()`, `delete()`, and `jsm()` for the raw `JetStreamManager`.
