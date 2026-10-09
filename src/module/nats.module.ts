@@ -132,12 +132,29 @@ export class NatsModule {
         inject: [NatsConnectionManager, connectionToken],
       },
     ];
+    const exports: NonNullable<ModuleMetadata['exports']> = [
+      optionsToken,
+      connectionToken,
+      clientToken,
+      jetStreamToken,
+      streamManagerToken,
+    ];
+    if (name === DEFAULT_CONNECTION) {
+      // Let the default connection's clients be injected by class as well.
+      const classAliases: Provider[] = [
+        { provide: NatsClient, useExisting: clientToken },
+        { provide: JetStreamClient, useExisting: jetStreamToken },
+        { provide: NatsStreamManager, useExisting: streamManagerToken },
+      ];
+      providers.push(...classAliases);
+      exports.push(NatsClient, JetStreamClient, NatsStreamManager);
+    }
     return {
       module: NatsModule,
       global: true,
       imports: [NatsCoreModule, ...imports],
       providers,
-      exports: [optionsToken, connectionToken, clientToken, jetStreamToken, streamManagerToken],
+      exports,
     };
   }
 }

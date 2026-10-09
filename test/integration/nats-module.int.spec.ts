@@ -3,11 +3,15 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { NatsClient } from '../../src/client/nats-client.js';
 import { NatsConnectionManager } from '../../src/connection/connection-manager.js';
 import { NatsConfigError } from '../../src/errors/errors.js';
+import { JetStreamClient } from '../../src/jetstream/jetstream-client.js';
+import { NatsStreamManager } from '../../src/jetstream/stream-manager.js';
 import { InjectNatsClient } from '../../src/module/inject.decorators.js';
 import { NatsModule } from '../../src/module/nats.module.js';
 import {
   getConnectionToken,
+  getJetStreamClientToken,
   getNatsClientToken,
+  getStreamManagerToken,
   NATS_FEATURE_TOKEN_PREFIX,
 } from '../../src/module/tokens.js';
 import { createTestApp } from './support/app.js';
@@ -86,6 +90,46 @@ describe('NatsModule', () => {
     });
     try {
       expect(app.get(Svc).client).toBeInstanceOf(NatsClient);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('injects the default connection clients by class', async () => {
+    @Injectable()
+    class Svc {
+      constructor(
+        readonly client: NatsClient,
+        readonly js: JetStreamClient,
+        readonly streams: NatsStreamManager,
+      ) {}
+    }
+    @Module({ providers: [Svc] })
+    class FeatureModule {}
+    const app = await createTestApp({
+      imports: [
+        NatsModule.forRoot({ connection: { servers: url }, logger: false }),
+        NatsModule.forRoot({ name: 'b', connection: { servers: url }, logger: false }),
+        FeatureModule,
+      ],
+    });
+    try {
+      const svc = app.get(Svc);
+      expect(svc.client).toBe(app.get(getNatsClientToken()));
+      expect(svc.js).toBe(app.get(getJetStreamClientToken()));
+      expect(svc.streams).toBe(app.get(getStreamManagerToken()));
+      expect(app.get(NatsClient)).toBe(app.get(getNatsClientToken()));
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('does not register class aliases for named connections only', async () => {
+    const app = await createTestApp({
+      imports: [NatsModule.forRoot({ name: 'only', connection: { servers: url }, logger: false })],
+    });
+    try {
+      expect(() => app.get(NatsClient)).toThrow();
     } finally {
       await app.close();
     }
