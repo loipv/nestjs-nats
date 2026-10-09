@@ -44,8 +44,7 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
   private readonly codec: Codec;
   private readonly retry: RetryPolicy | false;
   private readonly dlq: DlqPolicy | false;
-  /** Rebuilt in `start()` once the consumer's `ack_wait` (heartbeat interval) is known. */
-  private run: (d: InternalDelivery) => Promise<void>;
+  private readonly run: (d: InternalDelivery) => Promise<void>;
   private readonly info: HandlerInfo;
   private readonly label: string;
   private readonly concurrency: number;
@@ -55,6 +54,13 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
   private stopping = false;
   /** Contexts of the messages being processed (every message of a batch). */
   private readonly inFlight = new Set<NatsJetStreamContext>();
+  /**
+   * Every message received and not yet given up on: waiting for a slot, being collected,
+   * in a batch waiting for a slot, or being processed (then with its context, which tells
+   * whether it is already settled). The heartbeat extends their ack deadline.
+   */
+  private readonly unsettled = new Map<JsMsg, NatsJetStreamContext | undefined>();
+  private heartbeat?: ReturnType<typeof setInterval>;
 
   constructor(
     private readonly def: ConsumeDefinition,
@@ -66,7 +72,7 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     this.info = toHandlerInfo(def);
     this.retry = resolveRetryPolicy(entry.options.retry, def.options.retry);
     this.dlq = resolveDlqPolicy('consume', entry.options.dlq, def.options.dlq);
-    this.run = this.buildPipeline(undefined);
+    this.run = this.buildPipeline();
     this.label = `${def.className}.${def.methodName} on "${def.options.stream}/${def.options.durable}"`;
     this.batch = resolveBatchOptions(def.options.batch);
     this.dispatcher = new Dispatcher<JsMsg>({
@@ -76,7 +82,10 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
       logger: entry.logger,
       label: this.label,
       // Received but never started: hand it back for immediate redelivery.
-      onRejected: (msg) => this.nak(msg),
+      onRejected: (msg) => {
+        this.unsettled.delete(msg);
+        this.nak(msg);
+      },
     });
   }
 
@@ -87,13 +96,15 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     const consumer = await this.getConsumer(stream, durable, config !== undefined);
     const { config: actual } = await consumer.info(true);
     this.checkMaxDeliver(actual.max_deliver);
-    // `ack_wait` is in nanoseconds; extend the deadline twice per period.
-    const ackWait = actual.ack_wait ?? 0;
-    this.checkBatchWait(ackWait / 1e6);
-    this.run = this.buildPipeline(ackWait > 0 ? ackWait / 1e6 / 2 : undefined);
-    // Enough buffered messages to keep every slot busy and to fill a batch.
+    // `ack_wait` is in nanoseconds.
+    const ackWaitMs = (actual.ack_wait ?? 0) / 1e6;
+    this.checkBatchWait(ackWaitMs);
+    // Just enough pulled messages to keep every slot busy, or to fill a batch: they wait
+    // for a slot meanwhile. The heartbeat covers every message the client has handed over;
+    // while every slot is busy, up to `max_messages - 1` more can still sit in the client's
+    // own buffer, out of its reach.
     const messages = await consumer.consume({
-      max_messages: Math.max(2 * this.concurrency, 2, this.batch?.maxSize ?? 0),
+      max_messages: this.batch ? Math.max(this.batch.maxSize, this.concurrency) : this.concurrency,
     });
     if (this.stopping) {
       // stop() ran while start() was awaiting: nothing will ever read these messages.
@@ -101,12 +112,15 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
       return;
     }
     this.messages = messages;
+    this.startHeartbeat(ackWaitMs);
     this.loop = this.consume(messages);
     void this.watchStatus(messages);
   }
 
   stop(): Promise<void> {
     this.stopping = true;
+    // Messages still being processed keep their heartbeat until `idle()` / `forceStop()`.
+    if (this.unsettled.size === 0) this.stopHeartbeat();
     // Hands the batch being collected to the handler; `idle()` waits for it.
     void this.dispatcher.stop();
     const messages = this.messages;
@@ -124,9 +138,11 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
   async idle(): Promise<void> {
     await this.loop;
     await this.dispatcher.idle();
+    if (this.stopping) this.stopHeartbeat();
   }
 
   forceStop(): ForceStopResult {
+    this.stopHeartbeat();
     let nakked = 0;
     const nak = (settle: () => void) => {
       try {
@@ -141,16 +157,12 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     }
     // Received but not started (collected, or in a batch waiting for a slot).
     for (const msg of this.dispatcher.abandon()) nak(() => msg.nak());
+    this.unsettled.clear();
     return { nakked, cancelledRetries: this.dispatcher.cancelRetries() };
   }
 
-  private buildPipeline(heartbeatMs: number | undefined): (d: InternalDelivery) => Promise<void> {
-    const settlement = createSettlement({
-      entry: this.entry,
-      retry: this.retry,
-      dlq: this.dlq,
-      ...(heartbeatMs !== undefined ? { heartbeatMs } : {}),
-    });
+  private buildPipeline(): (d: InternalDelivery) => Promise<void> {
+    const settlement = createSettlement({ entry: this.entry, retry: this.retry, dlq: this.dlq });
     const idempotency = resolveIdempotency(this.entry, this.def.options.idempotency, this.retry);
     return buildInboundPipeline(
       {
@@ -172,15 +184,45 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
   }
 
   /**
-   * Collected messages are not heartbeated: when a batch can wait as long as `ack_wait`,
-   * the server may redeliver its messages while they are still collected.
+   * Collected messages are kept alive by the heartbeat only: when a batch waits as long
+   * as `ack_wait`, a single late heartbeat (e.g. a blocked event loop) is enough for the
+   * server to redeliver them while they are still collected.
    */
   private checkBatchWait(ackWaitMs: number): void {
     if (!this.batch || ackWaitMs <= 0 || this.batch.maxWait < ackWaitMs) return;
     const { stream, durable } = this.def.options;
     this.entry.logger.warn(
-      `${this.def.className}.${this.def.methodName} on "${stream}/${durable}" has batch.maxWait ${this.batch.maxWait} ms >= the consumer's ack_wait ${ackWaitMs} ms; collected messages may be redelivered and processed twice. Lower batch.maxWait or raise ack_wait`,
+      `${this.def.className}.${this.def.methodName} on "${stream}/${durable}" has batch.maxWait ${this.batch.maxWait} ms >= the consumer's ack_wait ${ackWaitMs} ms; collected messages rely on heartbeats alone and may be redelivered and processed twice if one is late. Lower batch.maxWait or raise ack_wait`,
     );
+  }
+
+  /**
+   * Extends the ack deadline of every received, unsettled message twice per `ack_wait`:
+   * the ones being processed and the ones still waiting (for a slot, or in a batch).
+   */
+  private startHeartbeat(ackWaitMs: number): void {
+    if (ackWaitMs <= 0 || this.heartbeat) return;
+    this.heartbeat = setInterval(() => this.beat(), ackWaitMs / 2);
+    // The heartbeat must not keep the process alive.
+    this.heartbeat.unref();
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeat === undefined) return;
+    clearInterval(this.heartbeat);
+    this.heartbeat = undefined;
+  }
+
+  private beat(): void {
+    for (const [msg, context] of this.unsettled) {
+      if (context?.settled) continue;
+      try {
+        msg.working();
+      } catch (err) {
+        this.entry.logger.error(`Failed to extend ack deadline for ${this.label}`, errorTrace(err));
+      }
+    }
+    if (this.stopping && this.unsettled.size === 0) this.stopHeartbeat();
   }
 
   private async getConsumer(stream: string, durable: string, configDeclared: boolean) {
@@ -205,7 +247,11 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
 
   private async consume(messages: ConsumerMessages): Promise<void> {
     try {
-      for await (const msg of messages) await this.dispatcher.push(msg, msg.info.deliveryCount);
+      for await (const msg of messages) {
+        // Heartbeated from now on, while it waits for a slot or a batch.
+        this.unsettled.set(msg, undefined);
+        await this.dispatcher.push(msg, msg.info.deliveryCount);
+      }
     } catch (err) {
       if (!this.stopping) {
         this.entry.logger.error(`Consumer of ${this.label} failed`, errorTrace(err));
@@ -287,7 +333,10 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
       codec: this.codec,
       logger: this.entry.logger,
     });
-    for (const { context } of parts) this.inFlight.add(context);
+    for (const { context } of parts) {
+      this.inFlight.add(context);
+      this.unsettled.set(context.raw, context);
+    }
     try {
       await this.run(d);
     } catch (err) {
@@ -303,7 +352,11 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
         }
       }
     } finally {
-      for (const { context } of parts) this.inFlight.delete(context);
+      // Settled by now (or left to the handler with `ack: 'manual'`): no more heartbeats.
+      for (const { context } of parts) {
+        this.inFlight.delete(context);
+        this.unsettled.delete(context.raw);
+      }
     }
   }
 }

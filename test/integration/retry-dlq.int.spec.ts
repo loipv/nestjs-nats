@@ -149,6 +149,26 @@ class SlowHandlers extends Attempts {
   }
 }
 
+/** One slot, a 2 s ack_wait and 5 s of work: queued messages outlive several ack_waits. */
+@Injectable()
+class QueuedSlowHandlers {
+  readonly calls: string[] = [];
+  done = 0;
+
+  @Consume({
+    stream: 'ORD',
+    durable: 'slow-queued',
+    concurrency: 1,
+    retry: false,
+    config: { filter_subject: 'ord.queued', ack_wait: 2_000_000_000 },
+  })
+  async on(@Ctx() ctx: NatsJetStreamContext) {
+    this.calls.push(`${ctx.seq}#${ctx.deliveryCount}`);
+    await sleep(5000);
+    this.done++;
+  }
+}
+
 @Injectable()
 class MaxDeliverHandlers {
   @Consume({
@@ -348,6 +368,25 @@ describe('retry, backoff and DLQ', () => {
       await slowApp.close();
     }
   }, 30_000);
+
+  it('keeps messages waiting for a slot alive: each is handled exactly once', async () => {
+    const queuedApp = await createTestApp({ imports: [nats()], providers: [QueuedSlowHandlers] });
+    try {
+      const h = queuedApp.get(QueuedSlowHandlers);
+      const seqs: number[] = [];
+      for (const id of [1, 2, 3]) seqs.push((await js.publish('ord.queued', json({ id }))).seq);
+      await eventually(() => expect(h.done).toBe(3), { timeout: 25_000, interval: 100 });
+      await eventually(async () =>
+        expect((await consumerInfo('slow-queued')).num_ack_pending).toBe(0),
+      );
+      // A redelivery would show up as a second call (or a delivery count > 1).
+      await sleep(2500);
+      expect(h.calls).toEqual(seqs.map((seq) => `${seq}#1`));
+      expect((await consumerInfo('slow-queued')).num_redelivered).toBe(0);
+    } finally {
+      await queuedApp.close();
+    }
+  }, 45_000);
 
   it('warns when max_deliver <= maxRetries', async () => {
     const log = recordingLogger();

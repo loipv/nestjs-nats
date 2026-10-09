@@ -2,6 +2,7 @@ import type { ConsumerMessages, JsMsg } from '@nats-io/jetstream';
 import { describe, expect, it, vi } from 'vitest';
 import { JetStreamConsumerAdapter } from '../../src/adapters/jetstream-consumer.adapter.js';
 import type { ConnectionEntry } from '../../src/connection/connection-manager.js';
+import type { NatsJetStreamContext } from '../../src/context/nats-context.js';
 import type { HandlerDefinition } from '../../src/discovery/handler-explorer.js';
 import type { NatsStreamManager } from '../../src/jetstream/stream-manager.js';
 
@@ -60,7 +61,7 @@ function fakeMsg(id: number, deliveryCount = 1) {
     subject: 'ord.x',
     data: new TextEncoder().encode(JSON.stringify(id)),
     headers: undefined,
-    info: { stream: 'ORD', streamSequence: id, deliveryCount },
+    info: { stream: 'ORD', consumer: 'd', streamSequence: id, deliveryCount },
     ack: vi.fn(),
     nak: vi.fn(),
     term: vi.fn(),
@@ -70,7 +71,7 @@ function fakeMsg(id: number, deliveryCount = 1) {
 }
 
 function setup(
-  invoke: (payload: unknown) => Promise<unknown>,
+  invoke: (payload: unknown, ctx: unknown) => Promise<unknown>,
   opts: {
     concurrency?: number;
     plugins?: unknown[];
@@ -79,6 +80,10 @@ function setup(
     consumerConfig?: { ack_wait?: number; max_deliver?: number };
     retry?: unknown;
     batch?: unknown;
+    ack?: 'auto' | 'manual';
+    dlq?: unknown;
+    /** `js().publish` (DLQ publishes). */
+    publish?: () => Promise<unknown>;
   } = {},
 ) {
   const fake = fakeMessages();
@@ -93,7 +98,10 @@ function setup(
     name: 'default',
     options: { plugins: opts.plugins },
     logger,
-    js: () => ({ consumers: { get: () => Promise.resolve({ consume, info }) } }),
+    js: () => ({
+      consumers: { get: () => Promise.resolve({ consume, info }) },
+      publish: opts.publish ?? (() => Promise.resolve({ stream: 'DLQ', seq: 1 })),
+    }),
   } as unknown as ConnectionEntry;
   const def = {
     kind: 'consume',
@@ -106,6 +114,8 @@ function setup(
       concurrency: opts.concurrency,
       retry: opts.retry,
       batch: opts.batch,
+      ack: opts.ack,
+      dlq: opts.dlq,
     },
     invoke,
   } as unknown as HandlerDefinition & { kind: 'consume' };
@@ -114,18 +124,13 @@ function setup(
 }
 
 describe('JetStreamConsumerAdapter', () => {
-  it('requests max(2 * concurrency, 2) messages', async () => {
-    const { adapter, consume } = setup(() => Promise.resolve());
+  it.each([
+    [undefined, 1],
+    [4, 4],
+  ])('requests concurrency (%s) messages: %s', async (concurrency, expected) => {
+    const { adapter, consume } = setup(() => Promise.resolve(), { concurrency });
     await adapter.start();
-    expect(consume).toHaveBeenCalledWith({ max_messages: 2 });
-    await adapter.stop();
-    await adapter.idle();
-  });
-
-  it('requests 8 messages for concurrency 4', async () => {
-    const { adapter, consume } = setup(() => Promise.resolve(), { concurrency: 4 });
-    await adapter.start();
-    expect(consume).toHaveBeenCalledWith({ max_messages: 8 });
+    expect(consume).toHaveBeenCalledWith({ max_messages: expected });
     await adapter.stop();
     await adapter.idle();
   });
@@ -356,25 +361,231 @@ describe('JetStreamConsumerAdapter', () => {
     await adapter.idle();
   });
 
-  it('heartbeats every ack_wait / 2 while the handler runs', async () => {
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => (release = resolve));
-    const { adapter, fake } = setup(() => gate, {
-      // 100 ms ack_wait (in nanoseconds) → working() every 50 ms.
-      consumerConfig: { ack_wait: 100_000_000, max_deliver: -1 },
+  describe('heartbeat', () => {
+    /** 100 ms ack_wait (in nanoseconds) → working() every 50 ms. */
+    const consumerConfig = { ack_wait: 100_000_000, max_deliver: -1 };
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    it('heartbeats every ack_wait / 2 while the handler runs', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const { adapter, fake } = setup(() => gate, { consumerConfig });
+      await adapter.start();
+      const m = fakeMsg(1);
+      fake.push(m as unknown as JsMsg);
+      await sleep(230);
+      release();
+      await tick();
+      await tick();
+      expect(m.working.mock.calls.length).toBeGreaterThanOrEqual(3);
+      expect(m.working.mock.calls.length).toBeLessThanOrEqual(5);
+      expect(m.ack).toHaveBeenCalledTimes(1);
+      const calls = m.working.mock.calls.length;
+      await sleep(150);
+      expect(m.working).toHaveBeenCalledTimes(calls);
+      await adapter.stop();
+      await adapter.idle();
     });
-    await adapter.start();
-    const m = fakeMsg(1);
-    fake.push(m as unknown as JsMsg);
-    await new Promise((resolve) => setTimeout(resolve, 230));
-    release();
-    await tick();
-    await tick();
-    expect(m.working.mock.calls.length).toBeGreaterThanOrEqual(3);
-    expect(m.working.mock.calls.length).toBeLessThanOrEqual(5);
-    expect(m.ack).toHaveBeenCalledTimes(1);
-    await adapter.stop();
-    await adapter.idle();
+
+    it('heartbeats a received message waiting for a slot', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const handled: unknown[] = [];
+      const { adapter, fake } = setup(
+        async (payload) => {
+          handled.push(payload);
+          await gate;
+        },
+        { consumerConfig },
+      );
+      await adapter.start();
+      const [a, b] = [fakeMsg(1), fakeMsg(2)];
+      fake.push(a as unknown as JsMsg);
+      fake.push(b as unknown as JsMsg);
+      await sleep(230);
+      expect(handled).toEqual([1]);
+      expect(b.working.mock.calls.length).toBeGreaterThanOrEqual(3);
+      release();
+      await adapter.stop();
+      await adapter.idle();
+    });
+
+    it('heartbeats messages being collected into a batch', async () => {
+      const invoke = vi.fn(() => Promise.resolve());
+      const { adapter, fake } = setup(invoke, {
+        consumerConfig,
+        batch: { maxSize: 10, maxWait: 60_000 },
+      });
+      await adapter.start();
+      const msgs = [fakeMsg(1), fakeMsg(2)];
+      for (const m of msgs) fake.push(m as unknown as JsMsg);
+      await sleep(130);
+      expect(invoke).not.toHaveBeenCalled();
+      for (const m of msgs) expect(m.working.mock.calls.length).toBeGreaterThanOrEqual(2);
+      await adapter.stop();
+      await adapter.idle();
+    });
+
+    it('heartbeats a running batch and a batch waiting for a slot', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const batches: unknown[] = [];
+      const { adapter, fake } = setup(
+        async (payload) => {
+          batches.push(payload);
+          await gate;
+        },
+        { consumerConfig, batch: { maxSize: 2, maxWait: 60_000 } },
+      );
+      await adapter.start();
+      // [1, 2] runs, [3, 4] waits for the only slot.
+      const msgs = [1, 2, 3, 4].map((id) => fakeMsg(id));
+      for (const m of msgs) fake.push(m as unknown as JsMsg);
+      await sleep(130);
+      expect(batches).toEqual([[1, 2]]);
+      for (const m of msgs) expect(m.working.mock.calls.length).toBeGreaterThanOrEqual(2);
+      release();
+      await adapter.stop();
+      await adapter.idle();
+    });
+
+    it('stops heartbeating a message the handler settled itself', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const { adapter, fake } = setup(
+        async (_payload, ctx) => {
+          await sleep(80);
+          (ctx as NatsJetStreamContext).ack();
+          await gate;
+        },
+        { consumerConfig, ack: 'manual' },
+      );
+      await adapter.start();
+      const m = fakeMsg(1);
+      fake.push(m as unknown as JsMsg);
+      await sleep(100);
+      expect(m.ack).toHaveBeenCalledTimes(1);
+      const calls = m.working.mock.calls.length;
+      expect(calls).toBeGreaterThanOrEqual(1);
+      await sleep(150);
+      expect(m.working).toHaveBeenCalledTimes(calls);
+      release();
+      await adapter.stop();
+      await adapter.idle();
+    });
+
+    it('keeps heartbeating while a dead letter is being published', async () => {
+      let ackPub!: () => void;
+      const { adapter, fake } = setup(() => Promise.reject(new Error('poison')), {
+        consumerConfig,
+        retry: false,
+        dlq: true,
+        publish: () =>
+          new Promise((resolve) => {
+            ackPub = () => resolve({ stream: 'DLQ', seq: 1 });
+          }),
+      });
+      await adapter.start();
+      const m = fakeMsg(1);
+      fake.push(m as unknown as JsMsg);
+      await sleep(130);
+      expect(m.working.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(m.term).not.toHaveBeenCalled();
+      ackPub();
+      await tick();
+      await tick();
+      expect(m.term).toHaveBeenCalledTimes(1);
+      const calls = m.working.mock.calls.length;
+      await sleep(130);
+      expect(m.working).toHaveBeenCalledTimes(calls);
+      await adapter.stop();
+      await adapter.idle();
+    });
+
+    it('starts an unref-ed interval and clears it at forceStop', async () => {
+      const setSpy = vi.spyOn(globalThis, 'setInterval');
+      const clearSpy = vi.spyOn(globalThis, 'clearInterval');
+      try {
+        const { adapter } = setup(() => Promise.resolve(), { consumerConfig });
+        await adapter.start();
+        const timer = setSpy.mock.results.find((r) => r.type === 'return')?.value as
+          | NodeJS.Timeout
+          | undefined;
+        expect(setSpy).toHaveBeenCalledWith(expect.any(Function), 50);
+        expect(timer?.hasRef()).toBe(false);
+        await adapter.stop();
+        adapter.forceStop();
+        expect(clearSpy).toHaveBeenCalledWith(timer);
+      } finally {
+        setSpy.mockRestore();
+        clearSpy.mockRestore();
+      }
+    });
+
+    it('keeps heartbeating in-flight messages after stop() until they finish', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const clearSpy = vi.spyOn(globalThis, 'clearInterval');
+      try {
+        const { adapter, fake } = setup(() => gate, { consumerConfig });
+        await adapter.start();
+        const m = fakeMsg(1);
+        fake.push(m as unknown as JsMsg);
+        await tick();
+        await adapter.stop();
+        const before = m.working.mock.calls.length;
+        await sleep(130);
+        expect(m.working.mock.calls.length).toBeGreaterThanOrEqual(before + 2);
+        release();
+        await adapter.idle();
+        expect(clearSpy).toHaveBeenCalled();
+        const after = m.working.mock.calls.length;
+        await sleep(130);
+        expect(m.working).toHaveBeenCalledTimes(after);
+      } finally {
+        clearSpy.mockRestore();
+      }
+    });
+
+    it('does not heartbeat without an ack_wait', async () => {
+      const setSpy = vi.spyOn(globalThis, 'setInterval');
+      try {
+        const { adapter } = setup(() => Promise.resolve(), {
+          consumerConfig: { ack_wait: 0, max_deliver: -1 },
+        });
+        await adapter.start();
+        expect(setSpy).not.toHaveBeenCalled();
+        await adapter.stop();
+        await adapter.idle();
+      } finally {
+        setSpy.mockRestore();
+      }
+    });
+
+    it('logs a failing working() and keeps heartbeating the others', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const { adapter, fake, logger } = setup(() => gate, {
+        consumerConfig,
+        concurrency: 2,
+      });
+      await adapter.start();
+      const [a, b] = [fakeMsg(1), fakeMsg(2)];
+      a.working.mockImplementation(() => {
+        throw new Error('wip failed');
+      });
+      fake.push(a as unknown as JsMsg);
+      fake.push(b as unknown as JsMsg);
+      await sleep(80);
+      expect(b.working).toHaveBeenCalled();
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringMatching(/Failed to extend ack deadline .*C\.m/),
+        expect.stringContaining('wip failed'),
+      );
+      release();
+      await adapter.stop();
+      await adapter.idle();
+    });
   });
 
   it.each([
@@ -417,16 +628,22 @@ describe('JetStreamConsumerAdapter', () => {
   });
 
   describe('batch', () => {
-    it('requests max(2 * concurrency, 2, maxSize) messages', async () => {
-      const { adapter, consume } = setup(() => Promise.resolve(), {
-        batch: { maxSize: 10 },
-        concurrency: 2,
-      });
-      await adapter.start();
-      expect(consume).toHaveBeenCalledWith({ max_messages: 10 });
-      await adapter.stop();
-      await adapter.idle();
-    });
+    it.each([
+      [10, 2, 10],
+      [2, 4, 4],
+    ])(
+      'requests max(maxSize %s, concurrency %s) = %s messages',
+      async (maxSize, concurrency, expected) => {
+        const { adapter, consume } = setup(() => Promise.resolve(), {
+          batch: { maxSize },
+          concurrency,
+        });
+        await adapter.start();
+        expect(consume).toHaveBeenCalledWith({ max_messages: expected });
+        await adapter.stop();
+        await adapter.idle();
+      },
+    );
 
     it('delivers batches of maxSize and acks each message', async () => {
       const batches: unknown[] = [];
