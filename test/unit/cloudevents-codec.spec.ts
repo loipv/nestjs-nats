@@ -64,6 +64,19 @@ describe('cloudEventMode', () => {
   });
 });
 
+const RESERVED_NAMES_FOR_RESOLVE = [
+  'specversion',
+  'id',
+  'source',
+  'type',
+  'time',
+  'subject',
+  'datacontenttype',
+  'dataschema',
+  'data',
+  'data_base64',
+];
+
 describe('writeCloudEvent / readCloudEvent', () => {
   it('roundtrips binary mode', () => {
     const h = headers();
@@ -151,6 +164,84 @@ describe('writeCloudEvent / readCloudEvent', () => {
     const h = headers();
     writeCloudEvent(meta({ extensions: { id: 'evil' } }), 1, jsonCodec(), 'binary', h);
     expect(h.get('ce-id')).toBe('e1');
+  });
+
+  const RESERVED_NAMES = [
+    'specversion',
+    'id',
+    'source',
+    'type',
+    'time',
+    'subject',
+    'datacontenttype',
+    'dataschema',
+    'data',
+    'data_base64',
+  ];
+
+  it.each(RESERVED_NAMES)(
+    'does not write a reserved extension name (%s) in binary mode',
+    (name) => {
+      const h = headers();
+      const m = meta({ extensions: { [name]: 'x' } });
+      writeCloudEvent(m, 1, jsonCodec(), 'binary', h);
+      expect(h.get(`ce-${name}`)).not.toBe('x');
+      const out = readCloudEvent({ data: new TextEncoder().encode('1'), headers: h }, jsonCodec());
+      expect(out.meta.extensions).toEqual({});
+      expect(out.meta.subject).toBeUndefined();
+      expect(out.meta.time).toBeUndefined();
+      expect(out.meta.dataschema).toBeUndefined();
+    },
+  );
+
+  it.each(RESERVED_NAMES)(
+    'does not write a reserved extension name (%s) in structured mode',
+    (name) => {
+      const h = headers();
+      const body = writeCloudEvent(
+        meta({ extensions: { [name]: 'x' } }),
+        5,
+        jsonCodec(),
+        'structured',
+        h,
+      );
+      const env = JSON.parse(new TextDecoder().decode(body));
+      expect(env[name]).not.toBe('x');
+      const out = readCloudEvent({ data: body, headers: h }, jsonCodec());
+      expect(out.data).toBe(5);
+      expect(out.meta.extensions).toEqual({});
+      expect(out.meta.subject).toBeUndefined();
+      expect(out.meta.time).toBeUndefined();
+      expect(out.meta.dataschema).toBeUndefined();
+    },
+  );
+
+  it('skips uppercase extension names on write', () => {
+    const h = headers();
+    writeCloudEvent(meta({ extensions: { Tenant: 'x', ok: 'y' } }), 1, jsonCodec(), 'binary', h);
+    expect(h.get('ce-Tenant')).toBe('');
+    expect(h.get('ce-ok')).toBe('y');
+  });
+
+  it('does not treat binary ce-data / ce-data_base64 as extensions', () => {
+    const out = readCloudEvent(
+      binaryMsg({ id: '1', source: 's', data: 'x', data_base64: 'y' }),
+      jsonCodec(),
+    );
+    expect(out.meta.extensions).toEqual({});
+  });
+
+  it('encodes the body once on the structured JSON path', () => {
+    let calls = 0;
+    const counting: Codec = {
+      ...jsonCodec(),
+      encode: (d) => {
+        calls++;
+        return jsonCodec().encode(d);
+      },
+    };
+    writeCloudEvent(meta(), { a: 1 }, counting, 'structured', headers());
+    expect(calls).toBe(0);
   });
 
   it('reads a foreign structured event with data_base64 and a non-JSON content type', () => {
@@ -305,6 +396,33 @@ describe('resolveCloudEvent', () => {
     const m = resolveCloudEvent({ type: 't' }, { source: 's', contentType: 'x' });
     expect(m.id).toMatch(/^[0-9a-f-]{36}$/);
     expect(Number.isNaN(Date.parse(m.time as string))).toBe(false);
+  });
+
+  it.each(RESERVED_NAMES_FOR_RESOLVE)('rejects reserved extension name %s', (name) => {
+    expect(() =>
+      resolveCloudEvent(
+        { type: 't', extensions: { [name]: 'x' } },
+        { source: 's', contentType: 'x' },
+      ),
+    ).toThrow(NatsConfigError);
+  });
+
+  it.each(['Tenant', 'a-b', 'a_b', ''])('rejects invalid extension name %j', (name) => {
+    expect(() =>
+      resolveCloudEvent(
+        { type: 't', extensions: { [name]: 'x' } },
+        { source: 's', contentType: 'x' },
+      ),
+    ).toThrow(NatsConfigError);
+  });
+
+  it('rejects empty type, empty id and an invalid Date', () => {
+    const d = { source: 's', contentType: 'x' };
+    expect(() => resolveCloudEvent({ type: '' }, d)).toThrow(NatsConfigError);
+    expect(() => resolveCloudEvent({ type: 't', id: '' }, d)).toThrow(NatsConfigError);
+    expect(() => resolveCloudEvent({ type: 't', time: new Date('nope') }, d)).toThrow(
+      NatsConfigError,
+    );
   });
 
   it('requires a source', () => {
