@@ -39,9 +39,11 @@ export class NatsContext<R extends NatsMsg | JsMsg = NatsMsg | JsMsg> {
     return this.#headers;
   }
 
+  /** The subject to reply to, if the sender expects a reply (never for JetStream messages). */
   get replyTo(): string | undefined {
-    // JsMsg does not declare `reply` in its type, but the underlying message carries it.
-    return (this.#raw as { reply?: string }).reply || undefined;
+    // A JetStream message's reply subject is its `$JS.ACK...` subject, not a reply target.
+    if (this.#kind === 'jetstream') return undefined;
+    return (this.#raw as NatsMsg).reply || undefined;
   }
 
   get raw(): R {
@@ -51,6 +53,14 @@ export class NatsContext<R extends NatsMsg | JsMsg = NatsMsg | JsMsg> {
 
 export class NatsJetStreamContext extends NatsContext<JsMsg> {
   #settled = false;
+
+  /**
+   * Always `undefined`: a JetStream message's reply subject is its `$JS.ACK...` subject,
+   * and publishing to it would acknowledge the message. Use `ack()`/`nak()`/`term()`.
+   */
+  override get replyTo(): string | undefined {
+    return undefined;
+  }
 
   get stream(): string {
     return this.raw.info.stream;

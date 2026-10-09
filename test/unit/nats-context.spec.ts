@@ -40,6 +40,15 @@ describe('NatsContext', () => {
     expect(ctx.replyTo).toBeUndefined();
   });
 
+  it('has no replyTo for a jetstream-kind context', () => {
+    const ctx = new NatsContext({
+      kind: 'jetstream',
+      connection: 'default',
+      raw: { subject: 'a', reply: '$JS.ACK.S.d.1.1.1.0.0' } as never,
+    });
+    expect(ctx.replyTo).toBeUndefined();
+  });
+
   it('computes headers once', () => {
     const raw = fakeJsMsg();
     const ctx = new NatsContext({ kind: 'service', connection: 'c', raw: raw as never });
@@ -57,6 +66,16 @@ describe('NatsJetStreamContext', () => {
   });
 
   it('is a NatsContext', () => expect(ctx).toBeInstanceOf(NatsContext));
+
+  it('has no replyTo even though the message carries the $JS.ACK subject', () => {
+    const jsRaw = { ...fakeJsMsg(), reply: '$JS.ACK.S.d.1.7.7.0.0' };
+    const jsCtx = new NatsJetStreamContext({
+      kind: 'jetstream',
+      connection: 'default',
+      raw: jsRaw as never,
+    });
+    expect(jsCtx.replyTo).toBeUndefined();
+  });
 
   it('exposes delivery info', () =>
     expect([ctx.stream, ctx.seq, ctx.deliveryCount]).toEqual(['S', 7, 2]));
