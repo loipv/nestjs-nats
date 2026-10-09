@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { PubAck } from '@nats-io/jetstream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Batcher } from '../../src/batch/batcher.js';
@@ -41,11 +42,28 @@ describe('Batcher', () => {
     expect((await p2).seq).toBe(2);
     expect(batches).toEqual([
       [
-        { subject: 'a', data: 1, opts: undefined },
-        { subject: 'b', data: 2, opts: undefined },
+        { subject: 'a', data: 1, opts: undefined, run: expect.any(Function) },
+        { subject: 'b', data: 2, opts: undefined, run: expect.any(Function) },
       ],
     ]);
     expect(b.pending).toBe(0);
+  });
+
+  it("hands each item a runner bound to its add's async context", async () => {
+    const als = new AsyncLocalStorage<string>();
+    const seen: Array<string | undefined> = [];
+    const b = new Batcher(
+      async (items) => {
+        for (const item of items) seen.push(item.run(() => als.getStore()));
+        return items.map((_, i) => ({ ok: true, ack: ack(i + 1) }) as PublishManyResult);
+      },
+      { maxSize: 3, maxWait: 1000 },
+    );
+    const p1 = als.run('a', () => b.add('s', 1));
+    const p2 = als.run('b', () => b.add('s', 2));
+    const p3 = als.run('c', () => b.add('s', 3));
+    await Promise.all([p1, p2, p3]);
+    expect(seen).toEqual(['a', 'b', 'c']);
   });
 
   it('flushes after maxWait from the first item', async () => {

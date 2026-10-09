@@ -196,7 +196,7 @@ it('exports MessageOutcome as the outcome type of Delivery.outcomes', () => {
 });
 
 it('exports the subpath entries', () => {
-  expect(Object.keys(otel).sort()).toEqual(['msgHdrsGetter', 'msgHdrsSetter', 'tracing']);
+  expect(Object.keys(otel).sort()).toEqual(['tracing']);
   expect(Object.keys(health).sort()).toEqual(['NatsHealthIndicator', 'NatsHealthModule']);
   expect(Object.keys(testing).sort()).toEqual([
     'NatsTestHarness',
