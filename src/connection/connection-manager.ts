@@ -85,19 +85,7 @@ export class NatsConnectionManager {
     }
     this.pending.add(name);
     try {
-      const servers = redactServers(options.connection.servers);
-      let nc: NatsConnection;
-      try {
-        nc = await connect(options.connection);
-      } catch (err) {
-        const { pass, token } = options.connection;
-        const reason = redactText(err instanceof Error ? err.message : String(err), [pass, token]);
-        throw new NatsConnectionError(
-          `NATS connection "${name}" failed to connect to ${servers.join(', ')}: ${reason}`,
-          { connection: name, servers, cause: err },
-        );
-      }
-
+      const nc = await this.openConnection(name, options);
       const logger = createNatsLogger(options.logger, `NatsConnection:${name}`);
       let js: JetStreamClient | undefined;
       let jsm: Promise<JetStreamManager> | undefined;
@@ -108,12 +96,12 @@ export class NatsConnectionManager {
         options,
         nc,
         logger,
-        js() {
-          js ??= jetstream(nc, options.jetstream?.options);
+        js: () => {
+          js ??= this.createJetStream(nc, options);
           return js;
         },
-        jsm() {
-          jsm ??= jetstreamManager(nc, options.jetstream?.options);
+        jsm: () => {
+          jsm ??= this.createJetStreamManager(nc, options);
           // Do not cache a failed attempt.
           jsm.catch(() => {
             jsm = undefined;
@@ -148,6 +136,37 @@ export class NatsConnectionManager {
     } finally {
       this.pending.delete(name);
     }
+  }
+
+  /** Opens the NATS connection of `name`. Internal: the testing module overrides it. */
+  protected async openConnection(
+    name: string,
+    options: NatsModuleOptions,
+  ): Promise<NatsConnection> {
+    try {
+      return await connect(options.connection);
+    } catch (err) {
+      const servers = redactServers(options.connection.servers);
+      const { pass, token } = options.connection;
+      const reason = redactText(err instanceof Error ? err.message : String(err), [pass, token]);
+      throw new NatsConnectionError(
+        `NATS connection "${name}" failed to connect to ${servers.join(', ')}: ${reason}`,
+        { connection: name, servers, cause: err },
+      );
+    }
+  }
+
+  /** The JetStream client of a connection. Internal: the testing module overrides it. */
+  protected createJetStream(nc: NatsConnection, options: NatsModuleOptions): JetStreamClient {
+    return jetstream(nc, options.jetstream?.options);
+  }
+
+  /** The JetStream manager of a connection. Internal: the testing module overrides it. */
+  protected createJetStreamManager(
+    nc: NatsConnection,
+    options: NatsModuleOptions,
+  ): Promise<JetStreamManager> {
+    return jetstreamManager(nc, options.jetstream?.options);
   }
 
   get(name: string = DEFAULT_CONNECTION): ConnectionEntry {
