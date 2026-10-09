@@ -1,0 +1,14 @@
+{
+  "name": "smoke-no-peers",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@nats-io/jetstream": "^3",
+    "@nats-io/services": "^3",
+    "@nats-io/transport-node": "^3",
+    "@nestjs/common": "^12",
+    "@nestjs/core": "^12",
+    "reflect-metadata": "^0.2",
+    "rxjs": "^7"
+  }
+}
