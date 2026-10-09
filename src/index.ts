@@ -70,6 +70,7 @@ export type { HandlerInfo, InboundMessage } from './pipeline/delivery.js';
 export type {
   Delivery,
   InboundMiddleware,
+  MessageOutcome,
   NatsPlugin,
   Next,
   OutboundMiddleware,

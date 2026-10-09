@@ -49,6 +49,28 @@ export type HandlerInfo =
     });
 
 /**
+ * What became of one message of a delivery. Exactly one is recorded per message the
+ * settlement or the idempotency middleware handled.
+ */
+export type MessageOutcome =
+  /** Acked: auto ack after success, or the handler acked it itself. */
+  | { action: 'ack' }
+  /** Handed back for another attempt: JetStream `nak(delay)`, or a core in-process retry. */
+  | { action: 'retry'; delayMs: number; error: unknown }
+  /** Failed for good and published to the dead-letter subject. */
+  | { action: 'dlq'; subject: string; error: unknown }
+  /** JetStream `term` without a dead letter (non-retryable or retries exhausted). */
+  | { action: 'term'; error?: unknown }
+  /** Core: given up on, not dead-lettered. */
+  | { action: 'drop'; error?: unknown }
+  /** Left out of the handler: a duplicate, or being processed elsewhere. */
+  | { action: 'skipped'; reason: 'duplicate' | 'in-progress' }
+  /** A reply delivery: the reply (an error reply when `error` is set) is sent by the adapter. */
+  | { action: 'replied'; error?: unknown }
+  /** Nothing to settle: success on a core subscription, or a manual-ack message left unacked. */
+  | { action: 'none' };
+
+/**
  * One unit of inbound work flowing through the inbound pipeline: one message, or the
  * messages of a batch (`context` is then a `NatsBatchContext` whose `messages[i]` is the
  * context of `messages[i]`).
@@ -59,7 +81,19 @@ export interface Delivery {
   readonly context: NatsContext | NatsBatchContext;
   readonly codec: Codec;
   readonly logger: LoggerService;
+  /**
+   * What became of each message, keyed by the entries of `messages`. It is filled in by
+   * the settlement and idempotency middlewares and is complete once the `next()` of a
+   * middleware with `stage: 'outer'` has resolved or rejected (read it there, after
+   * awaiting `next()`).
+   */
+  readonly outcomes: Map<InboundMessage, MessageOutcome>;
   result?: unknown;
+}
+
+/** Internal: records the outcome of `msg` on `d`, replacing an earlier one. */
+export function recordOutcome(d: Delivery, msg: InboundMessage, outcome: MessageOutcome): void {
+  (d as Partial<Delivery>).outcomes?.set(msg, outcome);
 }
 
 /** Internal: key of the full handler definition on deliveries built by the adapters. */
@@ -137,6 +171,7 @@ export function createDelivery(init: DeliveryInit): InternalDelivery {
     [FAILURES]: failures,
     ...(init.retry ? { [RETRY_SCHEDULER]: init.retry } : {}),
     messages: parts.map((p) => p.message),
+    outcomes: new Map(),
     context,
     codec: init.codec,
     logger: init.logger,

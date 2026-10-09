@@ -7,7 +7,7 @@ import type {
   InboundMessage,
   InternalDelivery,
 } from '../pipeline/delivery.js';
-import { FAILURES, messageContexts, SKIPPED } from '../pipeline/delivery.js';
+import { FAILURES, messageContexts, recordOutcome, SKIPPED } from '../pipeline/delivery.js';
 import type { InboundMiddleware, Next } from '../pipeline/types.js';
 import type { RetryPolicy } from '../settlement/retry.js';
 import { errorMessage, errorTrace } from '../util/errors.js';
@@ -171,6 +171,7 @@ export function createIdempotency(cfg: IdempotencyConfig): InboundMiddleware {
               `Skipping duplicate message on "${msg.subject}" (key "${key}") for ${label(d, msg)}`,
             );
             settleJs(d, msg, 'ack');
+            recordOutcome(d, msg, { action: 'skipped', reason: 'duplicate' });
             break;
           case 'in-progress':
             skipped.add(msg);
@@ -178,6 +179,7 @@ export function createIdempotency(cfg: IdempotencyConfig): InboundMiddleware {
               `Message on "${msg.subject}" (key "${key}") is being processed elsewhere for ${label(d, msg)}`,
             );
             settleJs(d, msg, 'nak');
+            recordOutcome(d, msg, { action: 'skipped', reason: 'in-progress' });
             break;
         }
       }

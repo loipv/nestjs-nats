@@ -94,6 +94,7 @@ function jsDelivery(
     [HANDLER_DEFINITION]: { ...handler, options: { stream: 'ORD', durable: 'd', ack } },
     [SKIPPED]: new Set<InboundMessage>(),
     messages: [msg],
+    outcomes: new Map(),
     context,
     logger: log,
   } as unknown as InternalDelivery;
@@ -117,6 +118,7 @@ function coreDelivery(init: Record<string, string> = { 'Nats-Msg-Id': 'm1' }) {
     [HANDLER_DEFINITION]: { ...handler, options: {} },
     [SKIPPED]: new Set<InboundMessage>(),
     messages: [msg],
+    outcomes: new Map(),
     context,
     logger: log,
   } as unknown as InternalDelivery;
@@ -157,6 +159,17 @@ describe('createIdempotency', () => {
     expect(next).not.toHaveBeenCalled();
     expect(store.complete).not.toHaveBeenCalled();
     expect(store.release).not.toHaveBeenCalled();
+  });
+
+  it('records skipped outcomes for duplicates and in-progress messages', async () => {
+    for (const reason of ['duplicate', 'in-progress'] as const) {
+      const { d, msg } = jsDelivery();
+      await createIdempotency(cfg(fakeStore(reason))).handle(d, async () => {});
+      expect(d.outcomes.get(msg)).toEqual({ action: 'skipped', reason });
+    }
+    const { d, msg } = coreDelivery();
+    await createIdempotency(cfg(fakeStore('duplicate'))).handle(d, async () => {});
+    expect(d.outcomes.get(msg)).toEqual({ action: 'skipped', reason: 'duplicate' });
   });
 
   it('naks in-progress JetStream messages', async () => {

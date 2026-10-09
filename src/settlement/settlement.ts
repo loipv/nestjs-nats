@@ -1,5 +1,5 @@
 import type { ConnectionEntry } from '../connection/connection-manager.js';
-import { NatsJetStreamContext } from '../context/nats-context.js';
+import { NatsJetStreamContext, SETTLED_BY } from '../context/nats-context.js';
 import { IdempotencyStoreError } from '../idempotency/idempotency.js';
 import {
   type Delivery,
@@ -7,8 +7,10 @@ import {
   FAILURES,
   type InboundMessage,
   type InternalDelivery,
+  type MessageOutcome,
   messageContexts,
   RETRY_SCHEDULER,
+  recordOutcome,
   SKIPPED,
 } from '../pipeline/delivery.js';
 import { isReplyDelivery } from '../pipeline/reply.js';
@@ -59,6 +61,22 @@ function jsTargets(d: Delivery): JsTarget[] {
     if (ctx instanceof NatsJetStreamContext) out.push({ msg, ctx });
   });
   return out;
+}
+
+/**
+ * The outcome of a message the handler settled itself (`ctx.ack()`/`nak(delay)`/`term()`);
+ * `error` is the one the handler then threw, if any.
+ */
+function manualOutcome(ctx: NatsJetStreamContext, error?: unknown): MessageOutcome {
+  const call = ctx[SETTLED_BY];
+  switch (call?.op) {
+    case 'nak':
+      return { action: 'retry', delayMs: call.delayMs, error };
+    case 'term':
+      return { action: 'term', ...(error !== undefined ? { error } : {}) };
+    default:
+      return { action: 'ack' };
+  }
 }
 
 /** Settles through the context (which marks it settled only on success); logs failures. */
@@ -125,11 +143,15 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
 
   async function failConsume(d: Delivery, { msg, ctx }: JsTarget, err: unknown): Promise<void> {
     // The handler settled it itself (e.g. `ctx.nak(delay)` before throwing).
-    if (ctx.settled) return;
+    if (ctx.settled) {
+      recordOutcome(d, msg, manualOutcome(ctx, err));
+      return;
+    }
     if (err instanceof IdempotencyStoreError) {
       const delayMs = storeRetryDelay(msg.attempt);
       d.logger.warn(storeLine(d, msg, delayMs, err));
       settle(d, msg, 'nak', () => ctx.nak(delayMs));
+      recordOutcome(d, msg, { action: 'retry', delayMs, error: err });
       return;
     }
     const decision = decide(err, msg.attempt, retry, dlq, random);
@@ -137,6 +159,7 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
       case 'retry':
         d.logger.warn(retryLine(d, msg, decision.delayMs, err));
         settle(d, msg, 'nak', () => ctx.nak(decision.delayMs));
+        recordOutcome(d, msg, { action: 'retry', delayMs: decision.delayMs, error: err });
         return;
       case 'dlq': {
         const { subject, error } = await deadLetter(d, msg, err);
@@ -145,6 +168,7 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
             `${label(d, msg)} failed, sent to DLQ ${subject} after ${attempts(msg.attempt)}: ${errorMessage(err)}`,
           );
           settle(d, msg, 'term', () => ctx.term());
+          recordOutcome(d, msg, { action: 'dlq', subject, error: err });
           return;
         }
         // Not dead-lettered: hand it back so it is not lost.
@@ -154,6 +178,8 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
           errorTrace(error),
         );
         settle(d, msg, 'nak', () => ctx.nak(delayMs));
+        // The handler's error, not the DLQ's: the message goes back for another attempt.
+        recordOutcome(d, msg, { action: 'retry', delayMs, error: err });
         return;
       }
       case 'drop':
@@ -161,6 +187,7 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
           `${label(d, msg)} failed, gave up after ${attempts(msg.attempt)}: ${errorMessage(err)}`,
         );
         settle(d, msg, 'term', () => ctx.term(termReason(err)));
+        recordOutcome(d, msg, { action: 'term', error: err });
         return;
     }
   }
@@ -171,6 +198,7 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
       const delayMs = storeRetryDelay(msg.attempt);
       d.logger.warn(storeLine(d, msg, delayMs, err));
       schedule(msg, delayMs);
+      recordOutcome(d, msg, { action: 'retry', delayMs, error: err });
       return;
     }
     const decision = decide(err, msg.attempt, schedule ? retry : false, dlq, random);
@@ -178,6 +206,7 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
       case 'retry':
         d.logger.warn(retryLine(d, msg, decision.delayMs, err));
         schedule?.(msg, decision.delayMs);
+        recordOutcome(d, msg, { action: 'retry', delayMs: decision.delayMs, error: err });
         return;
       case 'dlq': {
         const { subject, error } = await deadLetter(d, msg, err);
@@ -191,12 +220,20 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
             errorTrace(error),
           );
         }
+        recordOutcome(
+          d,
+          msg,
+          error === undefined
+            ? { action: 'dlq', subject, error: err }
+            : { action: 'drop', error: err },
+        );
         return;
       }
       case 'drop':
         d.logger.error(
           `${label(d, msg)} failed, gave up after ${attempts(msg.attempt)}: ${errorMessage(err)}`,
         );
+        recordOutcome(d, msg, { action: 'drop', error: err });
         return;
     }
   }
@@ -224,8 +261,15 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
         const def = definitionOf(d);
         autoAck = def.kind === 'consume' && (def.options.ack ?? 'auto') === 'auto';
       }
-      const { ctx } = target;
-      if (autoAck && !ctx.settled) settle(d, target.msg, 'ack', () => ctx.ack());
+      const { ctx, msg } = target;
+      if (ctx.settled) {
+        recordOutcome(d, msg, manualOutcome(ctx));
+      } else if (autoAck) {
+        settle(d, msg, 'ack', () => ctx.ack());
+        recordOutcome(d, msg, { action: 'ack' });
+      } else {
+        recordOutcome(d, msg, { action: 'none' });
+      }
     }
   }
 
@@ -235,6 +279,7 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
       if (skipped?.has(msg)) continue;
       const outcome = outcomeOf(d, msg, failure);
       if (outcome) await failSubscribe(d, msg, outcome.err);
+      else recordOutcome(d, msg, { action: 'none' });
     }
   }
 
@@ -246,7 +291,15 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
       } catch (err) {
         failure = { err };
       }
-      if (failure && isReplyDelivery(d)) throw failure.err;
+      if (isReplyDelivery(d)) {
+        const skipped = (d as Partial<InternalDelivery>)[SKIPPED];
+        for (const msg of d.messages) {
+          if (skipped?.has(msg)) continue;
+          recordOutcome(d, msg, { action: 'replied', ...(failure ? { error: failure.err } : {}) });
+        }
+        if (failure) throw failure.err;
+        return;
+      }
       if (d.handler.kind === 'consume') await settleConsume(d, failure);
       else await settleSubscribe(d, failure);
     },

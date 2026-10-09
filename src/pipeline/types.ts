@@ -2,7 +2,7 @@ import type { MsgHdrs } from '@nats-io/transport-node';
 import type { Codec } from '../codec/codec.js';
 import type { Delivery } from './delivery.js';
 
-export type { Delivery } from './delivery.js';
+export type { Delivery, MessageOutcome } from './delivery.js';
 
 export type Next = () => Promise<void>;
 
