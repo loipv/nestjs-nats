@@ -128,6 +128,10 @@ These are tracked for upcoming releases:
 - **Publish order.** If an outbound plugin awaits something, consecutive `publish()` calls are not guaranteed to leave in call order.
 - **Undetected removals.** Stream and consumer sync compares only declared fields, so a field you remove from a declaration is not detected as drift.
 
+## Changelog and releases
+
+See [CHANGELOG.md](./CHANGELOG.md) for what changed in each version. Maintainers: see [RELEASING.md](./RELEASING.md) for how releases are published.
+
 ## License
 
 [MIT](./LICENSE)
