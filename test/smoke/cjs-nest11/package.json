@@ -1,0 +1,16 @@
+{
+  "name": "smoke-cjs-nest11",
+  "private": true,
+  "type": "commonjs",
+  "dependencies": {
+    "@nats-io/jetstream": "^3",
+    "@nats-io/services": "^3",
+    "@nats-io/transport-node": "^3",
+    "@nestjs/common": "^11",
+    "@nestjs/core": "^11",
+    "@nestjs/terminus": "^11",
+    "@opentelemetry/api": "^1.9",
+    "reflect-metadata": "^0.2",
+    "rxjs": "^7"
+  }
+}
