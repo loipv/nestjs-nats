@@ -4,13 +4,13 @@ import {
   type PublishOptions,
   TimeoutError,
 } from '@nats-io/transport-node';
-import { type Codec, decodePayload, encodePayload, jsonCodec } from '../codec/codec.js';
-import { type HeadersInit, toMsgHdrs } from '../codec/headers.js';
+import { type Codec, decodePayload, encodePayload } from '../codec/codec.js';
+import type { HeadersInit } from '../codec/headers.js';
 import type { ConnectionEntry } from '../connection/connection-manager.js';
 import { redactText } from '../connection/redact.js';
 import { NatsModuleError, NatsRequestError } from '../errors/errors.js';
 import { compose } from '../pipeline/compose.js';
-import type { Next, OutgoingMessage } from '../pipeline/types.js';
+import { createOutgoingMessage, outboundMiddlewares } from '../pipeline/outbound.js';
 
 const DEFAULT_REQUEST_TIMEOUT = 5000;
 const SERVICE_ERROR_CODE_HEADER = 'Nats-Service-Error-Code';
@@ -32,8 +32,8 @@ export class NatsClient {
     data?: unknown,
     opts: { headers?: HeadersInit; codec?: Codec; reply?: string } = {},
   ): void {
-    const message = this.createMessage('publish', subject, data, opts);
-    const run = compose(this.middlewares(), async (m) => {
+    const message = createOutgoingMessage(this.entry, 'publish', subject, data, opts);
+    const run = compose(outboundMiddlewares(this.entry), async (m) => {
       const payload = encodePayload(m.codec, m.data);
       const publishOpts: PublishOptions = {};
       if (m.headers.keys().length > 0) publishOpts.headers = m.headers;
@@ -53,9 +53,9 @@ export class NatsClient {
     data?: unknown,
     opts: { timeout?: number; headers?: HeadersInit; codec?: Codec } = {},
   ): Promise<T> {
-    const message = this.createMessage('request', subject, data, opts);
+    const message = createOutgoingMessage(this.entry, 'request', subject, data, opts);
     let result: { value: unknown } | undefined;
-    const run = compose(this.middlewares(), async (m) => {
+    const run = compose(outboundMiddlewares(this.entry), async (m) => {
       const payload = encodePayload(m.codec, m.data);
       let reply: Msg;
       try {
@@ -107,29 +107,5 @@ export class NatsClient {
       await Promise.allSettled([...this.inflight]);
     }
     await this.entry.nc.flush();
-  }
-
-  private middlewares(): Array<(m: OutgoingMessage, next: Next) => Promise<void>> {
-    const out: Array<(m: OutgoingMessage, next: Next) => Promise<void>> = [];
-    for (const { outbound } of this.entry.options.plugins ?? []) {
-      if (outbound) out.push((m, next) => outbound.handle(m, next));
-    }
-    return out;
-  }
-
-  private createMessage(
-    kind: OutgoingMessage['kind'],
-    subject: string,
-    data: unknown,
-    opts: { headers?: HeadersInit; codec?: Codec },
-  ): OutgoingMessage {
-    return {
-      kind,
-      connection: this.entry.name,
-      subject,
-      data,
-      headers: toMsgHdrs(opts.headers),
-      codec: opts.codec ?? this.entry.options.codec ?? jsonCodec(),
-    };
   }
 }

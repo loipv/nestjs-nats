@@ -10,13 +10,17 @@ import {
 } from '@nestjs/common';
 import { NatsClient } from '../client/nats-client.js';
 import { NatsConnectionManager } from '../connection/connection-manager.js';
+import { JetStreamClient } from '../jetstream/jetstream-client.js';
+import { NatsStreamManager } from '../jetstream/stream-manager.js';
 import { NatsCoreModule } from './nats-core.module.js';
 import type { NatsFeatureOptions, NatsModuleOptions } from './options.js';
 import {
   DEFAULT_CONNECTION,
   getConnectionToken,
+  getJetStreamClientToken,
   getModuleOptionsToken,
   getNatsClientToken,
+  getStreamManagerToken,
   NATS_FEATURE_TOKEN_PREFIX,
 } from './tokens.js';
 
@@ -96,6 +100,8 @@ export class NatsModule {
     const optionsToken = getModuleOptionsToken(name);
     const connectionToken = getConnectionToken(name);
     const clientToken = getNatsClientToken(name);
+    const jetStreamToken = getJetStreamClientToken(name);
+    const streamManagerToken = getStreamManagerToken(name);
     const providers: Provider[] = [
       ...optionProviders,
       {
@@ -112,13 +118,23 @@ export class NatsModule {
         useFactory: (manager: NatsConnectionManager) => new NatsClient(manager.get(name)),
         inject: [NatsConnectionManager, connectionToken],
       },
+      {
+        provide: jetStreamToken,
+        useFactory: (manager: NatsConnectionManager) => new JetStreamClient(manager.get(name)),
+        inject: [NatsConnectionManager, connectionToken],
+      },
+      {
+        provide: streamManagerToken,
+        useFactory: (manager: NatsConnectionManager) => new NatsStreamManager(manager.get(name)),
+        inject: [NatsConnectionManager, connectionToken],
+      },
     ];
     return {
       module: NatsModule,
       global: true,
       imports: [NatsCoreModule, ...imports],
       providers,
-      exports: [optionsToken, connectionToken, clientToken],
+      exports: [optionsToken, connectionToken, clientToken, jetStreamToken, streamManagerToken],
     };
   }
 }
