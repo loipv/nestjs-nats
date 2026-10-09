@@ -61,7 +61,7 @@ The library also has `@nestjs/common`, `@nestjs/core`, `reflect-metadata` and `r
 ```ts
 import { Injectable, Module } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-import { getNatsClientToken, NatsClient, NatsModule, Payload, Subscribe } from '@loipv/nestjs-nats';
+import { NatsClient, NatsModule, Payload, Subscribe } from '@loipv/nestjs-nats';
 
 @Injectable()
 class GreetingHandlers {
@@ -88,7 +88,7 @@ async function bootstrap() {
   const app = await NestFactory.createApplicationContext(AppModule);
   app.enableShutdownHooks();
 
-  const client = app.get<NatsClient>(getNatsClientToken());
+  const client = app.get(NatsClient);
   client.publish('greetings.sent', { name: 'Ada' });
   console.log(await client.request('greetings.echo', { name: 'Ada' })); // { reply: 'Hi Ada' }
 }
@@ -157,7 +157,7 @@ class AuditForwarder {
 class AppModule {}
 ```
 
-Inject per connection with `@InjectNatsClient(name?)`, `@InjectJetStream(name?)`, `@InjectStreamManager(name?)` and `@InjectNatsConnection(name?)`. The last one gives you the raw `NatsConnection`. Outside constructors, for example with `app.get()`, use the matching token functions: `getNatsClientToken(name?)`, `getJetStreamClientToken(name?)`, `getStreamManagerToken(name?)` and `getConnectionToken(name?)`.
+Inject per connection with `@InjectNatsClient(name?)`, `@InjectJetStream(name?)`, `@InjectStreamManager(name?)` and `@InjectNatsConnection(name?)`. The last one gives you the raw `NatsConnection`. For the `'default'` connection, `NatsClient`, `JetStreamClient` and `NatsStreamManager` can also be injected by class (`constructor(private readonly client: NatsClient)`, `app.get(NatsClient)`). For a named connection outside a constructor, use the token functions: `getNatsClientToken(name?)`, `getJetStreamClientToken(name?)`, `getStreamManagerToken(name?)` and `getConnectionToken(name?)`.
 
 Registering two connections with the same name throws a `NatsConfigError`.
 
@@ -296,11 +296,11 @@ await client.flush();
 
 ```ts
 import { Injectable } from '@nestjs/common';
-import { InjectJetStream, JetStreamClient } from '@loipv/nestjs-nats';
+import { JetStreamClient } from '@loipv/nestjs-nats';
 
 @Injectable()
 class OrderPublisher {
-  constructor(@InjectJetStream() private readonly js: JetStreamClient) {}
+  constructor(private readonly js: JetStreamClient) {}
 
   async created(order: { id: string }) {
     const ack = await this.js.publish('orders.created', order, {
@@ -343,7 +343,7 @@ NatsModule.forFeature({ connection: 'default', streams: [{ name: 'PAYMENTS', sub
 - **Only declared fields are compared.** Values the server fills in are ignored: its own `_nats.*` metadata keys, and fields that are absent but declared as `false`, `0`, `''`, `[]` or `{}`.
 - **Duration units.** Durations such as `max_age` are in nanoseconds, as in the NATS API.
 
-`NatsStreamManager` (inject it with `@InjectStreamManager()`) is available for runtime work: `ensureStream()`, `ensureConsumer()`, `info()`, `purge()`, `delete()`, and `jsm()` for the raw `JetStreamManager`.
+`NatsStreamManager` (inject it by class, or with `@InjectStreamManager(name?)` for a named connection) is available for runtime work: `ensureStream()`, `ensureConsumer()`, `info()`, `purge()`, `delete()`, and `jsm()` for the raw `JetStreamManager`.
 
 ## Codecs
 
