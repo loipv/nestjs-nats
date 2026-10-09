@@ -6,4 +6,16 @@ export interface HandlerAdapter {
   stop(): Promise<void>;
   /** Resolves when no message is being processed. */
   idle(): Promise<void>;
+  /**
+   * Gives up on work still pending at the end of shutdown: naks JetStream messages that
+   * are being processed but not yet settled and cancels pending in-process retries.
+   */
+  forceStop(): ForceStopResult;
+}
+
+export interface ForceStopResult {
+  /** Messages nak'd because they were still being processed. */
+  nakked: number;
+  /** Pending in-process retries that were cancelled. */
+  cancelledRetries: number;
 }

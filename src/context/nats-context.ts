@@ -78,22 +78,25 @@ export class NatsJetStreamContext extends NatsContext<JsMsg> {
     return this.#settled;
   }
 
+  // Each settle call marks the message settled only once the raw call succeeded: if it
+  // throws, the error reaches the caller and the message can still be settled later.
+
   ack(): void {
     if (this.#settled) return;
-    this.#settled = true;
     this.raw.ack();
+    this.#settled = true;
   }
 
   nak(delayMs?: number): void {
     if (this.#settled) return;
-    this.#settled = true;
     this.raw.nak(delayMs);
+    this.#settled = true;
   }
 
   term(reason?: string): void {
     if (this.#settled) return;
-    this.#settled = true;
     this.raw.term(reason);
+    this.#settled = true;
   }
 
   working(): void {

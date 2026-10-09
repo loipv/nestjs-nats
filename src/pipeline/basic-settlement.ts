@@ -1,16 +1,9 @@
 import { NatsJetStreamContext } from '../context/nats-context.js';
 import { defaultIsRetryable } from '../settlement/retry.js';
+import { errorMessage, errorTrace } from '../util/errors.js';
 import { type Delivery, definitionOf } from './delivery.js';
 import { isReplyDelivery } from './reply.js';
 import type { InboundMiddleware, Next } from './types.js';
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
-function errorTrace(err: unknown): string {
-  return (err instanceof Error ? err.stack : undefined) ?? errorMessage(err);
-}
 
 function label(d: Delivery): string {
   return `${d.handler.className}.${d.handler.methodName} on "${d.context.subject}"`;

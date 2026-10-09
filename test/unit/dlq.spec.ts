@@ -29,6 +29,7 @@ function jsMsg(o: {
     raw: {
       info: { stream: o.stream, consumer: o.consumer, streamSequence: o.streamSequence },
     } as unknown as JsMsg,
+    attempt: 1,
   };
 }
 
