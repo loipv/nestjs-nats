@@ -1,3 +1,4 @@
+import { UnmatchedCloudEventError } from '../cloudevents/errors.js';
 import type { ConnectionEntry } from '../connection/connection-manager.js';
 import { NatsJetStreamContext, SETTLED_BY } from '../context/nats-context.js';
 import { IdempotencyStoreError } from '../idempotency/idempotency.js';
@@ -95,7 +96,8 @@ function settle(d: Delivery, msg: InboundMessage, op: SettleOp, fn: () => void):
  * them; rethrows for deliveries expecting a reply. A batch is settled message by message,
  * each with its own attempt: the messages recorded in `FAILURES` fail with their own
  * error; when the handler throws, every other message fails with its error. Messages left out of the delivery
- * (`SKIPPED`) are not settled here. (The JetStream adapter heartbeats its messages until
+ * (`SKIPPED`) are not settled here. An `UnmatchedCloudEventError` (CloudEvent router) is
+ * not retried: its policy terms/drops or dead-letters it. (The JetStream adapter heartbeats its messages until
  * this completes.) Handler errors are already logged by Nest: this logs one line per settlement
  * decision, without the stack.
  */
@@ -141,6 +143,44 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
     }
   }
 
+  /** Dead-letters then terms a JetStream message; naks it when the DLQ publish fails. */
+  async function deadLetterConsume(d: Delivery, { msg, ctx }: JsTarget, err: unknown) {
+    const { subject, error } = await deadLetter(d, msg, err);
+    if (error === undefined) {
+      d.logger.error(
+        `${label(d, msg)} failed, sent to DLQ ${subject} after ${attempts(msg.attempt)}: ${errorMessage(err)}`,
+      );
+      settle(d, msg, 'term', () => ctx.term());
+      recordOutcome(d, msg, { action: 'dlq', subject, error: err });
+      return;
+    }
+    // Not dead-lettered: hand it back so it is not lost.
+    const delayMs = backoffDelay(retry || DEFAULT_RETRY, msg.attempt, random);
+    d.logger.error(
+      `${label(d, msg)} failed and could not be sent to DLQ ${subject}, retrying in ${delayMs}ms: ${errorMessage(error)}`,
+      errorTrace(error),
+    );
+    settle(d, msg, 'nak', () => ctx.nak(delayMs));
+    // The handler's error, not the DLQ's: the message goes back for another attempt.
+    recordOutcome(d, msg, { action: 'retry', delayMs, error: err });
+  }
+
+  /**
+   * Whether an unmatched CloudEvent is dead-lettered (policy `'dlq'` with a DLQ); else it
+   * is given up on, with a warning when the policy asked for a DLQ that is not configured.
+   */
+  function unmatchedToDlq(d: Delivery, msg: InboundMessage, err: UnmatchedCloudEventError) {
+    if (err.policy === 'dlq' && dlq) return true;
+    if (err.policy === 'dlq') {
+      d.logger.warn(
+        `${label(d, msg)}: ${err.message}; unmatched is 'dlq' but no DLQ is configured, giving up on it`,
+      );
+    } else {
+      d.logger.debug?.(`${label(d, msg)}: ${err.message}; giving up on it (unmatched: 'term')`);
+    }
+    return false;
+  }
+
   async function failConsume(d: Delivery, { msg, ctx }: JsTarget, err: unknown): Promise<void> {
     // The handler settled it itself (e.g. `ctx.nak(delay)` before throwing).
     if (ctx.settled) {
@@ -154,6 +194,16 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
       recordOutcome(d, msg, { action: 'retry', delayMs, error: err });
       return;
     }
+    // Not retried: the policy of the router decides.
+    if (err instanceof UnmatchedCloudEventError) {
+      if (unmatchedToDlq(d, msg, err)) {
+        await deadLetterConsume(d, { msg, ctx }, err);
+        return;
+      }
+      settle(d, msg, 'term', () => ctx.term(termReason(err)));
+      recordOutcome(d, msg, { action: 'term', error: err });
+      return;
+    }
     const decision = decide(err, msg.attempt, retry, dlq, random);
     switch (decision.action) {
       case 'retry':
@@ -161,27 +211,9 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
         settle(d, msg, 'nak', () => ctx.nak(decision.delayMs));
         recordOutcome(d, msg, { action: 'retry', delayMs: decision.delayMs, error: err });
         return;
-      case 'dlq': {
-        const { subject, error } = await deadLetter(d, msg, err);
-        if (error === undefined) {
-          d.logger.error(
-            `${label(d, msg)} failed, sent to DLQ ${subject} after ${attempts(msg.attempt)}: ${errorMessage(err)}`,
-          );
-          settle(d, msg, 'term', () => ctx.term());
-          recordOutcome(d, msg, { action: 'dlq', subject, error: err });
-          return;
-        }
-        // Not dead-lettered: hand it back so it is not lost.
-        const delayMs = backoffDelay(retry || DEFAULT_RETRY, msg.attempt, random);
-        d.logger.error(
-          `${label(d, msg)} failed and could not be sent to DLQ ${subject}, retrying in ${delayMs}ms: ${errorMessage(error)}`,
-          errorTrace(error),
-        );
-        settle(d, msg, 'nak', () => ctx.nak(delayMs));
-        // The handler's error, not the DLQ's: the message goes back for another attempt.
-        recordOutcome(d, msg, { action: 'retry', delayMs, error: err });
+      case 'dlq':
+        await deadLetterConsume(d, { msg, ctx }, err);
         return;
-      }
       case 'drop':
         d.logger.error(
           `${label(d, msg)} failed, gave up after ${attempts(msg.attempt)}: ${errorMessage(err)}`,
@@ -190,6 +222,26 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
         recordOutcome(d, msg, { action: 'term', error: err });
         return;
     }
+  }
+
+  /** Dead-letters a core message; it is dropped when the DLQ publish fails. */
+  async function deadLetterSubscribe(d: Delivery, msg: InboundMessage, err: unknown) {
+    const { subject, error } = await deadLetter(d, msg, err);
+    if (error === undefined) {
+      d.logger.error(
+        `${label(d, msg)} failed, sent to DLQ ${subject} after ${attempts(msg.attempt)}: ${errorMessage(err)}`,
+      );
+    } else {
+      d.logger.error(
+        `${label(d, msg)} failed after ${attempts(msg.attempt)} and could not be sent to DLQ ${subject}: ${errorMessage(error)}`,
+        errorTrace(error),
+      );
+    }
+    recordOutcome(
+      d,
+      msg,
+      error === undefined ? { action: 'dlq', subject, error: err } : { action: 'drop', error: err },
+    );
   }
 
   async function failSubscribe(d: Delivery, msg: InboundMessage, err: unknown): Promise<void> {
@@ -201,6 +253,12 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
       recordOutcome(d, msg, { action: 'retry', delayMs, error: err });
       return;
     }
+    // Not retried: the policy of the router decides ('term' means drop on core).
+    if (err instanceof UnmatchedCloudEventError) {
+      if (unmatchedToDlq(d, msg, err)) await deadLetterSubscribe(d, msg, err);
+      else recordOutcome(d, msg, { action: 'drop', error: err });
+      return;
+    }
     const decision = decide(err, msg.attempt, schedule ? retry : false, dlq, random);
     switch (decision.action) {
       case 'retry':
@@ -208,27 +266,9 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
         schedule?.(msg, decision.delayMs);
         recordOutcome(d, msg, { action: 'retry', delayMs: decision.delayMs, error: err });
         return;
-      case 'dlq': {
-        const { subject, error } = await deadLetter(d, msg, err);
-        if (error === undefined) {
-          d.logger.error(
-            `${label(d, msg)} failed, sent to DLQ ${subject} after ${attempts(msg.attempt)}: ${errorMessage(err)}`,
-          );
-        } else {
-          d.logger.error(
-            `${label(d, msg)} failed after ${attempts(msg.attempt)} and could not be sent to DLQ ${subject}: ${errorMessage(error)}`,
-            errorTrace(error),
-          );
-        }
-        recordOutcome(
-          d,
-          msg,
-          error === undefined
-            ? { action: 'dlq', subject, error: err }
-            : { action: 'drop', error: err },
-        );
+      case 'dlq':
+        await deadLetterSubscribe(d, msg, err);
         return;
-      }
       case 'drop':
         d.logger.error(
           `${label(d, msg)} failed, gave up after ${attempts(msg.attempt)}: ${errorMessage(err)}`,

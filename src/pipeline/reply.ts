@@ -1,4 +1,5 @@
 import { HttpException } from '@nestjs/common';
+import { UnmatchedCloudEventError } from '../cloudevents/errors.js';
 import { NatsDecodeError } from '../errors/errors.js';
 import type { Delivery } from './delivery.js';
 
@@ -11,6 +12,7 @@ export interface ServiceError {
 export function toServiceError(err: unknown): ServiceError {
   if (err instanceof HttpException) return { code: err.getStatus(), description: err.message };
   if (err instanceof NatsDecodeError) return { code: 400, description: 'Bad Request' };
+  if (err instanceof UnmatchedCloudEventError) return { code: 404, description: err.message };
   return { code: 500, description: 'Internal Server Error' };
 }
 
