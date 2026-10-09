@@ -502,5 +502,68 @@ describe('JetStreamConsumerAdapter', () => {
       await adapter.stop();
       await adapter.idle();
     });
+
+    it('forceStop naks a flushed batch waiting for a slot, which then never runs', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const batches: unknown[] = [];
+      const { adapter, fake } = setup(
+        async (payload) => {
+          batches.push(payload);
+          await gate;
+        },
+        { batch: { maxSize: 2, maxWait: 60_000 } },
+      );
+      await adapter.start();
+      const [a, b, c] = [fakeMsg(1), fakeMsg(2), fakeMsg(3)];
+      for (const m of [a, b, c]) fake.push(m as unknown as JsMsg);
+      await tick();
+      await tick();
+      expect(batches).toEqual([[1, 2]]);
+      await adapter.stop(); // flushes [3], which waits for the only slot
+      await tick();
+      expect(adapter.forceStop()).toEqual({ nakked: 3, cancelledRetries: 0 });
+      for (const m of [a, b, c]) expect(m.nak).toHaveBeenCalledTimes(1);
+      release();
+      await adapter.idle();
+      expect(batches).toEqual([[1, 2]]);
+      for (const m of [a, b, c]) expect(m.ack).not.toHaveBeenCalled();
+    });
+
+    it('forceStop naks messages still in the collector', async () => {
+      const invoke = vi.fn(() => Promise.resolve());
+      const { adapter, fake } = setup(invoke, { batch: { maxSize: 10, maxWait: 60_000 } });
+      await adapter.start();
+      const [a, b] = [fakeMsg(1), fakeMsg(2)];
+      fake.push(a as unknown as JsMsg);
+      fake.push(b as unknown as JsMsg);
+      await tick();
+      expect(adapter.forceStop()).toEqual({ nakked: 2, cancelledRetries: 0 });
+      expect(a.nak).toHaveBeenCalledTimes(1);
+      expect(b.nak).toHaveBeenCalledTimes(1);
+      await adapter.stop();
+      await adapter.idle();
+      expect(invoke).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [30_000, true],
+      [10_000, false],
+    ])('maxWait %s with a 30 s ack_wait → warns: %s', async (maxWait, warns) => {
+      const { adapter, logger } = setup(() => Promise.resolve(), {
+        batch: { maxWait },
+        consumerConfig: { ack_wait: 30_000_000_000, max_deliver: -1 },
+      });
+      await adapter.start();
+      const expected = expect.stringMatching(
+        new RegExp(
+          `C\\.m on "ORD/d" has batch\\.maxWait ${maxWait} ms >= the consumer's ack_wait 30000 ms`,
+        ),
+      );
+      if (warns) expect(logger.warn).toHaveBeenCalledWith(expected);
+      else expect(logger.warn).not.toHaveBeenCalled();
+      await adapter.stop();
+      await adapter.idle();
+    });
   });
 });

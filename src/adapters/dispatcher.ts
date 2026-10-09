@@ -36,7 +36,10 @@ export class Dispatcher<M> {
   private readonly collector?: BatchCollector<DispatchItem<M>>;
   /** Flushes of the collector started by or after `stop()`. */
   private draining: Promise<void> = Promise.resolve();
+  /** Flushed batches waiting for a slot. */
+  private readonly waiting = new Set<DispatchItem<M>[]>();
   private stopped = false;
+  private abandoned = false;
 
   constructor(private readonly opts: DispatcherOptions<M>) {
     this.limiter = createLimiter(opts.concurrency);
@@ -67,6 +70,11 @@ export class Dispatcher<M> {
     if (this.collector) {
       // Resolves once collected, or once its batch started when it completed one.
       await this.collector.add({ msg, attempt });
+      if (this.abandoned) {
+        // Collected after `abandon()` (it waited behind a running flush): never processed.
+        for (const item of this.collector.take()) this.reject(item.msg);
+        return;
+      }
       // Collected after `stop()` flushed (it waited behind a running flush): flush it too.
       if (this.stopped && this.collector.size > 0) await this.drain();
       return;
@@ -117,6 +125,20 @@ export class Dispatcher<M> {
     await this.limiter.idle();
   }
 
+  /**
+   * Gives up on every message received but not started: the ones being collected and
+   * the batches waiting for a slot, which will never be processed. Also stops the
+   * dispatcher. Returns those messages so the caller can hand them back.
+   */
+  abandon(): M[] {
+    this.stopped = true;
+    this.abandoned = true;
+    const items = [...(this.collector?.take() ?? [])];
+    for (const batch of this.waiting) items.push(...batch);
+    this.waiting.clear();
+    return items.map((item) => item.msg);
+  }
+
   /** Cancels every pending retry; returns how many were cancelled. */
   cancelRetries(): number {
     const count = this.retries.size;
@@ -136,8 +158,19 @@ export class Dispatcher<M> {
 
   /** Processes a collected batch once a slot is free; resolves when it started. */
   private async startBatch(items: DispatchItem<M>[]): Promise<void> {
-    // A batch flushed by `stop()` is still processed: it was collected for the handler.
+    if (this.abandoned) {
+      for (const item of items) this.reject(item.msg);
+      return;
+    }
+    // A batch flushed by `stop()` is still processed (it was collected for the handler),
+    // unless `abandon()` takes it while it waits.
+    this.waiting.add(items);
     await this.limiter.acquire();
+    if (!this.waiting.delete(items)) {
+      // Abandoned while waiting: `abandon()` handed its messages back.
+      this.limiter.release();
+      return;
+    }
     this.start(items);
   }
 

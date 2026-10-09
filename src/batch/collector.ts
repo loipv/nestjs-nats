@@ -85,6 +85,14 @@ export class BatchCollector<T> {
     await flushing;
   }
 
+  /** Removes and returns the collected items without flushing them (a running flush goes on). */
+  take(): T[] {
+    this.disarm();
+    const items = this.items;
+    this.items = [];
+    return items;
+  }
+
   private release(flushing: Promise<void>): void {
     if (this.flushing === flushing) this.flushing = undefined;
   }
