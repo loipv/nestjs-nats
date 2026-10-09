@@ -114,6 +114,33 @@ describe('validateHandlers', () => {
     ).not.toThrow();
   });
 
+  it('validates the idempotency ttl a handler resolves to', () => {
+    const withModuleTtl = (ttl: number | undefined) =>
+      ({
+        has: () => true,
+        get: () => ({ options: { idempotency: { ttl } } }),
+      }) as unknown as NatsConnectionManager;
+    for (const ttl of [0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => validateHandlers([def({ options: { idempotency: { ttl } } })], mgr)).toThrow(
+        /H\.on.*idempotency\.ttl/,
+      );
+      expect(() =>
+        validateHandlers([consumeDef('S', 'd', { options: { idempotency: { ttl } } })], mgr),
+      ).toThrow(NatsConfigError);
+      expect(() =>
+        validateHandlers([def({ options: { idempotency: true } })], withModuleTtl(ttl)),
+      ).toThrow(/idempotency\.ttl/);
+    }
+    // Not enabled: an invalid module ttl is irrelevant; valid values pass.
+    expect(() => validateHandlers([def()], withModuleTtl(0))).not.toThrow();
+    expect(() =>
+      validateHandlers([def({ options: { idempotency: { ttl: 1 } } })], withModuleTtl(0)),
+    ).not.toThrow();
+    expect(() =>
+      validateHandlers([def({ options: { idempotency: true } })], withModuleTtl(undefined)),
+    ).not.toThrow();
+  });
+
   it('accepts valid handlers', () => {
     expect(() =>
       validateHandlers(

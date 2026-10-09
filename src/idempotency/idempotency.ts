@@ -1,6 +1,11 @@
 import type { ConnectionEntry } from '../connection/connection-manager.js';
 import { NatsJetStreamContext } from '../context/nats-context.js';
-import type { Delivery, InboundMessage, InternalDelivery } from '../pipeline/delivery.js';
+import type {
+  Delivery,
+  HandlerInfo,
+  InboundMessage,
+  InternalDelivery,
+} from '../pipeline/delivery.js';
 import { SKIPPED } from '../pipeline/delivery.js';
 import type { InboundMiddleware, Next } from '../pipeline/types.js';
 import type { RetryPolicy } from '../settlement/retry.js';
@@ -36,6 +41,18 @@ export interface IdempotencyConfig {
   keyExtractor?: IdempotencyOptions['keyExtractor'];
   /** Redelivery delay of a JetStream message whose key is being processed elsewhere. */
   inProgressNakMs: number;
+}
+
+/**
+ * Stable identity of the handler a key belongs to, so handlers sharing a store (the
+ * connection's default one, or an external one) do not swallow each other's messages.
+ * It leaves the connection name out on purpose: replicas of an application sharing an
+ * external store must agree on it.
+ */
+function scopeOf(h: HandlerInfo): string {
+  return h.kind === 'consume'
+    ? `consume:${h.stream}/${h.durable}`
+    : `${h.kind}:${h.className}.${h.methodName}`;
 }
 
 const label = (d: Delivery): string =>
@@ -107,6 +124,7 @@ export function createIdempotency(cfg: IdempotencyConfig): InboundMiddleware {
   return {
     async handle(d: Delivery, next: Next): Promise<void> {
       const skipped = (d as InternalDelivery)[SKIPPED];
+      const scope = scopeOf(d.handler);
       const claimed: string[] = [];
       for (const msg of d.messages) {
         let result: Awaited<ReturnType<IdempotencyStore['claim']>>;
@@ -117,6 +135,7 @@ export function createIdempotency(cfg: IdempotencyConfig): InboundMiddleware {
             d.logger.debug?.(`No idempotency key for message on "${msg.subject}"; processing it`);
             continue;
           }
+          key = `${scope}|${key}`;
           result = await store.claim(key, ttl);
         } catch (err) {
           // Not processed: free what this delivery claimed and let settlement retry it.

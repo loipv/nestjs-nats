@@ -51,6 +51,26 @@ class Handlers {
 
   @Consume({
     stream: 'IDEM',
+    durable: 'shared-a',
+    idempotency: true,
+    config: { filter_subject: 'idem.js.shared' },
+  })
+  onSharedA(@Msg() msg: { subject: string }) {
+    this.count(`A:${msg.subject}`);
+  }
+
+  @Consume({
+    stream: 'IDEM',
+    durable: 'shared-b',
+    idempotency: true,
+    config: { filter_subject: 'idem.js.shared' },
+  })
+  onSharedB(@Msg() msg: { subject: string }) {
+    this.count(`B:${msg.subject}`);
+  }
+
+  @Consume({
+    stream: 'IDEM',
     durable: 'by-order',
     idempotency: { keyExtractor: (m: InboundMessage) => m.headers?.get('x-order-id') || undefined },
     config: { filter_subject: 'idem.js.order' },
@@ -148,9 +168,10 @@ describe('idempotency', () => {
   });
 
   it('processes messages without a key every time', async () => {
+    const before = handlers.runs['idem.core'] ?? 0;
     publishCore('idem.core');
     publishCore('idem.core');
-    await eventually(() => expect(handlers.runs['idem.core']).toBe(4));
+    await eventually(() => expect(handlers.runs['idem.core']).toBe(before + 2));
   });
 
   it('dedupes JetStream messages via keyExtractor and acks the duplicates', async () => {
@@ -172,6 +193,18 @@ describe('idempotency', () => {
     const info = await jsm.consumers.info('IDEM', 'by-order');
     expect(info.delivered.stream_seq).toBe(2);
     expect(info.num_redelivered).toBe(0);
+  });
+
+  it('runs every idempotent handler once for the same message', async () => {
+    // Two durables of one stream share the connection's store and see the same Nats-Msg-Id.
+    await js.publish('idem.js.shared', enc.encode('{}'), { msgID: 'shared-1' });
+    await eventually(() => {
+      expect(handlers.runs['A:idem.js.shared']).toBe(1);
+      expect(handlers.runs['B:idem.js.shared']).toBe(1);
+    });
+    await sleep(200);
+    expect(handlers.runs['A:idem.js.shared']).toBe(1);
+    expect(handlers.runs['B:idem.js.shared']).toBe(1);
   });
 
   it('processes again after ttl', async () => {

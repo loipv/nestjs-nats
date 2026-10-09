@@ -1,3 +1,5 @@
+import { NatsConfigError } from '../errors/errors.js';
+
 export type ClaimResult = 'claimed' | 'duplicate' | 'in-progress';
 
 /**
@@ -48,7 +50,13 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
   private sweeper?: NodeJS.Timeout;
 
   constructor(opts: InMemoryIdempotencyStoreOptions = {}) {
-    this.maxKeys = opts.maxKeys ?? DEFAULT_MAX_KEYS;
+    const maxKeys = opts.maxKeys ?? DEFAULT_MAX_KEYS;
+    if (!Number.isInteger(maxKeys) || maxKeys < 1) {
+      throw new NatsConfigError(
+        `InMemoryIdempotencyStore maxKeys ${String(maxKeys)} is invalid; expected an integer >= 1`,
+      );
+    }
+    this.maxKeys = maxKeys;
     this.now = opts.now ?? Date.now;
     this.sweeper = setInterval(() => this.sweep(), SWEEP_INTERVAL_MS);
     // The sweep must never keep the process alive.
@@ -74,6 +82,11 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
   release(key: string): Promise<void> {
     this.entries.delete(key);
     return Promise.resolve();
+  }
+
+  /** Number of entries held, expired ones not yet swept included. */
+  get size(): number {
+    return this.entries.size;
   }
 
   close(): Promise<void> {
