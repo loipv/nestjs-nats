@@ -5,10 +5,16 @@ import {
   type OnModuleInit,
 } from '@nestjs/common';
 import { DiscoveryService } from '@nestjs/core';
+import type { InstanceWrapper } from '@nestjs/core/injector/instance-wrapper.js';
 import type { HandlerAdapter } from '../adapters/adapter.js';
 import { CoreSubscriptionAdapter } from '../adapters/core-subscription.adapter.js';
 import { JetStreamConsumerAdapter } from '../adapters/jetstream-consumer.adapter.js';
+import {
+  NatsServiceAdapter,
+  type ServiceEndpointDefinition,
+} from '../adapters/service-endpoint.adapter.js';
 import { NatsConnectionManager } from '../connection/connection-manager.js';
+import type { NatsServiceOptions } from '../decorators/handler.decorators.js';
 import type { HandlerDefinition } from '../discovery/handler-explorer.js';
 import { HandlerExplorer } from '../discovery/handler-explorer.js';
 import { validateHandlers } from '../discovery/handler-validator.js';
@@ -59,9 +65,7 @@ export class NatsLifecycle
     try {
       const defs = this.explorer.explore();
       validateHandlers(defs, this.manager);
-      for (const def of defs) {
-        const adapter = this.createAdapter(def);
-        if (!adapter) continue;
+      for (const adapter of this.createAdapters(defs)) {
         this.adapters.push(adapter);
         await adapter.start();
       }
@@ -87,17 +91,40 @@ export class NatsLifecycle
     await this.manager.closeAll();
   }
 
-  private createAdapter(def: HandlerDefinition): HandlerAdapter | undefined {
-    const entry = this.manager.get(def.connection);
-    switch (def.kind) {
-      case 'subscribe':
-        return new CoreSubscriptionAdapter(def, entry);
-      case 'consume':
-        return new JetStreamConsumerAdapter(def, entry, new NatsStreamManager(entry));
-      default:
-        // The `service-endpoint` adapter is added by a later task.
-        return undefined;
+  private createAdapters(defs: HandlerDefinition[]): HandlerAdapter[] {
+    const adapters: HandlerAdapter[] = [];
+    // One service adapter per `@NatsService` provider, grouping all of its endpoints.
+    const services = new Map<
+      InstanceWrapper,
+      { service: NatsServiceOptions; endpoints: ServiceEndpointDefinition[] }
+    >();
+    for (const def of defs) {
+      const entry = this.manager.get(def.connection);
+      switch (def.kind) {
+        case 'subscribe':
+          adapters.push(new CoreSubscriptionAdapter(def, entry));
+          break;
+        case 'consume':
+          adapters.push(new JetStreamConsumerAdapter(def, entry, new NatsStreamManager(entry)));
+          break;
+        case 'service-endpoint': {
+          // `validateHandlers` already rejected endpoints of classes without `@NatsService`.
+          if (def.service === undefined) break;
+          const group = services.get(def.wrapper) ?? { service: def.service, endpoints: [] };
+          group.endpoints.push(def);
+          services.set(def.wrapper, group);
+          break;
+        }
+      }
     }
+    for (const { service, endpoints } of services.values()) {
+      const [first] = endpoints;
+      if (first)
+        adapters.push(
+          new NatsServiceAdapter(service, endpoints, this.manager.get(first.connection)),
+        );
+    }
+    return adapters;
   }
 
   /** Releases everything after a failed init/bootstrap so no socket stays open. */
