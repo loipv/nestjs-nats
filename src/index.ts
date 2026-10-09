@@ -1,3 +1,4 @@
+export { Batcher } from './batch/batcher.js';
 export type { BatchOptions } from './batch/collector.js';
 export { NatsClient } from './client/nats-client.js';
 export type { Codec } from './codec/codec.js';
@@ -32,6 +33,11 @@ export {
 } from './errors/errors.js';
 export type { IdempotencyOptions } from './idempotency/idempotency.js';
 export type { ClaimResult, IdempotencyStore } from './idempotency/store.js';
+export { InMemoryIdempotencyStore } from './idempotency/store.js';
+export type {
+  JetStreamPublishOptions,
+  PublishManyResult,
+} from './jetstream/jetstream-client.js';
 export { JetStreamClient } from './jetstream/jetstream-client.js';
 export { NatsStreamManager } from './jetstream/stream-manager.js';
 export {
@@ -65,3 +71,6 @@ export type {
   OutboundMiddleware,
   OutgoingMessage,
 } from './pipeline/types.js';
+export type { DlqOptions } from './settlement/dlq.js';
+export type { RetryOptions } from './settlement/retry.js';
+export { defaultIsRetryable } from './settlement/retry.js';
