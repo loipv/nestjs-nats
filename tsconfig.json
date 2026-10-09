@@ -10,7 +10,8 @@
     "declaration": true,
     "sourceMap": true,
     "outDir": "dist",
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "types": ["node"]
   },
   "include": ["src", "test"]
 }
