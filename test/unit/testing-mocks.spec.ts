@@ -147,4 +147,15 @@ describe('createMockJetStreamClient publishAtomic', () => {
     expect(first?.atomic).toEqual({ batch: expect.any(String), index: 0, count: 2 });
     expect(second?.atomic).toEqual({ batch: first?.atomic?.batch, index: 1, count: 2 });
   });
+
+  it('gives each batch its own id', async () => {
+    const mock = createMockJetStreamClient();
+    const one = await mock.publishAtomic([{ subject: 'a' }, { subject: 'b' }]);
+    const two = await mock.publishAtomic([{ subject: 'a' }, { subject: 'b' }]);
+    const [a, , c] = mock.published;
+    expect(one.batch).toEqual(expect.any(String));
+    expect(two.batch).not.toBe(one.batch);
+    expect(c?.atomic?.batch).not.toBe(a?.atomic?.batch);
+    expect([a?.atomic?.batch, c?.atomic?.batch]).toEqual([one.batch, two.batch]);
+  });
 });
