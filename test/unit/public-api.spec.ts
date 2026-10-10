@@ -2,6 +2,9 @@ import { readFile } from 'node:fs/promises';
 import { expect, expectTypeOf, it } from 'vitest';
 import * as health from '../../src/health/index.js';
 import type {
+  AtomicMessage,
+  AtomicPublishAck,
+  AtomicPublishOptions,
   Batcher,
   BatchOptions,
   ClaimResult,
@@ -50,6 +53,7 @@ it('exports the runtime API', () =>
       'JetStreamClient',
       'Msg',
       'NatsClient',
+      'NatsAtomicPublishError',
       'NatsConfigError',
       'NatsConnectionError',
       'NatsBatchContext',
@@ -179,6 +183,9 @@ it('exports the reliability types', () => {
   expectTypeOf<BatchOptions>().toHaveProperty('maxSize');
   expectTypeOf<JetStreamPublishOptions>().not.toBeAny();
   expectTypeOf<PublishManyResult>().toHaveProperty('ok');
+  expectTypeOf<AtomicMessage>().toHaveProperty('subject');
+  expectTypeOf<AtomicPublishOptions>().toHaveProperty('timeout');
+  expectTypeOf<AtomicPublishAck>().toHaveProperty('count');
   // A type only: instances come from JetStreamClient.batcher().
   expectTypeOf<Batcher>().toHaveProperty('add');
   expectTypeOf<Batcher>().toHaveProperty('flush');

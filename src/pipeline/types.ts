@@ -20,6 +20,11 @@ export interface OutgoingMessage {
    * them, with the message's final `codec` and `headers`.
    */
   cloudEvent?: { meta: CloudEventMeta; mode: 'binary' | 'structured' };
+  /**
+   * Set on every message of a `publishAtomic` batch (a single message too): its position in
+   * the batch and the batch size. Its `next()` settles once the whole batch is committed.
+   */
+  atomic?: { index: number; count: number };
 }
 
 export interface OutboundMiddleware {

@@ -217,6 +217,16 @@ describe('tracing()', () => {
     expect(span.attributes['messaging.message.id']).toBe('ce-1');
   });
 
+  it('records the batch size of an atomic publish', async () => {
+    const m = outgoing('jetstream');
+    m.atomic = { index: 1, count: 3 };
+    await outbound(m);
+    expect(only().attributes['messaging.batch.message_count']).toBe(3);
+    t.reset();
+    await outbound(outgoing('jetstream'));
+    expect(only().attributes).not.toHaveProperty('messaging.batch.message_count');
+  });
+
   it('makes the publish span a child of the active span', async () => {
     const parent = trace.getTracer('test').startSpan('parent');
     await context.with(trace.setSpan(context.active(), parent), () =>

@@ -1,8 +1,4 @@
-import type {
-  JetStreamPublishOptions as NatsPublishOptions,
-  PubAck,
-  StreamExpectations,
-} from '@nats-io/jetstream';
+import type { PubAck, StreamExpectations } from '@nats-io/jetstream';
 import {
   Batcher,
   type ContextRunner,
@@ -13,16 +9,15 @@ import type { CloudEventInit } from '../cloudevents/types.js';
 import type { Codec } from '../codec/codec.js';
 import type { NatsHeadersInit } from '../codec/headers.js';
 import type { ConnectionEntry } from '../connection/connection-registry.js';
-import { NatsConfigError, NatsModuleError } from '../errors/errors.js';
-import { compose } from '../pipeline/compose.js';
+import { NatsConfigError } from '../errors/errors.js';
+import { createOutgoingMessage } from '../pipeline/outbound.js';
 import {
-  createOutgoingMessage,
-  encodeOutgoing,
-  outboundMiddlewares,
-} from '../pipeline/outbound.js';
-
-/** JetStream's de-duplication header, set from the `msgId` publish option. */
-const MSG_ID_HEADER = 'Nats-Msg-Id';
+  type AtomicMessage,
+  type AtomicPublishAck,
+  type AtomicPublishOptions,
+  publishAtomic,
+} from './atomic.js';
+import { MSG_ID_HEADER, publishOutgoing } from './publish.js';
 
 /** Default cap of publishes awaiting their PubAck at once in `publishMany`. */
 const DEFAULT_PUBLISH_WINDOW = 256;
@@ -66,20 +61,20 @@ export class JetStreamClient {
       const ceId = message.cloudEvent?.meta.id;
       if (ceId !== undefined) message.headers.set(MSG_ID_HEADER, ceId);
     }
-    let ack: PubAck | undefined;
-    const run = compose(outboundMiddlewares(this.entry), async (m) => {
-      const payload = encodeOutgoing(m);
-      const publishOpts: Partial<NatsPublishOptions> = {};
-      if (m.headers.keys().length > 0) publishOpts.headers = m.headers;
-      if (opts.expect !== undefined) publishOpts.expect = opts.expect;
-      if (opts.timeout !== undefined) publishOpts.timeout = opts.timeout;
-      ack = await this.entry.js().publish(m.subject, payload, publishOpts);
-    });
-    await run(message);
-    if (!ack) {
-      throw new NatsModuleError(`JetStream publish to "${subject}" produced no acknowledgement`);
-    }
-    return ack;
+    return publishOutgoing(this.entry, message, opts);
+  }
+
+  /**
+   * Publishes `messages` (1 to 1000) as one atomic batch: the stream stores all of them or
+   * none (NATS server >= 2.12, stream with `allow_atomic`). Each message runs through the
+   * outbound plugins, whose `next()` settles with the commit. A single message is published
+   * as usual. A `Nats-Msg-Id` header is refused, and a CloudEvent's id is not used as one.
+   */
+  publishAtomic(
+    messages: readonly AtomicMessage[],
+    opts?: AtomicPublishOptions,
+  ): Promise<AtomicPublishAck> {
+    return publishAtomic(this.entry, messages, opts);
   }
 
   /**
