@@ -6,7 +6,7 @@ import {
 } from '@nats-io/jetstream';
 import { type ResolvedBatchOptions, resolveBatchOptions } from '../batch/collector.js';
 import type { Codec } from '../codec/codec.js';
-import type { ConnectionEntry } from '../connection/connection-manager.js';
+import type { ConnectionEntry } from '../connection/connection-registry.js';
 import { NatsJetStreamContext } from '../context/nats-context.js';
 import type { HandlerDefinition } from '../discovery/handler-explorer.js';
 import { NatsConfigError } from '../errors/errors.js';

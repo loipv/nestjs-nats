@@ -3,7 +3,7 @@ import {
   NatsServiceAdapter,
   type ServiceEndpointDefinition,
 } from '../../src/adapters/service-endpoint.adapter.js';
-import type { ConnectionEntry } from '../../src/connection/connection-manager.js';
+import type { ConnectionEntry } from '../../src/connection/connection-registry.js';
 import { NatsConfigError } from '../../src/errors/errors.js';
 
 const svcm = vi.hoisted(() => ({ add: vi.fn() }));

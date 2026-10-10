@@ -13,7 +13,7 @@ import {
   NatsServiceAdapter,
   type ServiceEndpointDefinition,
 } from '../adapters/service-endpoint.adapter.js';
-import { type ConnectionEntry, NatsConnectionManager } from '../connection/connection-manager.js';
+import { type ConnectionEntry, ConnectionRegistry } from '../connection/connection-registry.js';
 import { redactText } from '../connection/redact.js';
 import type { NatsServiceOptions } from '../decorators/handler.decorators.js';
 import type { HandlerDefinition } from '../discovery/handler-explorer.js';
@@ -56,7 +56,7 @@ export class NatsLifecycle
   private readonly closedStores = new WeakSet<IdempotencyStore>();
 
   constructor(
-    private readonly manager: NatsConnectionManager,
+    private readonly manager: ConnectionRegistry,
     private readonly discovery: DiscoveryService,
     private readonly explorer: HandlerExplorer,
   ) {}

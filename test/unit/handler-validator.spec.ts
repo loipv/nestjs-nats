@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { NatsConnectionManager } from '../../src/connection/connection-manager.js';
+import type { ConnectionRegistry } from '../../src/connection/connection-registry.js';
 import type { HandlerDefinition } from '../../src/discovery/handler-explorer.js';
 import { validateHandlers } from '../../src/discovery/handler-validator.js';
 import { NatsConfigError } from '../../src/errors/errors.js';
@@ -7,7 +7,7 @@ import { NatsConfigError } from '../../src/errors/errors.js';
 const mgr = {
   has: (name: string) => name === 'default',
   get: () => ({ options: {} }),
-} as unknown as NatsConnectionManager;
+} as unknown as ConnectionRegistry;
 
 interface Opts {
   connection?: string;
@@ -113,7 +113,7 @@ describe('validateHandlers', () => {
 
   describe('dlq subject', () => {
     const withModuleDlq = (dlq: unknown) =>
-      ({ has: () => true, get: () => ({ options: { dlq } }) }) as unknown as NatsConnectionManager;
+      ({ has: () => true, get: () => ({ options: { dlq } }) }) as unknown as ConnectionRegistry;
 
     it.each([
       ['an empty handler subject', mgr, { subject: '' }],
@@ -168,7 +168,7 @@ describe('validateHandlers', () => {
     const bad = {
       has: () => true,
       get: () => ({ options: { retry: { initialDelay: 100_000 } } }),
-    } as unknown as NatsConnectionManager;
+    } as unknown as ConnectionRegistry;
     // module initialDelay 100000 > default maxDelay 60000
     expect(() => validateHandlers([def()], bad)).toThrow(/maxDelay/);
   });
@@ -190,7 +190,7 @@ describe('validateHandlers', () => {
       ({
         has: () => true,
         get: () => ({ options: { idempotency: { ttl } } }),
-      }) as unknown as NatsConnectionManager;
+      }) as unknown as ConnectionRegistry;
     for (const ttl of [0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(() => validateHandlers([def({ options: { idempotency: { ttl } } })], mgr)).toThrow(
         /H\.on.*idempotency\.ttl/,
@@ -231,7 +231,7 @@ describe('validateHandlers', () => {
     const two = {
       has: () => true,
       get: () => ({ options: {} }),
-    } as unknown as NatsConnectionManager;
+    } as unknown as ConnectionRegistry;
     expect(() =>
       validateHandlers([consumeDef('S', 'd'), consumeDef('S', 'd', { connection: 'b' })], two),
     ).not.toThrow();

@@ -1,6 +1,6 @@
 import { headers } from '@nats-io/transport-node';
 import { describe, expect, it, vi } from 'vitest';
-import type { ConnectionEntry } from '../../src/connection/connection-manager.js';
+import type { ConnectionEntry } from '../../src/connection/connection-registry.js';
 import { CLOUD_EVENT, NatsContext, NatsJetStreamContext } from '../../src/context/nats-context.js';
 import {
   createIdempotency,

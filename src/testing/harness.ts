@@ -10,7 +10,7 @@ import { resolveCloudEvent, writeCloudEvent } from '../cloudevents/codec.js';
 import type { CloudEventInit } from '../cloudevents/types.js';
 import { type Codec, encodePayload } from '../codec/codec.js';
 import { type NatsHeadersInit, toMsgHdrs } from '../codec/headers.js';
-import { type ConnectionEntry, NatsConnectionManager } from '../connection/connection-manager.js';
+import { type ConnectionEntry, ConnectionRegistry } from '../connection/connection-registry.js';
 import { NatsContext, NatsJetStreamContext } from '../context/nats-context.js';
 import { type HandlerDefinition, HandlerExplorer } from '../discovery/handler-explorer.js';
 import { validateHandlers } from '../discovery/handler-validator.js';
@@ -130,7 +130,7 @@ export class NatsTestHarness {
 
   constructor(
     private readonly explorer: HandlerExplorer,
-    private readonly manager: NatsConnectionManager,
+    private readonly manager: ConnectionRegistry,
   ) {}
 
   static create(app: INestApplicationContext): NatsTestHarness {

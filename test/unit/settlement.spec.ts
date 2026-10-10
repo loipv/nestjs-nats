@@ -1,7 +1,7 @@
 import { headers, type MsgHdrs } from '@nats-io/transport-node';
 import { BadRequestException } from '@nestjs/common';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { ConnectionEntry } from '../../src/connection/connection-manager.js';
+import type { ConnectionEntry } from '../../src/connection/connection-registry.js';
 import { NatsContext, NatsJetStreamContext } from '../../src/context/nats-context.js';
 import { NatsDecodeError, NatsModuleError, NonRetryableError } from '../../src/errors/errors.js';
 import { IdempotencyStoreError } from '../../src/idempotency/idempotency.js';

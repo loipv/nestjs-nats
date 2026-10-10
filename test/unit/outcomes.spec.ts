@@ -1,7 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 import { jsonCodec } from '../../src/codec/codec.js';
-import type { ConnectionEntry } from '../../src/connection/connection-manager.js';
+import type { ConnectionEntry } from '../../src/connection/connection-registry.js';
 import type { NatsBatchContext } from '../../src/context/nats-batch-context.js';
 import { NatsContext, NatsJetStreamContext } from '../../src/context/nats-context.js';
 import type { HandlerDefinition } from '../../src/discovery/handler-explorer.js';

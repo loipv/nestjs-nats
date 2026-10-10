@@ -12,6 +12,7 @@ import { DiscoveryModule } from '@nestjs/core';
 import { NatsClient } from '../client/nats-client.js';
 import { jsonCodec } from '../codec/codec.js';
 import { NatsConnectionManager } from '../connection/connection-manager.js';
+import { ConnectionRegistry } from '../connection/connection-registry.js';
 import { HandlerExplorer } from '../discovery/handler-explorer.js';
 import { NatsConfigError } from '../errors/errors.js';
 import { JetStreamClient } from '../jetstream/jetstream-client.js';
@@ -30,14 +31,11 @@ import { NatsTestHarness } from './harness.js';
 import { mockJetStreamClientOf, mockNatsClientOf } from './mock-clients.js';
 
 /**
- * Internal: a connection manager whose connections are fake: nothing is sent over the
+ * Internal: a connection registry whose connections are fake: nothing is sent over the
  * network and JetStream management is unavailable.
  */
 @Injectable()
-export class TestingNatsConnectionManager
-  extends NatsConnectionManager
-  implements OnApplicationShutdown
-{
+export class TestingConnectionRegistry extends ConnectionRegistry implements OnApplicationShutdown {
   protected override openConnection(
     _name: string,
     options: NatsModuleOptions,
@@ -69,11 +67,12 @@ export class TestingNatsConnectionManager
 @Module({
   imports: [DiscoveryModule],
   providers: [
-    { provide: NatsConnectionManager, useClass: TestingNatsConnectionManager },
+    { provide: ConnectionRegistry, useClass: TestingConnectionRegistry },
+    NatsConnectionManager,
     HandlerExplorer,
     NatsTestHarness,
   ],
-  exports: [NatsConnectionManager, HandlerExplorer, NatsTestHarness],
+  exports: [ConnectionRegistry, NatsConnectionManager, HandlerExplorer, NatsTestHarness],
 })
 class NatsTestingCoreModule {}
 
@@ -100,25 +99,25 @@ export class NatsTestingModule {
       {
         provide: connectionToken,
         useFactory: async (
-          manager: NatsConnectionManager,
+          manager: ConnectionRegistry,
           opts: NatsModuleOptions,
         ): Promise<NatsConnection> => (await manager.connect(name, opts)).nc,
-        inject: [NatsConnectionManager, optionsToken],
+        inject: [ConnectionRegistry, optionsToken],
       },
       {
         provide: clientToken,
-        useFactory: (manager: NatsConnectionManager) => mockNatsClientOf(manager.get(name)),
-        inject: [NatsConnectionManager, connectionToken],
+        useFactory: (manager: ConnectionRegistry) => mockNatsClientOf(manager.get(name)),
+        inject: [ConnectionRegistry, connectionToken],
       },
       {
         provide: jetStreamToken,
-        useFactory: (manager: NatsConnectionManager) => mockJetStreamClientOf(manager.get(name)),
-        inject: [NatsConnectionManager, connectionToken],
+        useFactory: (manager: ConnectionRegistry) => mockJetStreamClientOf(manager.get(name)),
+        inject: [ConnectionRegistry, connectionToken],
       },
       {
         provide: streamManagerToken,
-        useFactory: (manager: NatsConnectionManager) => new NatsStreamManager(manager.get(name)),
-        inject: [NatsConnectionManager, connectionToken],
+        useFactory: (manager: ConnectionRegistry) => new NatsStreamManager(manager.get(name)),
+        inject: [ConnectionRegistry, connectionToken],
       },
     ];
     const exports: NonNullable<DynamicModule['exports']> = [

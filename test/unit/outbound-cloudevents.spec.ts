@@ -1,7 +1,7 @@
 import { type MsgHdrs } from '@nats-io/transport-node';
 import { describe, expect, it, vi } from 'vitest';
 import { NatsClient } from '../../src/client/nats-client.js';
-import type { ConnectionEntry } from '../../src/connection/connection-manager.js';
+import type { ConnectionEntry } from '../../src/connection/connection-registry.js';
 import { NatsConfigError } from '../../src/errors/errors.js';
 import { JetStreamClient } from '../../src/jetstream/jetstream-client.js';
 import type { NatsModuleOptions } from '../../src/module/options.js';

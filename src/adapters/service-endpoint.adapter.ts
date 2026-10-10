@@ -1,7 +1,7 @@
 import { type Service, type ServiceConfig, type ServiceMsg, Svcm } from '@nats-io/services';
 import type { QueuedIterator } from '@nats-io/transport-node';
 import { type Codec, encodePayload } from '../codec/codec.js';
-import type { ConnectionEntry } from '../connection/connection-manager.js';
+import type { ConnectionEntry } from '../connection/connection-registry.js';
 import { NatsContext } from '../context/nats-context.js';
 import type { NatsServiceOptions } from '../decorators/handler.decorators.js';
 import type { HandlerDefinition } from '../discovery/handler-explorer.js';

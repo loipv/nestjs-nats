@@ -1,5 +1,5 @@
 import { cloudEventKey, cloudEventKeyOf } from '../cloudevents/codec.js';
-import type { ConnectionEntry } from '../connection/connection-manager.js';
+import type { ConnectionEntry } from '../connection/connection-registry.js';
 import { type NatsContext, NatsJetStreamContext } from '../context/nats-context.js';
 import { NatsModuleError } from '../errors/errors.js';
 import type {

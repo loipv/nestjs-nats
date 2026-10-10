@@ -5,7 +5,7 @@ import { Test } from '@nestjs/testing';
 import { describe, expect, it, vi } from 'vitest';
 import type { CloudEventMeta } from '../../src/cloudevents/types.js';
 import { jsonCodec } from '../../src/codec/codec.js';
-import type { ConnectionEntry } from '../../src/connection/connection-manager.js';
+import type { ConnectionEntry } from '../../src/connection/connection-registry.js';
 import { NatsContext, NatsJetStreamContext } from '../../src/context/nats-context.js';
 import {
   CloudEventRouter,

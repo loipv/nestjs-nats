@@ -18,6 +18,7 @@ import type {
   JetStreamPublishOptions,
   MessageOutcome,
   NatsBatchContext,
+  NatsConnectionManager,
   NatsContext,
   NatsHeadersInit,
   PublishManyResult,
@@ -165,6 +166,17 @@ it('exports the reliability types', () => {
   expectTypeOf<Batcher>().toHaveProperty('flush');
   expectTypeOf<Batcher>().toHaveProperty('close');
   expectTypeOf<CloudEventRouterOptions>().toHaveProperty('unmatched');
+});
+
+it('exposes only the query API on NatsConnectionManager', () => {
+  // Connecting, closing, the raw connection entries and the testing seams are internal.
+  expectTypeOf<keyof NatsConnectionManager>().toEqualTypeOf<
+    'has' | 'names' | 'status' | 'status$'
+  >();
+  const methods = Object.getOwnPropertyNames(api.NatsConnectionManager.prototype).filter(
+    (name) => name !== 'constructor',
+  );
+  expect(methods.sort()).toEqual(['has', 'names', 'status', 'status$']);
 });
 
 it('exports NatsHeadersInit, not a HeadersInit shadowing the global one', () => {

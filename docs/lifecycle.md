@@ -31,4 +31,4 @@ Shutdown runs in Nest's `beforeApplicationShutdown` hook, and Nest calls every p
 
 Handlers are singletons. Handlers in `REQUEST`- or `TRANSIENT`-scoped providers are rejected at startup.
 
-`NatsConnectionManager` exposes `status(name?)` (`connected`, `reconnecting`, `draining` or `closed`) and `status$(name?)`, an Observable of connection events such as disconnect, reconnect and lame-duck mode.
+`NatsConnectionManager` reports on the module's connections; opening and closing them is left to the module. It exposes `names()` (the registered connection names), `has(name)`, `status(name?)` (`connected`, `reconnecting`, `draining` or `closed`, with the `server` while connected) and `status$(name?)`, an Observable of connection events such as disconnect, reconnect and lame-duck mode.

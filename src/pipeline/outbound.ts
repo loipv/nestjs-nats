@@ -2,7 +2,7 @@ import { resolveCloudEvent, writeCloudEvent } from '../cloudevents/codec.js';
 import type { CloudEventInit } from '../cloudevents/types.js';
 import { type Codec, encodePayload, jsonCodec } from '../codec/codec.js';
 import { type NatsHeadersInit, toMsgHdrs } from '../codec/headers.js';
-import type { ConnectionEntry } from '../connection/connection-manager.js';
+import type { ConnectionEntry } from '../connection/connection-registry.js';
 import type { Next, OutgoingMessage } from './types.js';
 
 export type OutboundHandler = (m: OutgoingMessage, next: Next) => Promise<void>;

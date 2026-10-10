@@ -1,10 +1,11 @@
 import { Injectable, Module } from '@nestjs/common';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { NatsClient } from '../../src/client/nats-client.js';
+import { NatsConnectionManager } from '../../src/connection/connection-manager.js';
 import {
   type ConnectionEntry,
-  NatsConnectionManager,
-} from '../../src/connection/connection-manager.js';
+  ConnectionRegistry,
+} from '../../src/connection/connection-registry.js';
 import { NatsConfigError } from '../../src/errors/errors.js';
 import { JetStreamClient } from '../../src/jetstream/jetstream-client.js';
 import { NatsStreamManager } from '../../src/jetstream/stream-manager.js';
@@ -24,7 +25,7 @@ import { type NatsTestServer, startNats } from './support/nats-server.js';
 /** Records every connection the managers open, also when connect() rejects afterwards. */
 function recordConnections(): ConnectionEntry[] {
   const opened: ConnectionEntry[] = [];
-  const proto = NatsConnectionManager.prototype as unknown as {
+  const proto = ConnectionRegistry.prototype as unknown as {
     openConnection: (...args: unknown[]) => Promise<ConnectionEntry['nc']>;
   };
   const original = proto.openConnection;

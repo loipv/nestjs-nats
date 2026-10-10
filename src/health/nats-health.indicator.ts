@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { type HealthIndicatorResult, HealthIndicatorService } from '@nestjs/terminus';
-import { NatsConnectionManager } from '../connection/connection-manager.js';
+import { ConnectionRegistry } from '../connection/connection-registry.js';
 import { redactServers, redactText } from '../connection/redact.js';
 import { NatsConfigError } from '../errors/errors.js';
 import { DEFAULT_CONNECTION } from '../module/tokens.js';
@@ -44,7 +44,7 @@ async function bounded<T>(fn: () => Promise<T>, ms: number): Promise<Bounded<T>>
 export class NatsHealthIndicator {
   constructor(
     private readonly health: HealthIndicatorService,
-    private readonly manager: NatsConnectionManager,
+    private readonly manager: ConnectionRegistry,
   ) {}
 
   async isHealthy<K extends string>(

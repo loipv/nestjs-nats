@@ -2,7 +2,7 @@ import type { JetStreamClient as NatsJetStreamClient } from '@nats-io/jetstream'
 import type { NatsConnection } from '@nats-io/transport-node';
 import { NatsClient } from '../client/nats-client.js';
 import { type Codec, jsonCodec } from '../codec/codec.js';
-import type { ConnectionEntry } from '../connection/connection-manager.js';
+import type { ConnectionEntry } from '../connection/connection-registry.js';
 import { NatsConfigError, NatsModuleError } from '../errors/errors.js';
 import { type IdempotencyStore, InMemoryIdempotencyStore } from '../idempotency/store.js';
 import { JetStreamClient } from '../jetstream/jetstream-client.js';

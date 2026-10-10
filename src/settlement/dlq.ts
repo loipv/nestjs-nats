@@ -1,6 +1,6 @@
 import type { JsMsg } from '@nats-io/jetstream';
 import { headers, type MsgHdrs, NoRespondersError } from '@nats-io/transport-node';
-import type { ConnectionEntry } from '../connection/connection-manager.js';
+import type { ConnectionEntry } from '../connection/connection-registry.js';
 import { NatsModuleError } from '../errors/errors.js';
 import type { HandlerInfo, InboundMessage } from '../pipeline/delivery.js';
 

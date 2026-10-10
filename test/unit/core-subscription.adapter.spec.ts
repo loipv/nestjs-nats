@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { CoreSubscriptionAdapter } from '../../src/adapters/core-subscription.adapter.js';
-import type { ConnectionEntry } from '../../src/connection/connection-manager.js';
+import type { ConnectionEntry } from '../../src/connection/connection-registry.js';
 import type { HandlerDefinition } from '../../src/discovery/handler-explorer.js';
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));

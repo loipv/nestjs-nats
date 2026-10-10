@@ -7,7 +7,7 @@ import {
 import type { CloudEventInit } from '../cloudevents/types.js';
 import { type Codec, decodePayload } from '../codec/codec.js';
 import type { NatsHeadersInit } from '../codec/headers.js';
-import type { ConnectionEntry } from '../connection/connection-manager.js';
+import type { ConnectionEntry } from '../connection/connection-registry.js';
 import { redactText } from '../connection/redact.js';
 import { NatsModuleError, NatsRequestError } from '../errors/errors.js';
 import { compose } from '../pipeline/compose.js';

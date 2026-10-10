@@ -1,6 +1,6 @@
 import { HealthIndicatorService } from '@nestjs/terminus';
 import { describe, expect, it, vi } from 'vitest';
-import type { NatsConnectionManager } from '../../src/connection/connection-manager.js';
+import type { ConnectionRegistry } from '../../src/connection/connection-registry.js';
 import { NatsConfigError } from '../../src/errors/errors.js';
 import { NatsHealthIndicator } from '../../src/health/nats-health.indicator.js';
 
@@ -33,7 +33,7 @@ function setup(opts: FakeOptions = {}) {
         ? { server: opts.server ?? 'nats://u:p@h:4222' }
         : {}),
     }),
-  } as unknown as NatsConnectionManager;
+  } as unknown as ConnectionRegistry;
   return {
     ind: new NatsHealthIndicator(new HealthIndicatorService(), manager),
     entry,
@@ -198,7 +198,7 @@ describe('NatsHealthIndicator', () => {
       has: () => {
         throw new Error('kaput');
       },
-    } as unknown as NatsConnectionManager;
+    } as unknown as ConnectionRegistry;
     const ind = new NatsHealthIndicator(new HealthIndicatorService(), manager);
     expect((await ind.isHealthy('nats')).nats).toMatchObject({
       status: 'down',
