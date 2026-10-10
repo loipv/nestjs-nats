@@ -2,26 +2,43 @@
 // Runs `npm pack --dry-run --json` and fails (exit 1) on any violation.
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { dirname, posix } from 'node:path';
+import { join, posix, resolve } from 'node:path';
 
-const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+// Paths are resolved from the repository root, not the cwd.
+const root = resolve(import.meta.dirname, '..');
+const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 
-const out = execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
-  encoding: 'utf8',
-  stdio: ['ignore', 'pipe', 'inherit'],
-  maxBuffer: 64 * 1024 * 1024,
-});
-const [info] = JSON.parse(out);
+let info;
+try {
+  const out = execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
+    cwd: root,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'inherit'],
+    maxBuffer: 64 * 1024 * 1024,
+    shell: process.platform === 'win32',
+  });
+  [info] = JSON.parse(out);
+} catch (err) {
+  const detail = err.status != null ? `exit ${err.status}` : err.message;
+  console.error(
+    `check:pack FAILED: \`npm pack --dry-run --json\` did not succeed (${detail}); see the npm output above.`,
+  );
+  process.exit(1);
+}
 const files = info.files.map((f) => f.path);
 const fileSet = new Set(files);
 
 const violations = [];
 
-// 1. Only allowed paths.
-const allowedTop = new Set(['package.json', 'README.md', 'LICENSE', 'CHANGELOG.md']);
+// 1. Only allowed paths, and every required top-level file is present.
+const requiredTop = ['package.json', 'README.md', 'LICENSE', 'CHANGELOG.md'];
+const allowedTop = new Set(requiredTop);
 const allowed = (p) => allowedTop.has(p) || p.startsWith('dist/') || p.startsWith('src/');
 for (const p of files) {
   if (!allowed(p)) violations.push(`unexpected file in tarball: ${p}`);
+}
+for (const p of requiredTop) {
+  if (!fileSet.has(p)) violations.push(`required file missing from tarball: ${p}`);
 }
 
 // 2. Every exports entry (types + default) must exist.
@@ -52,14 +69,14 @@ for (const p of files) {
   if (!p.startsWith('dist/') || !p.endsWith('.js.map')) continue;
   let map;
   try {
-    map = JSON.parse(readFileSync(p, 'utf8'));
+    map = JSON.parse(readFileSync(join(root, p), 'utf8'));
   } catch (err) {
     violations.push(`cannot read sourcemap ${p}: ${err.message}`);
     continue;
   }
-  const root = map.sourceRoot ?? '';
+  const sourceRoot = map.sourceRoot ?? '';
   for (const source of map.sources ?? []) {
-    const resolved = posix.normalize(posix.join(dirname(p), root, source));
+    const resolved = posix.normalize(posix.join(posix.dirname(p), sourceRoot, source));
     if (!fileSet.has(resolved)) {
       violations.push(`sourcemap ${p} references file not in tarball: ${resolved}`);
     }
