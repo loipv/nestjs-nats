@@ -38,3 +38,15 @@ Collected from per-task and final reviews of feat/consumers-atomic (2792fdf..f34
 - Task 7: minor (deferred): consumers.md table lacks explicit "Limits" row
 - Task 7: minor (deferred): publishing.md Failures bullet reads as if the generic nats.js commit error is not a NatsAtomicPublishError
 - Task 7: minor (deferred): CHANGELOG 0.1.0 carries a harness streamSequence migration note for an unreleased version
+
+## Minor sweep (2026-10-10)
+All parked and deferred items above were fixed in 9303422..bad4855 (re-reviewed clean), except where noted below.
+- Ruling: publishAtomic settles with the commit result once the batch is sent (no waiting for plugin chains); before sending, staging is bounded by the timeout and aborts with NatsAtomicPublishError — cost if wrong: a slow but legitimate plugin pipeline (> timeout for the whole batch) is aborted.
+- publishAtomic timeout must be in (0, 2^31-1] ms (setTimeout overflow).
+- Finding: closing a connection after `add()` flushes the buffered adds and the commit, so the batch can be stored although the call rejects with a timeout — documented in docs/publishing.md and docs/errors.md.
+
+## Remaining (not fixed)
+- Single-message publishAtomic (and publish()) has no bound around plugins: a plugin that never settles hangs the call.
+- The fallback JetStream client timeout used by publishAtomic is not range-checked (a client timeout > 2^31-1 would overflow).
+- consume-ordered / consume-push integration tests print Nest error stack traces for their deliberately failing handlers (pre-existing pattern).
+- Test gaps from the triage stay as listed above where not explicitly fixed.
