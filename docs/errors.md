@@ -6,7 +6,7 @@
 |---|---|
 | `NatsModuleError` | Base class of all errors below |
 | `NatsConfigError` | Invalid configuration found at startup. Examples: unknown connection name, duplicate durable, endpoint without `@NatsService`, request-scoped handler provider, missing consumer, an invalid `@CloudEventRouter`. Also thrown when publishing an invalid `cloudEvent` (no source, bad extension name) |
-| `NatsConnectionError` | The first connection attempt failed, including authentication errors |
+| `NatsConnectionError` | The first connection attempt failed, including authentication errors. Its `cause` is a sanitized copy of the client's error: the same `name` and `code`, with credentials masked in the message and stack, and no other properties |
 | `StreamConfigConflictError` | A declared stream or consumer differs in an immutable field. The error carries `field`, `current` and `declared` |
 | `NatsDecodeError` | A payload could not be decoded, or a message is not a valid CloudEvent |
 | `NatsRequestError` | `NatsClient.request()` failed. See `code` |
