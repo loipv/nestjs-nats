@@ -12,6 +12,7 @@ import { type Codec, encodePayload } from '../codec/codec.js';
 import { type NatsHeadersInit, toMsgHdrs } from '../codec/headers.js';
 import { type ConnectionEntry, ConnectionRegistry } from '../connection/connection-registry.js';
 import { NatsContext, NatsJetStreamContext } from '../context/nats-context.js';
+import { NatsOrderedContext } from '../context/nats-ordered-context.js';
 import { type HandlerDefinition, HandlerExplorer } from '../discovery/handler-explorer.js';
 import { validateHandlers } from '../discovery/handler-validator.js';
 import { NatsConfigError } from '../errors/errors.js';
@@ -32,10 +33,18 @@ export type DispatchTarget = { handler: string } | { subject: string };
 
 export interface DispatchOptions {
   headers?: NatsHeadersInit;
-  /** JetStream delivery count (default 1); `> 1` marks the message redelivered. */
+  /** JetStream delivery count (default 1); `> 1` marks the message redelivered. Ignored by ordered consumers. */
   deliveryCount?: number;
-  /** Core delivery attempt (default 1), as after in-process retries. */
+  /**
+   * Core and ordered delivery attempt (default 1), as after in-process retries. JetStream
+   * consumers use `deliveryCount` instead.
+   */
   attempt?: number;
+  /**
+   * JetStream stream sequence of the message (default 1): `ctx.seq` of a consumer,
+   * `ctx.streamSequence` of an ordered consumer and the `Nats-DLQ-Seq` of its dead letters.
+   */
+  streamSequence?: number;
   /** Core subscriptions: the message is a request (it has a reply subject). */
   request?: boolean;
   /** Sends the payload as a CloudEvent (binary mode unless `mode` says otherwise). */
@@ -60,13 +69,15 @@ export interface DispatchResult {
   result?: unknown;
   /**
    * The fate of the first message: its outcome's action, a JetStream retry being `'nak'`
-   * and a core retry `'retry'` (which the harness does not run again).
+   * and a core or ordered retry `'retry'` (which the harness does not run again).
    */
   settlement: DispatchSettlement;
   /** The outcome of each message, index-aligned with the dispatched payloads. */
   outcomes: MessageOutcome[];
   /** The redelivery delay of a `'nak'`, in ms. */
   nakDelay?: number;
+  /** The delay before the next attempt of a `'retry'` (core or ordered), in ms. */
+  retryDelay?: number;
   /** The reply to a request: its `data`, or the service `error` sent instead. */
   reply?: { data?: unknown; error?: ServiceError };
   /** The dead letters published while the messages were processed. */
@@ -101,7 +112,8 @@ function describeHandler(def: HandlerDefinition): string {
       : def.kind === 'ordered'
         ? [def.options.stream, ...subjects]
         : subjects;
-  return `${label(def)} (${def.kind}${source.length > 0 ? ` ${source.join(', ')}` : ''})`;
+  const kind = def.kind === 'consume' && def.delivery === 'push' ? 'consume push' : def.kind;
+  return `${label(def)} (${kind}${source.length > 0 ? ` ${source.join(', ')}` : ''})`;
 }
 
 function positiveInteger(name: string, value: number | undefined): number {
@@ -178,7 +190,9 @@ export class NatsTestHarness {
       codec: pipeline.codec,
       logger: entry.logger,
       // Recorded in the outcome only: the harness never runs a retry.
-      ...(def.kind === 'subscribe' ? { retry: () => {} } : {}),
+      ...(def.kind === 'subscribe' || def.kind === 'ordered' ? { retry: () => {} } : {}),
+      // Nothing to abort: the harness never waits in place.
+      ...(def.kind === 'ordered' ? { signal: new AbortController().signal } : {}),
     });
 
     const dlq: PublishedMessage[] = [];
@@ -212,6 +226,7 @@ export class NatsTestHarness {
       settlement,
       outcomes,
       ...(settlement === 'nak' && first.action === 'retry' ? { nakDelay: first.delayMs } : {}),
+      ...(settlement === 'retry' && first.action === 'retry' ? { retryDelay: first.delayMs } : {}),
       ...(reply ? { reply } : {}),
       dlq,
     };
@@ -319,20 +334,34 @@ export class NatsTestHarness {
       attempt,
     });
     switch (def.kind) {
-      case 'consume':
-      case 'ordered': {
+      case 'consume': {
         const deliveryCount = positiveInteger('deliveryCount', options.deliveryCount);
         const raw = fakeJsMsg(
           base,
           def.options.stream,
-          // An ordered consumer is ephemeral: it has no durable name.
-          def.kind === 'consume' ? def.options.durable : 'ordered',
+          def.options.durable,
           deliveryCount,
-          ++this.sequence,
+          positiveInteger('streamSequence', options.streamSequence),
         );
         return {
           message: message(raw, deliveryCount),
           context: new NatsJetStreamContext({ kind: 'jetstream', connection: entry.name, raw }),
+        };
+      }
+      case 'ordered': {
+        // As on core, the attempt is the in-place one; there is no delivery count.
+        const attempt = positiveInteger('attempt', options.attempt);
+        // An ordered consumer is ephemeral: its name is random, the dead letter does not use it.
+        const raw = fakeJsMsg(
+          base,
+          def.options.stream,
+          `ordered-${++this.sequence}`,
+          1,
+          positiveInteger('streamSequence', options.streamSequence),
+        );
+        return {
+          message: message(raw, attempt),
+          context: new NatsOrderedContext({ connection: entry.name, raw, attempt }),
         };
       }
       case 'subscribe': {
