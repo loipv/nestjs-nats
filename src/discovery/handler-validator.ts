@@ -86,7 +86,21 @@ function validateOrdered(def: HandlerDefinition & { kind: 'ordered' }): void {
       );
     }
   }
-  const { deliverPolicy } = def.options;
+  const { stream, filterSubjects, deliverPolicy } = def.options;
+  const nonEmpty = (value: unknown) => typeof value === 'string' && value !== '';
+  if (!nonEmpty(stream)) {
+    throw new NatsConfigError(
+      `NATS handler ${label(def)} has invalid stream ${JSON.stringify(stream)}; expected a non-empty string`,
+    );
+  }
+  if (
+    filterSubjects !== undefined &&
+    !(Array.isArray(filterSubjects) ? filterSubjects.every(nonEmpty) : nonEmpty(filterSubjects))
+  ) {
+    throw new NatsConfigError(
+      `NATS handler ${label(def)} has invalid filterSubjects ${JSON.stringify(filterSubjects)}; expected a non-empty string or an array of non-empty strings`,
+    );
+  }
   if (deliverPolicy === undefined) return;
   const invalid = (what: string, expected?: string) =>
     new NatsConfigError(
@@ -103,6 +117,9 @@ function validateOrdered(def: HandlerDefinition & { kind: 'ordered' }): void {
   }
   if (typeof deliverPolicy !== 'object' || deliverPolicy === null) {
     throw invalid(` ${String(deliverPolicy)}`);
+  }
+  if ('startSeq' in deliverPolicy && 'startTime' in deliverPolicy) {
+    throw invalid('', 'only one of startSeq or startTime');
   }
   if ('startSeq' in deliverPolicy) {
     const { startSeq } = deliverPolicy;
