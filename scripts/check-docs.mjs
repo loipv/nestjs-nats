@@ -1,7 +1,8 @@
 // Checks the documentation: every ```ts block in README.md and docs/*.md must typecheck
 // against the real build (dist/, resolved through the package's own `exports`), and every
 // relative Markdown link must point to an existing file and, if it has one, an existing anchor.
-// Run through `npm run docs:check`, which builds first. docs/superpowers/** is not checked.
+// Run through `npm run docs:check`, which builds first (`npm run docs:check:only` skips the
+// build and checks the existing dist/). docs/superpowers/** is not checked.
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
@@ -12,6 +13,13 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // resolve through the package self-reference, exactly like for a consumer. It is always removed.
 const tmp = join(root, '.docs-check-tmp');
 const LIB = '@loipv/nestjs-nats';
+
+if (!existsSync(join(root, 'dist', 'index.d.ts'))) {
+  console.error(
+    'docs:check: dist/ is missing; run `npm run build` first (or `npm run docs:check`)',
+  );
+  process.exit(1);
+}
 
 const docFiles = [
   'README.md',
