@@ -277,7 +277,7 @@ describe('single-message publishAtomic outbound bound', () => {
     });
     await vi.waitFor(() => expect(error).toHaveBeenCalled());
     expect(error).toHaveBeenCalledExactlyOnceWith(
-      expect.stringContaining('an outbound plugin failed after the message was sent'),
+      'Atomic publish of 1 message to "o": an outbound plugin failed after the message was sent',
       boom.stack,
     );
   });
@@ -416,5 +416,81 @@ describe('NatsClient.publish outbound bound', () => {
     await nats.flush();
     await drain();
     expect(error).toHaveBeenCalledExactlyOnceWith('Failed to publish to "o": closed');
+  });
+});
+
+describe('outbound calls without plugins', () => {
+  it('send at once, without a timer', async () => {
+    vi.useFakeTimers();
+    const { js, nats, fake } = setup();
+    // The timers of the setup (the idempotency store's sweep).
+    const baseline = vi.getTimerCount();
+    const setTimer = vi.spyOn(globalThis, 'setTimeout');
+    fake.whenRequest('svc').reply('pong');
+    nats.publish('o', 1);
+    // Published synchronously.
+    expect(fake.published).toHaveLength(1);
+
+    const results = [
+      js.publish('o', 1),
+      js.publishAtomic([{ subject: 'o', data: 2 }]),
+      nats.request('svc', 'ping'),
+    ];
+    expect(vi.getTimerCount()).toBe(baseline);
+    await expect(Promise.all(results)).resolves.toMatchObject([{ seq: 1 }, { count: 1 }, 'pong']);
+    await nats.flush();
+    expect(vi.getTimerCount()).toBe(baseline);
+    expect(setTimer).not.toHaveBeenCalled();
+    setTimer.mockRestore();
+  });
+
+  it('keep the errors of the send', async () => {
+    const { js, nats, fake, fakeJs, error } = setup();
+    const refused = new Error('no stream');
+    vi.spyOn(fakeJs, 'publish').mockRejectedValue(refused);
+    await expect(js.publish('o', 1)).rejects.toBe(refused);
+    await expect(js.publishAtomic([{ subject: 'o', data: 1 }])).rejects.toBeInstanceOf(
+      NatsAtomicPublishError,
+    );
+    await expect(nats.request('svc')).rejects.toMatchObject({ code: 'no_responders' });
+    vi.spyOn(fake, 'publish').mockImplementation(() => {
+      throw new Error('closed');
+    });
+    nats.publish('o', 1);
+    await nats.flush();
+    expect(error).toHaveBeenCalledExactlyOnceWith('Failed to publish to "o": closed');
+  });
+});
+
+describe('a next() called after the call failed', () => {
+  it('sends nothing after the plugin threw', async () => {
+    let late!: () => Promise<void>;
+    const { js, fake } = setup([
+      plugin(async (_m, next) => {
+        late = next;
+        throw boom;
+      }),
+    ]);
+    await expect(js.publish('o', 1)).rejects.toBe(boom);
+    await expect(late()).rejects.toBe(boom);
+    expect(fake.jsPublished).toEqual([]);
+  });
+
+  it('sends nothing after the plugin returned without calling it', async () => {
+    let late!: () => Promise<void>;
+    const { js, nats, fake } = setup([
+      plugin(async (_m, next) => {
+        late = next;
+      }),
+    ]);
+    const err = await js.publish('o', 1).catch((e: unknown) => e);
+    expect((err as Error).message).toBe('JetStream publish to "o" produced no acknowledgement');
+    await expect(late()).rejects.toBe(err);
+    expect(fake.jsPublished).toEqual([]);
+    // NatsClient.publish resolves when the plugin drops the message; a late next() is refused too.
+    nats.publish('o', 1);
+    await nats.flush();
+    await expect(late()).rejects.toBeInstanceOf(NatsModuleError);
+    expect(fake.published).toEqual([]);
   });
 });

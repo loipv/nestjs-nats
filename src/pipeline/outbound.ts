@@ -109,7 +109,8 @@ export interface SendOutboundOptions {
  * plugins must pass the message on within `timeout`, else the call rejects and nothing is
  * sent. Once `send` started, the call settles with its outcome, without waiting for the
  * plugins; a plugin failing after that is logged. A plugin failing before it rejects the
- * call with its error.
+ * call with its error. A `next()` called once the call failed (or the plugins returned) sends
+ * nothing and rejects with that failure. Without plugins, `send` runs at once.
  */
 export function sendOutbound<R>(
   entry: ConnectionEntry,
@@ -117,36 +118,52 @@ export function sendOutbound<R>(
   send: (m: OutgoingMessage) => Promise<R> | R,
   opts: SendOutboundOptions,
 ): Promise<R> {
+  const middlewares = outboundMiddlewares(entry);
+  const start = (m: OutgoingMessage): Promise<R> => {
+    try {
+      return Promise.resolve(send(m));
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  };
+  if (middlewares.length === 0) return start(message);
   const ms = timerDelay(opts.timeout);
   return new Promise<R>((resolve, reject) => {
     let outcome: Promise<R> | undefined;
-    let expired: Error | undefined;
+    /** Set once the call failed before the send: a later `next()` gets it and sends nothing. */
+    let refused: { error: unknown } | undefined;
+    const refuse = (error: unknown): void => {
+      clearTimeout(timer);
+      refused = { error };
+      reject(error);
+    };
     const timer = setTimeout(() => {
-      expired =
+      refuse(
         opts.expired?.(ms) ??
-        new NatsModuleError(
-          `${opts.what}: the outbound plugins did not pass the message on within ${ms} ms`,
-        );
-      reject(expired);
+          new NatsModuleError(
+            `${opts.what}: the outbound plugins did not pass the message on within ${ms} ms`,
+          ),
+      );
     }, ms);
     timer.unref?.();
-    compose(outboundMiddlewares(entry), async (m) => {
-      // The caller gave up: nothing is sent.
-      if (expired) throw expired;
+    compose(middlewares, async (m) => {
+      if (refused) throw refused.error;
       clearTimeout(timer);
-      try {
-        outcome = Promise.resolve(send(m));
-      } catch (err) {
-        outcome = Promise.reject(err);
-      }
+      outcome = start(m);
       outcome.then(resolve, reject);
       await outcome;
     })(message).then(
       () => {
-        if (outcome || expired) return;
+        if (outcome || refused) return;
+        if (opts.skipped) return refuse(opts.skipped());
+        // The plugins dropped the message: the call settles, a later `next()` is refused.
         clearTimeout(timer);
-        if (opts.skipped) reject(opts.skipped());
-        else resolve(undefined as R);
+        refused = {
+          error: new NatsModuleError(
+            `${opts.what}: next() was called after the outbound plugins returned`,
+          ),
+        };
+        resolve(undefined as R);
       },
       (err: unknown) => {
         if (outcome) {
@@ -156,16 +173,15 @@ export function sendOutbound<R>(
             err,
             `${opts.what}: an outbound plugin failed after the message was sent`,
           );
-        } else if (expired) {
+        } else if (refused) {
           logLateOutboundError(
             entry,
-            Promise.reject(expired),
+            Promise.reject(refused.error),
             err,
             `${opts.what}: an outbound plugin failed after the call timed out`,
           );
         } else {
-          clearTimeout(timer);
-          reject(err);
+          refuse(err);
         }
       },
     );
