@@ -20,27 +20,33 @@ async function bootstrap() {
   const js = app.get(JetStreamClient);
   const nats = app.get(NatsClient);
 
+  // Run-unique ids: a rerun within the stream's duplicate window would otherwise be
+  // de-duplicated by the server and show no billing or DLQ activity.
+  const run = Date.now();
+  const ok = `o-1-${run}`;
+  const bad = `o-2-${run}`;
+
   // Handled by `OrdersHandlers.bill`.
-  await js.publish('orders.created', { id: 'o-1', total: 42 }, { msgId: 'o-1' });
+  await js.publish('orders.created', { id: ok, total: 42 }, { msgId: ok });
   // Fails on purpose: retried three times with backoff, then sent to `dlq.ORDERS.billing`.
-  await js.publish('orders.created', { id: 'o-2', total: 10, fail: true }, { msgId: 'o-2' });
+  await js.publish('orders.created', { id: bad, total: 10, fail: true }, { msgId: bad });
 
   // Routed by `EventsRouter` on the CloudEvent type.
   nats.publish(
     'events.orders',
-    { orderId: 'o-1' },
+    { orderId: ok },
     { cloudEvent: { type: 'com.example.order.created' } },
   );
   nats.publish(
     'events.orders',
-    { orderId: 'o-1' },
+    { orderId: ok },
     { cloudEvent: { type: 'com.example.order.shipped' } },
   );
 
-  // Request/reply, once `o-1` has been billed.
+  // Request/reply, once the first order has been billed.
   await sleep(500);
   logger.log(
-    `query.orders.get o-1 -> ${JSON.stringify(await nats.request('query.orders.get', { id: 'o-1' }))}`,
+    `query.orders.get ${ok} -> ${JSON.stringify(await nats.request('query.orders.get', { id: ok }))}`,
   );
 }
 
