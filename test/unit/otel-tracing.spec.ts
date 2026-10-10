@@ -16,6 +16,7 @@ import { jsonCodec } from '../../src/codec/codec.js';
 import type { ConnectionEntry } from '../../src/connection/connection-registry.js';
 import { NatsBatchContext } from '../../src/context/nats-batch-context.js';
 import { NatsContext, NatsJetStreamContext } from '../../src/context/nats-context.js';
+import { NatsOrderedContext } from '../../src/context/nats-ordered-context.js';
 import { JetStreamClient } from '../../src/jetstream/jetstream-client.js';
 import * as otelApi from '../../src/otel/index.js';
 import { type TracingOptions, tracing } from '../../src/otel/index.js';
@@ -94,6 +95,21 @@ function jsPart(opts: { headers?: MsgHdrs; deliveryCount?: number } = {}): Part 
       connection: 'default',
       raw: raw as never,
     }),
+  };
+}
+
+/** A message of an ordered consumer, on its second in-place attempt. */
+function orderedPart(): Part {
+  const raw = {
+    subject: 'o.c',
+    reply: '$JS.ACK.ORD.ordered.1.1.1.0.0',
+    data: enc.encode('{"id":1}'),
+    headers: undefined,
+    info: { stream: 'ORD', consumer: 'ordered-x', streamSequence: 42, deliveryCount: 1 },
+  };
+  return {
+    message: { subject: raw.subject, data: raw.data, raw: raw as never, attempt: 2 },
+    context: new NatsOrderedContext({ connection: 'default', raw: raw as never, attempt: 2 }),
   };
 }
 
@@ -444,6 +460,25 @@ describe('tracing()', () => {
       'messaging.nats.delivery_count': 3,
       'messaging.header.x-tenant': 'acme',
       'messaging.header.x-tags': ['a', 'b'],
+    });
+  });
+
+  it('sets the stream and sequence of an ordered message, without a delivery count', async () => {
+    const orderedHandler: HandlerInfo = {
+      kind: 'ordered',
+      ...base,
+      stream: 'ORD',
+      filterSubjects: [],
+    };
+    await inbound(delivery(orderedHandler, [orderedPart()]));
+    expect(only().attributes).toEqual({
+      'messaging.system': 'nats',
+      'messaging.destination.name': 'o.c',
+      'messaging.operation.type': 'process',
+      'messaging.operation.name': 'process',
+      'messaging.message.body.size': 8,
+      'messaging.nats.stream': 'ORD',
+      'messaging.nats.seq': 42,
     });
   });
 
