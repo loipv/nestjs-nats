@@ -48,6 +48,8 @@ class OrderDto {
 }
 
 const calls: string[] = [];
+/** `ctx.seq` of each message of every batch `Handlers.batch` received. */
+const batchSeqs: number[][] = [];
 
 @Injectable()
 class Handlers {
@@ -86,6 +88,7 @@ class Handlers {
 
   @Consume({ stream: 'ORDERS', durable: 'batch', batch: { maxSize: 10 } })
   batch(@Payload() items: number[], @Ctx() ctx: NatsBatchContext) {
+    batchSeqs.push(ctx.messages.map((m) => (m as NatsJetStreamContext).seq));
     const i = items.indexOf(2);
     if (i >= 0) ctx.fail(i, new Error('two'));
   }
@@ -276,6 +279,16 @@ describe('NatsTestHarness', () => {
     expect(r.outcomes.map((o) => o.action)).toEqual(['ack', 'retry', 'ack']);
     expect(r.settlement).toBe('ack');
     await expect(h.dispatch({ handler: 'Handlers.batch' }, 1)).rejects.toThrow(NatsConfigError);
+  });
+
+  it('gives each message of a batch its own stream sequence, from streamSequence on', async () => {
+    batchSeqs.length = 0;
+    await h.dispatch({ handler: 'Handlers.batch' }, [1, 3, 4]);
+    await h.dispatch({ handler: 'Handlers.batch' }, [1, 3], { streamSequence: 10 });
+    expect(batchSeqs).toEqual([
+      [1, 2, 3],
+      [10, 11],
+    ]);
   });
 
   it('resolves handlers by subject', async () => {

@@ -43,6 +43,7 @@ export interface DispatchOptions {
   /**
    * JetStream stream sequence of the message (default 1): `ctx.seq` of a consumer,
    * `ctx.streamSequence` of an ordered consumer and the `Nats-DLQ-Seq` of its dead letters.
+   * The messages of a batch get it, it + 1, and so on.
    */
   streamSequence?: number;
   /** Core subscriptions: the message is a request (it has a reply subject). */
@@ -180,7 +181,9 @@ export class NatsTestHarness {
     const payloads: unknown[] = batch ? (payload as unknown[]) : [payload];
     const subject =
       options.subject ?? ('subject' in target ? target.subject : this.defaultSubject(def));
-    const parts = payloads.map((p) => this.part(def, entry, pipeline.codec, subject, p, options));
+    const parts = payloads.map((p, index) =>
+      this.part(def, entry, pipeline.codec, subject, p, options, index),
+    );
     const d = createDelivery({
       definition: def,
       handler: pipeline.info,
@@ -302,7 +305,10 @@ export class NatsTestHarness {
     );
   }
 
-  /** One fake message (with its context) as the handler's adapter would receive it. */
+  /**
+   * One fake message (with its context) as the handler's adapter would receive it; `index`
+   * is its position in a batch, which offsets its stream sequence.
+   */
   private part(
     def: HandlerDefinition,
     entry: ConnectionEntry,
@@ -310,6 +316,7 @@ export class NatsTestHarness {
     subject: string,
     payload: unknown,
     options: DispatchOptions,
+    index: number,
   ): DeliveryPart {
     const h = toMsgHdrs(options.headers);
     let data: Uint8Array;
@@ -341,7 +348,7 @@ export class NatsTestHarness {
           def.options.stream,
           def.options.durable,
           deliveryCount,
-          positiveInteger('streamSequence', options.streamSequence),
+          positiveInteger('streamSequence', options.streamSequence) + index,
         );
         return {
           message: message(raw, deliveryCount),
