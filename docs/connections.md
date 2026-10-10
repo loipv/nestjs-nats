@@ -32,6 +32,17 @@ NatsModule.forRootAsync({
 - **No secrets in output.** Error messages and logs never include passwords, tokens, seeds or creds, and credentials embedded in server URLs are replaced with `***`.
 - **Rotating credentials.** An authenticator is called again on every reconnect. To pick up a rotated `.creds` file, pass a function that re-reads the file, instead of `credsAuthenticator(bytes)`, which reads it once.
 
+## Logging
+
+The library logs through Nest's `Logger`, with the context `NatsConnection:<name>` (for example `NatsConnection:default`), so the application's logger configuration applies. The `logger` option of `forRoot` changes that per connection: `false` silences this library's logs for the connection, and a `LoggerService` receives them instead of Nest's `Logger`. It does not affect Nest's own logging, such as its `ExceptionsHandler` (see [Known limitations](../README.md#known-limitations)).
+
+```ts
+NatsModule.forRoot({
+  connection: { servers: 'nats://localhost:4222' },
+  logger: false, // or a LoggerService, such as a pino-based one
+});
+```
+
 ## Several connections
 
 Give each connection a `name`. Handlers and injected clients choose a connection by that name; when no name is given, `'default'` is used.

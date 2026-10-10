@@ -71,4 +71,6 @@ const deadLetterAlerts: NatsPlugin = {
 | `'replied'` | A request or service endpoint: the adapter sends the reply (an error reply when `error` is set) | `error?` |
 | `'none'` | Nothing to settle: a success on a core subscription, or a manually acknowledged message left unacknowledged | |
 
+An outcome records the decision, not the result of the call: if the underlying `ack`, `nak` or `term` throws, the failure is logged and the outcome is recorded as decided.
+
 A message with no entry was not settled by the library, for example because an `outer` plugin threw before calling `next()`.

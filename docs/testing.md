@@ -103,9 +103,9 @@ It rejects with a `NatsConfigError` when the handlers are misconfigured (as boot
 |---|---|
 | `headers` | Message headers |
 | `subject` | The message's actual subject. Defaults to the target's subject, else to the handler's own: its subject pattern (which can be a wildcard), its first `filter_subject`, or the stream name for a `@Consume` without a filter. Pass it for realistic values in `@Subject()` and `ctx.subject` |
-| `deliveryCount` | JetStream delivery count (default `1`); above `1` the message counts as redelivered |
-| `attempt` | Core delivery attempt (default `1`), as after in-process retries |
-| `request` | Core subscriptions: the message is a request, with a reply subject |
+| `deliveryCount` | JetStream delivery count (default `1`); above `1` the message counts as redelivered. Ignored for core handlers |
+| `attempt` | Core delivery attempt (default `1`), as after in-process retries. Ignored for `@Consume` handlers |
+| `request` | Core subscriptions: the message is a request, with a reply subject. Ignored for `@Consume` handlers |
 | `cloudEvent` | Sends the payload as a [CloudEvent](./cloudevents.md), with the same options as publishing |
 
 | `DispatchResult` field | Description |

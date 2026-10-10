@@ -24,7 +24,7 @@ onOrderEvent(@Payload() event: OrderEvent, @Subject() subject: string) {
 
 **Request/reply.** If the incoming message has a reply subject and the handler returns something other than `undefined`, the return value is encoded and sent back. If the handler throws, the requester gets an error reply and the message is not retried. See [Errors](./errors.md).
 
-**Keep request subjects out of streams.** If a JetStream stream's subjects capture a request subject (a stream on `orders.>` captures `orders.get`), the stream stores the request and answers it with a PubAck, so the requester gets that PubAck (`{ stream, seq }`) instead of the handler's reply. Use request subjects that no stream captures, as the [orders example](../examples/orders) does with `query.orders.get` next to its `orders.>` stream. See [Streams and consumers](./streams.md).
+**Keep request subjects out of streams.** If a JetStream stream's subjects capture a request subject (a stream on `orders.>` captures `orders.get`), the stream stores the request and answers it with a PubAck. The stream and your handler both reply, and the first reply to arrive wins: usually the PubAck (`{ stream, seq }`), not the handler's reply. Use request subjects that no stream captures, as the [orders example](../examples/orders) does with `query.orders.get` next to its `orders.>` stream. See [Streams and consumers](./streams.md).
 
 ## `@Consume(options)`: JetStream pull consumer
 
@@ -118,3 +118,5 @@ class OrderHandlers {
 - `switchToRpc().getData()` returns the payload, and `switchToRpc().getContext()` returns the `NatsContext`.
 - A global `ValidationPipe` (`app.useGlobalPipes()` or `APP_PIPE`) validates `@Payload()` only, never the context or headers.
 - An exception filter that handles an error without rethrowing turns the outcome into a success.
+- The payload is decoded before the handler is invoked, so a `NatsDecodeError` (and, in a [CloudEvent router](./cloudevents.md#receiving-cloudevents), an error in the event's attributes) happens before guards, pipes, interceptors and exception filters run, and none of them sees it. See [Errors](./errors.md).
+- Return a value or `undefined`. An Observable that completes without emitting counts as a failure (Nest throws an `EmptyError`): a JetStream message is retried like after any error, and a request gets a `500` reply.
