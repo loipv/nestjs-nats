@@ -14,8 +14,8 @@ Collected from per-task and final reviews of feat/reliability (222a3af..ac20e63)
 - Ruling: Batcher becomes a type-only export (constructor typed on internals) — cost if wrong: users can't instanceof-check Batcher.
 - Ruling: fix minors M1, M2, M4, M5, M9 (README) in the same wave; keep the rest deferred as triaged — cost if wrong: slightly larger fix diff.
 
-## Open decision
-- I1 residual: with `concurrency > 1` or `batch`, messages already pulled into the nats.js buffer but not yet handed to the library cannot be heartbeated; if a handler runs longer than `ack_wait` they may be redelivered and processed twice. Options: accept + document (current), `max_messages: 1` (≈4–35× lower raw throughput in a local probe), or rebuild intake on `fetch()`.
+## Decided
+- Ruling (2026-10-10, user): I1 residual — keep the consume()-based intake and the documented gap (docs/retry-and-dlq.md "Heartbeats"): with `concurrency > 1` or `batch`, messages pulled by the client but not yet handed to the library are not heartbeated; users set `ack_wait` above the longest handler run, idempotency covers duplicates — JetStream is at-least-once anyway — cost if wrong: rebuild intake on `fetch()` later (no API change).
 
 ## Deferred findings
 - Task 1: minor (deferred): explicit undefined option fields clobber defaults in resolveRetryPolicy (validator catches with confusing msg)
