@@ -80,6 +80,8 @@ function setup(
     headersOnly?: boolean;
     plugins?: unknown[];
     get?: () => Promise<unknown>;
+    /** `js().publish` (DLQ publishes). */
+    publish?: () => Promise<unknown>;
   } = {},
 ) {
   const fake = fakeMessages();
@@ -92,7 +94,7 @@ function setup(
     logger,
     js: () => ({
       consumers: { get },
-      publish: () => Promise.resolve({ stream: 'DLQ', seq: 1 }),
+      publish: opts.publish ?? (() => Promise.resolve({ stream: 'DLQ', seq: 1 })),
     }),
   } as unknown as ConnectionEntry;
   const def = {
@@ -164,6 +166,45 @@ describe('OrderedConsumerAdapter', () => {
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('stream seq 7'));
     expect(invoke).toHaveBeenCalledTimes(1);
     expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0 });
+  });
+
+  it('does not count a retry wait that stop() already cancelled', async () => {
+    const invoke = vi.fn(() => Promise.reject(new Error('boom')));
+    const { adapter, fake } = setup(invoke, { retry: { maxRetries: 3, initialDelay: 60_000 } });
+    await adapter.start();
+    fake.push(fakeMsg(1));
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+    await tick();
+    // forceStop() right after stop(), before the cancelled wait has returned.
+    void adapter.stop();
+    expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0 });
+    await adapter.idle();
+  });
+
+  it('ends a failing DLQ publish retry loop at stop()', async () => {
+    const invoke = vi.fn(() => Promise.reject(new Error('boom')));
+    const publish = vi.fn(() => Promise.reject(new Error('no DLQ stream')));
+    const { adapter, fake, logger } = setup(invoke, {
+      retry: false,
+      dlq: true,
+      publish,
+    });
+    await adapter.start();
+    fake.push(fakeMsg(3));
+    await vi.waitFor(() => expect(publish).toHaveBeenCalledTimes(1));
+    await tick();
+    const startedAt = Date.now();
+    await adapter.stop();
+    await adapter.idle();
+    expect(Date.now() - startedAt).toBeLessThan(200);
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('could not be sent to DLQ'),
+      expect.anything(),
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('retry abandoned at shutdown (stream sequence 3)'),
+    );
   });
 
   it('counts the retry wait cancelled by forceStop() without stop()', async () => {
@@ -274,6 +315,21 @@ describe('OrderedConsumerAdapter', () => {
     expect(warned[0]).toMatch(/C\.m.*heartbeats_missed \(attempt 1\)/);
     expect(warned[1]).toContain('(attempt 2)');
     expect(warned[2]).toContain('(attempt 4)');
+    await adapter.stop();
+    await adapter.idle();
+  });
+
+  it('warns about a missing consumer on exponentially spaced counts', async () => {
+    const { adapter, fake, logger } = setup(() => Promise.resolve());
+    await adapter.start();
+    for (const count of [1, 2, 3, 4, 5]) fake.notify({ type: 'consumer_not_found', count });
+    await tick();
+    const warned = logger.warn.mock.calls.map(([line]) => String(line));
+    expect(warned).toEqual([
+      expect.stringMatching(/C\.m.*consumer_not_found \(attempt 1\)/),
+      expect.stringContaining('consumer_not_found (attempt 2)'),
+      expect.stringContaining('consumer_not_found (attempt 4)'),
+    ]);
     await adapter.stop();
     await adapter.idle();
   });

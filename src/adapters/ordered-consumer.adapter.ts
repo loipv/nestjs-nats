@@ -118,8 +118,9 @@ export class OrderedConsumerAdapter implements HandlerAdapter {
   }
 
   forceStop(): ForceStopResult {
-    // Nothing to nak: an ordered consumer acknowledges nothing.
-    const cancelledRetries = this.waiting ? 1 : 0;
+    // Nothing to nak: an ordered consumer acknowledges nothing. A wait that stop() already
+    // cancelled is not cancelled here.
+    const cancelledRetries = this.waiting && !this.stopping ? 1 : 0;
     this.abort.abort();
     return { nakked: 0, cancelledRetries };
   }
