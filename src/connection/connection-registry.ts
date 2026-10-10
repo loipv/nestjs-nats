@@ -59,6 +59,11 @@ interface InternalEntry {
 const DEFAULT_CLOSE_TIMEOUT = 10_000;
 /** How long a forced close (after the drain timed out) may take before it is abandoned. */
 const FORCED_CLOSE_TIMEOUT = 1000;
+/**
+ * How long each connection may drain when startup is aborted: nothing has been received yet,
+ * and the startup error is rethrown only once the close is done.
+ */
+const ABORT_CLOSE_TIMEOUT = 1000;
 
 const LOGGED_EVENTS = new Set<Status['type']>([
   'disconnect',
@@ -81,8 +86,6 @@ export class ConnectionRegistry {
   private readonly entries = new Map<string, InternalEntry>();
   private readonly pending = new Set<string>();
   private readonly events$ = new Subject<NatsStatusEvent>();
-  /** The connection attempts in progress. */
-  private readonly opening = new Set<Promise<unknown>>();
   private startupAborted = false;
 
   /**
@@ -97,14 +100,7 @@ export class ConnectionRegistry {
     }
     this.pending.add(name);
     try {
-      const opening = this.openConnection(name, options);
-      this.opening.add(opening);
-      let nc: NatsConnection;
-      try {
-        nc = await opening;
-      } finally {
-        this.opening.delete(opening);
-      }
+      const nc = await this.openConnection(name, options);
       if (this.startupAborted) {
         await settlesWithin(nc.close(), FORCED_CLOSE_TIMEOUT);
         return new Promise<never>(() => {});
@@ -164,14 +160,14 @@ export class ConnectionRegistry {
   /**
    * Internal: called by the module's providers when startup fails during dependency
    * injection, where Nest runs no lifecycle hook and nothing else would close the
-   * connections. Closes every connection opened so far, and each one still connecting once
-   * it is open. Never rejects.
+   * connections. Closes every connection opened so far, giving each `ABORT_CLOSE_TIMEOUT`
+   * to drain. It does not wait for the ones still connecting: with `waitOnFirstConnect`,
+   * nats.js retries until the server answers, so that could take forever. `connect()`
+   * closes each of them once it opens. Never rejects.
    */
   async abortStartup(): Promise<void> {
     this.startupAborted = true;
-    // Bounded: `connect()` gives up on its own after `connection.timeout`.
-    await Promise.allSettled([...this.opening]);
-    await this.closeAll();
+    await this.closeAll({ timeoutMs: ABORT_CLOSE_TIMEOUT });
   }
 
   /** Opens the NATS connection of `name`. Internal: the testing module overrides it. */

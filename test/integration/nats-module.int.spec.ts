@@ -1,3 +1,4 @@
+import { createServer, connect as dialTcp, type Server, type Socket } from 'node:net';
 import { Injectable, Module } from '@nestjs/common';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { NatsClient } from '../../src/client/nats-client.js';
@@ -38,6 +39,43 @@ function recordConnections(): ConnectionEntry[] {
     return nc;
   });
   return opened;
+}
+
+/** A local port nothing listens on. */
+async function freePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as { port: number };
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return port;
+}
+
+/** Forwards `port` to `target`; `sockets` holds the client connections still open. */
+async function forwardPort(
+  port: number,
+  target: URL,
+): Promise<{ sockets: Set<Socket>; close(): Promise<void> }> {
+  const sockets = new Set<Socket>();
+  const server: Server = createServer((socket) => {
+    sockets.add(socket);
+    const upstream = dialTcp(Number(target.port), target.hostname);
+    const end = () => {
+      sockets.delete(socket);
+      socket.destroy();
+      upstream.destroy();
+    };
+    socket.on('close', end).on('error', end);
+    upstream.on('close', end).on('error', end);
+    socket.pipe(upstream).pipe(socket);
+  });
+  await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve));
+  return {
+    sockets,
+    close: async () => {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
 }
 
 describe('NatsModule', () => {
@@ -254,6 +292,47 @@ describe('NatsModule', () => {
     // Without the abort, the default connection would open after its factory returns.
     await sleep(500);
     expect(opened.every((e) => e.nc.isClosed())).toBe(true);
+  });
+
+  it('rejects with a factory error at once while another connection waits for its server', async () => {
+    const opened = recordConnections();
+    const port = await freePort();
+    const started = Date.now();
+    await expect(
+      createTestApp({
+        imports: [
+          NatsModule.forRoot({
+            name: 'a',
+            // Retries until the server is up, which it is not yet.
+            connection: {
+              servers: `127.0.0.1:${port}`,
+              waitOnFirstConnect: true,
+              reconnectTimeWait: 100,
+            },
+            logger: false,
+          }),
+          NatsModule.forRootAsync({
+            name: 'b',
+            useFactory: async () => {
+              await sleep(200);
+              throw new Error('missing NATS_B_URL');
+            },
+          }),
+        ],
+      }),
+    ).rejects.toThrow('missing NATS_B_URL');
+    expect(Date.now() - started).toBeLessThan(3000);
+    expect(opened).toHaveLength(0);
+
+    // The server comes up: `a` opens, and is closed again at once.
+    const proxy = await forwardPort(port, new URL(url));
+    try {
+      await eventually(() => expect(opened.map((e) => e.name)).toEqual(['a']));
+      await eventually(() => expect(opened.every((e) => e.nc.isClosed())).toBe(true));
+      await eventually(() => expect(proxy.sockets.size).toBe(0));
+    } finally {
+      await proxy.close();
+    }
   });
 
   it('close() drains connections', async () => {
