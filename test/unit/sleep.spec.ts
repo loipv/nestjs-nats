@@ -6,6 +6,7 @@ describe('sleep', () => {
     vi.useFakeTimers();
   });
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
@@ -42,11 +43,12 @@ describe('sleep', () => {
 
   it('does not keep the process alive', async () => {
     const unref = vi.fn();
-    const spy = vi
-      .spyOn(globalThis, 'setTimeout')
-      .mockImplementation(((fn: () => void) => ({ unref, fn })) as never);
+    // Restored in afterEach, also when an expectation fails.
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void) => ({
+      unref,
+      fn,
+    })) as never);
     void sleep(100);
     expect(unref).toHaveBeenCalledTimes(1);
-    spy.mockRestore();
   });
 });
