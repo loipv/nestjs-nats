@@ -1,6 +1,6 @@
 import type { JsMsg } from '@nats-io/jetstream';
 import type { Msg } from '@nats-io/transport-node';
-import { type INestApplicationContext, Injectable } from '@nestjs/common';
+import { type INestApplicationContext, Inject, Injectable } from '@nestjs/common';
 import {
   createHandlerPipeline,
   defaultPipelineDeps,
@@ -128,10 +128,10 @@ export class NatsTestHarness {
   private sequence = 0;
   private inboxes = 0;
 
-  constructor(
-    private readonly explorer: HandlerExplorer,
-    private readonly manager: ConnectionRegistry,
-  ) {}
+  // Injected as properties, so the internal explorer and registry stay out of the
+  // constructor's type.
+  @Inject(HandlerExplorer) private readonly explorer!: HandlerExplorer;
+  @Inject(ConnectionRegistry) private readonly registry!: ConnectionRegistry;
 
   static create(app: INestApplicationContext): NatsTestHarness {
     return app.get(NatsTestHarness);
@@ -150,7 +150,7 @@ export class NatsTestHarness {
     options: DispatchOptions = {},
   ): Promise<DispatchResult> {
     const def = this.resolve(target);
-    const entry = this.manager.get(def.connection);
+    const entry = this.registry.get(def.connection);
     const pipeline = this.pipelineOf(def, entry);
     const batch = def.kind !== 'service-endpoint' && def.options.batch !== undefined;
     if (batch && (!Array.isArray(payload) || payload.length === 0)) {
@@ -229,7 +229,7 @@ export class NatsTestHarness {
   private explore(): HandlerDefinition[] {
     if (!this.handlers) {
       const defs = this.explorer.explore();
-      validateHandlers(defs, this.manager);
+      validateHandlers(defs, this.registry);
       this.handlers = defs;
     }
     return this.handlers;

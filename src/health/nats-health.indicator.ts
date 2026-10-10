@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { type HealthIndicatorResult, HealthIndicatorService } from '@nestjs/terminus';
 import { ConnectionRegistry } from '../connection/connection-registry.js';
 import { redactServers, redactText } from '../connection/redact.js';
@@ -42,10 +42,9 @@ async function bounded<T>(fn: () => Promise<T>, ms: number): Promise<Bounded<T>>
 /** A Terminus health indicator for a NATS connection. */
 @Injectable()
 export class NatsHealthIndicator {
-  constructor(
-    private readonly health: HealthIndicatorService,
-    private readonly manager: ConnectionRegistry,
-  ) {}
+  // Injected as properties, so the internal registry stays out of the constructor's type.
+  @Inject(HealthIndicatorService) private readonly health!: HealthIndicatorService;
+  @Inject(ConnectionRegistry) private readonly registry!: ConnectionRegistry;
 
   async isHealthy<K extends string>(
     key: K,
@@ -64,11 +63,11 @@ export class NatsHealthIndicator {
       session.down({ connection, reason }) as HealthIndicatorResult<K>;
     let secrets: Array<string | undefined> = [];
     try {
-      if (!this.manager.has(connection)) return down('unknown connection');
-      const status = this.manager.status(connection);
+      if (!this.registry.has(connection)) return down('unknown connection');
+      const status = this.registry.status(connection);
       if (status.state !== 'connected') return down(status.state);
 
-      const entry = this.manager.get(connection);
+      const entry = this.registry.get(connection);
       const { pass, token } = entry.options.connection;
       secrets = [pass, token];
 

@@ -43,6 +43,7 @@ export type JetStreamPublishOptions = {
 export type PublishManyResult = { ok: true; ack: PubAck } | { ok: false; error: Error };
 
 export class JetStreamClient {
+  /** Instances are provided by `NatsModule`; this constructor is not part of the public API. */
   constructor(private readonly entry: ConnectionEntry) {}
 
   async publish(

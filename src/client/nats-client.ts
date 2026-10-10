@@ -30,6 +30,7 @@ function isNoResponders(err: unknown): boolean {
 export class NatsClient {
   private readonly inflight = new Set<Promise<void>>();
 
+  /** Instances are provided by `NatsModule`; this constructor is not part of the public API. */
   constructor(private readonly entry: ConnectionEntry) {}
 
   publish(
