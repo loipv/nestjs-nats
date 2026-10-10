@@ -39,14 +39,15 @@ function createNatsParamDecorator(
 }
 
 export function Payload(): ParameterDecorator;
-export function Payload(property: string, ...pipes: Pipe[]): ParameterDecorator;
+/** An `undefined` (or `null`) property means none: `Payload(undefined, P)` is `Payload(P)`. */
+export function Payload(property: string | undefined, ...pipes: Pipe[]): ParameterDecorator;
 export function Payload(...pipes: Pipe[]): ParameterDecorator;
-export function Payload(...args: (string | Pipe)[]): ParameterDecorator {
+export function Payload(...args: (string | Pipe | undefined)[]): ParameterDecorator {
   const [first, ...rest] = args;
-  if (typeof first === 'string') {
-    return createNatsParamDecorator(NatsParamType.PAYLOAD, first, rest as Pipe[]);
-  }
-  return createNatsParamDecorator(NatsParamType.PAYLOAD, undefined, args as Pipe[]);
+  const property = typeof first === 'string' ? first : undefined;
+  // A leading undefined/null is an absent property; undefined/null pipes are dropped too.
+  const pipes = (typeof first === 'string' ? rest : args).filter((p): p is Pipe => p != null);
+  return createNatsParamDecorator(NatsParamType.PAYLOAD, property, pipes);
 }
 
 export function Headers(name?: string): ParameterDecorator {

@@ -111,6 +111,24 @@ describe('param decorators', () => {
     });
   });
 
+  it('treats an undefined or null property of Payload as no property', () => {
+    const noProp: string | undefined = undefined;
+    class P {
+      on(
+        @Payload(noProp, ParseIntPipe) _a: number,
+        @Payload(null as unknown as string, pipeInstance) _b: number,
+        @Payload(undefined) _c: unknown,
+        @Payload(ParseIntPipe, undefined as unknown as PipeTransform) _d: number,
+      ) {}
+    }
+    const meta = Reflect.getMetadata(ROUTE_ARGS_METADATA, P, 'on');
+    const at = (i: number) => meta[`${NatsParamType.PAYLOAD}:${i}`];
+    expect(at(0)).toEqual({ index: 0, data: undefined, pipes: [ParseIntPipe] });
+    expect(at(1)).toEqual({ index: 1, data: undefined, pipes: [pipeInstance] });
+    expect(at(2)).toEqual({ index: 2, data: undefined, pipes: [] });
+    expect(at(3)).toEqual({ index: 3, data: undefined, pipes: [ParseIntPipe] });
+  });
+
   it('coexists with Nest custom param decorators', () => {
     const meta = Reflect.getMetadata(ROUTE_ARGS_METADATA, H, 'onB');
     expect(Object.keys(meta)).toHaveLength(3);
