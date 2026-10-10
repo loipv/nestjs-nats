@@ -10,12 +10,8 @@ import type { NatsHeadersInit } from '../codec/headers.js';
 import type { ConnectionEntry } from '../connection/connection-registry.js';
 import { redactText } from '../connection/redact.js';
 import { NatsModuleError, NatsRequestError } from '../errors/errors.js';
-import { compose } from '../pipeline/compose.js';
-import {
-  createOutgoingMessage,
-  encodeOutgoing,
-  outboundMiddlewares,
-} from '../pipeline/outbound.js';
+import { createOutgoingMessage, encodeOutgoing, sendOutbound } from '../pipeline/outbound.js';
+import type { OutgoingMessage } from '../pipeline/types.js';
 
 const DEFAULT_REQUEST_TIMEOUT = 5000;
 const SERVICE_ERROR_CODE_HEADER = 'Nats-Service-Error-Code';
@@ -45,14 +41,31 @@ export class NatsClient {
     } = {},
   ): void {
     const message = createOutgoingMessage(this.entry, 'publish', subject, data, opts);
-    const run = compose(outboundMiddlewares(this.entry), async (m) => {
-      const payload = encodeOutgoing(m);
-      const publishOpts: PublishOptions = {};
-      if (m.headers.keys().length > 0) publishOpts.headers = m.headers;
-      if (opts.reply !== undefined) publishOpts.reply = opts.reply;
-      this.entry.nc.publish(m.subject, payload, publishOpts);
-    });
-    const task = run(message).catch((err: unknown) => {
+    let dropped: Error | undefined;
+    // Settles once the message is published (not waiting for the plugins), so `flush()` and
+    // shutdown are not held by a plugin that never settles.
+    const task = sendOutbound(
+      this.entry,
+      message,
+      (m) => {
+        const payload = encodeOutgoing(m);
+        const publishOpts: PublishOptions = {};
+        if (m.headers.keys().length > 0) publishOpts.headers = m.headers;
+        if (opts.reply !== undefined) publishOpts.reply = opts.reply;
+        this.entry.nc.publish(m.subject, payload, publishOpts);
+      },
+      {
+        what: `Publish to "${subject}"`,
+        timeout: DEFAULT_REQUEST_TIMEOUT,
+        expired: (ms) => {
+          dropped = new NatsModuleError(
+            `Publish to "${subject}": the outbound plugins did not pass the message on within ${ms} ms; dropped`,
+          );
+          return dropped;
+        },
+      },
+    ).catch((err: unknown) => {
+      if (dropped && err === dropped) return this.entry.logger.error(dropped.message);
       const reason = redactText(err instanceof Error ? err.message : String(err));
       this.entry.logger.error(`Failed to publish to "${subject}": ${reason}`);
     });
@@ -66,13 +79,13 @@ export class NatsClient {
     opts: { timeout?: number; headers?: NatsHeadersInit; codec?: Codec } = {},
   ): Promise<T> {
     const message = createOutgoingMessage(this.entry, 'request', subject, data, opts);
-    let result: { value: unknown } | undefined;
-    const run = compose(outboundMiddlewares(this.entry), async (m) => {
+    const timeout = opts.timeout ?? DEFAULT_REQUEST_TIMEOUT;
+    const send = async (m: OutgoingMessage): Promise<T> => {
       const payload = encodeOutgoing(m);
       let reply: Msg;
       try {
         reply = await this.entry.nc.request(m.subject, payload, {
-          timeout: opts.timeout ?? DEFAULT_REQUEST_TIMEOUT,
+          timeout,
           ...(m.headers.keys().length > 0 ? { headers: m.headers } : {}),
         });
       } catch (err) {
@@ -107,13 +120,16 @@ export class NatsClient {
           },
         );
       }
-      result = { value: decodePayload(m.codec, reply.data, reply.headers) };
+      return decodePayload(m.codec, reply.data, reply.headers) as T;
+    };
+    // The plugins must pass the request on within its timeout; once it is sent, the result is
+    // the reply (or the request's failure), without waiting for the plugins.
+    return sendOutbound(this.entry, message, send, {
+      what: `Request to "${subject}"`,
+      // nats.js replaces a timeout of 0 with its own default.
+      timeout: timeout || DEFAULT_REQUEST_TIMEOUT,
+      skipped: () => new NatsModuleError(`Request to "${subject}" produced no reply`),
     });
-    await run(message);
-    if (!result) {
-      throw new NatsModuleError(`Request to "${subject}" produced no reply`);
-    }
-    return result.value as T;
   }
 
   async flush(): Promise<void> {

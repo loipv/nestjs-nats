@@ -460,6 +460,14 @@ describe('publishAtomic', () => {
       expect(commit.mock.calls[0]?.[2]).toMatchObject({ timeout: 777 });
     });
 
+    it("clamps the JetStream client's timeout to the largest timer delay", async () => {
+      const { client, fakeJs } = setup({ jsTimeout: 2 ** 40 });
+      const { startBatch, commit } = spyBatch(fakeJs);
+      await client.publishAtomic(three);
+      expect(startBatch.mock.calls[0]?.[2]).toMatchObject({ timeout: 2 ** 31 - 1 });
+      expect(commit.mock.calls[0]?.[2]).toMatchObject({ timeout: 2 ** 31 - 1 });
+    });
+
     it('uses opts.timeout', async () => {
       const { client, fakeJs } = setup({ jsTimeout: 777 });
       const { startBatch, commit } = spyBatch(fakeJs);
