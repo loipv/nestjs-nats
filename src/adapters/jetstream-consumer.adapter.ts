@@ -29,6 +29,12 @@ import { createHandlerPipeline, defaultPipelineDeps } from './handler-pipeline.j
 
 type ConsumeDefinition = HandlerDefinition & { kind: 'consume' };
 
+/** nats.js's refusal to bind a push consumer that another subscriber already bound. */
+const isAlreadyBound = (err: unknown): err is Error =>
+  err instanceof Error &&
+  err.name === 'InvalidOperationError' &&
+  err.message.includes('already bound');
+
 /** A bound consumer: its config as the server reports it, and how to start receiving. */
 interface Intake {
   config: ConsumerConfig;
@@ -206,9 +212,16 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
         // Missing consumer or stream: mapped by `lookup()`.
         if (err instanceof JetStreamApiError) throw err;
         // nats.js refuses a consumer it cannot bind as a push consumer (e.g. a pull one,
-        // without `deliver_subject`): tell why from its info when the checks can.
-        const { config: actual } = await (await this.streams.jsm()).consumers.info(stream, durable);
-        this.checkPushConsumer(actual, deliverGroup, err);
+        // without `deliver_subject`): tell why from its info when the checks can. Without
+        // the info, nats.js's error is the one to report.
+        const actual = await this.streams
+          .jsm()
+          .then((jsm) => jsm.consumers.info(stream, durable))
+          .then(
+            (info) => info.config,
+            () => undefined,
+          );
+        if (actual) this.checkPushConsumer(actual, deliverGroup, err);
         throw err;
       }
     }, config !== undefined);
@@ -221,7 +234,7 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
           return await consumer.consume();
         } catch (err) {
           // Without a deliver group, nats.js binds one subscriber only.
-          if (err instanceof Error && err.name === 'InvalidOperationError' && !deliverGroup) {
+          if (isAlreadyBound(err) && !deliverGroup) {
             throw new NatsConfigError(
               `${this.pushConsumerName} is already bound to another subscriber (${err.message}); give every instance the same deliverGroup to share its messages`,
               { cause: err },
