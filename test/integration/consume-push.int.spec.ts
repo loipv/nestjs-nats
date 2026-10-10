@@ -36,21 +36,21 @@ class GroupHandlers {
 class DefaultsHandlers {
   @ConsumePush({ stream: 'PD', durable: 'p2', concurrency: 2, config: {} })
   on() {}
+
+  @ConsumePush({ stream: 'PD', durable: 'p2g', deliverGroup: 'g', concurrency: 2, config: {} })
+  onGroup() {}
 }
 
-/** Two slots, a 2 s ack_wait and 5 s of work: only heartbeats keep the messages. */
+/**
+ * Two slots, four pending messages (two of them queued on the client), a 2 s ack_wait and
+ * 5 s of work: only heartbeats keep the messages.
+ */
 @Injectable()
 class SlowHandlers {
   readonly deliveries: number[] = [];
   done = 0;
 
-  @ConsumePush({
-    stream: 'PH',
-    durable: 'ph',
-    concurrency: 2,
-    retry: false,
-    config: { ack_wait: 2_000_000_000 },
-  })
+  @ConsumePush({ stream: 'PH', durable: 'ph', concurrency: 2, retry: false })
   async on(@Ctx() ctx: NatsJetStreamContext) {
     this.deliveries.push(ctx.deliveryCount);
     await sleep(5000);
@@ -161,12 +161,25 @@ describe('@ConsumePush', () => {
         max_ack_pending: 2,
         ack_policy: AckPolicy.Explicit,
       });
+      // A group shares max_ack_pending across its instances: the server default applies.
+      const { config: group } = await jsm.consumers.info('PD', 'p2g');
+      expect(group).toMatchObject({ deliver_subject: '_nats.push.PD.p2g', deliver_group: 'g' });
+      expect(group.max_ack_pending).toBe(1000);
+      expect(group.flow_control).toBeFalsy();
+      expect(group.idle_heartbeat).toBeFalsy();
     } finally {
       await app.close();
     }
   });
 
   it('heartbeats queued messages', async () => {
+    await jsm.consumers.add('PH', {
+      durable_name: 'ph',
+      ack_policy: AckPolicy.Explicit,
+      ack_wait: 2_000_000_000,
+      max_ack_pending: 4,
+      deliver_subject: '_nats.push.PH.ph',
+    });
     const app = await createTestApp({ imports: [nats()], providers: [SlowHandlers] });
     try {
       const slow = app.get(SlowHandlers);

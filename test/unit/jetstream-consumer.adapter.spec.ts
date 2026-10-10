@@ -86,6 +86,8 @@ function setup(
       max_ack_pending?: number;
     };
     delivery?: 'pull' | 'push';
+    /** `js().consumers.getPushConsumer()`, by default resolving the fake consumer. */
+    getPushConsumer?: () => Promise<unknown>;
     deliverGroup?: string;
     config?: Record<string, unknown>;
     retry?: unknown;
@@ -116,7 +118,7 @@ function setup(
     js: () => ({
       consumers: {
         get: () => Promise.resolve({ consume, info }),
-        getPushConsumer: () => Promise.resolve({ consume, info }),
+        getPushConsumer: opts.getPushConsumer ?? (() => Promise.resolve({ consume, info })),
       },
       publish: opts.publish ?? (() => Promise.resolve({ stream: 'DLQ', seq: 1 })),
     }),
@@ -141,7 +143,11 @@ function setup(
     invoke,
   } as unknown as HandlerDefinition & { kind: 'consume' };
   const ensureConsumer = vi.fn(() => Promise.resolve(undefined));
-  const streams = { ensureConsumer } as unknown as NatsStreamManager;
+  // `jsm().consumers.info()` reports the same consumer as `consumer.info()`.
+  const streams = {
+    ensureConsumer,
+    jsm: () => Promise.resolve({ consumers: { info } }),
+  } as unknown as NatsStreamManager;
   const adapter = new JetStreamConsumerAdapter(def, entry, streams);
   return { adapter, fake, consume, info, logger, ensureConsumer };
 }
@@ -829,14 +835,12 @@ describe('JetStreamConsumerAdapter', () => {
     it('creates a declared consumer with the push defaults', async () => {
       const { adapter, ensureConsumer } = setup(() => Promise.resolve(), {
         delivery: 'push',
-        deliverGroup: 'g',
         concurrency: 2,
         batch: { maxSize: 5 },
         config: { ack_wait: 10_000_000_000 },
         consumerConfig: {
           ack_wait: 10_000_000_000,
           deliver_subject: '_nats.push.ORD.d',
-          deliver_group: 'g',
           max_ack_pending: 5,
         },
       });
@@ -845,7 +849,12 @@ describe('JetStreamConsumerAdapter', () => {
         'ORD',
         { ack_wait: 10_000_000_000, durable_name: 'd' },
         undefined,
-        { deliver_subject: '_nats.push.ORD.d', deliver_group: 'g', max_ack_pending: 5 },
+        {
+          deliver_subject: '_nats.push.ORD.d',
+          flow_control: true,
+          idle_heartbeat: 5_000_000_000,
+          max_ack_pending: 5,
+        },
       );
       await adapter.stop();
       await adapter.idle();
@@ -942,10 +951,83 @@ describe('JetStreamConsumerAdapter', () => {
         'ORD',
         { deliver_group: 'g', durable_name: 'd' },
         undefined,
-        { deliver_subject: '_nats.push.ORD.d', deliver_group: 'g', max_ack_pending: 1 },
+        { deliver_subject: '_nats.push.ORD.d', deliver_group: 'g' },
       );
       await adapter.stop();
       await adapter.idle();
+    });
+
+    it('reads the consumer info when nats.js refuses it for another reason', async () => {
+      const refused = new Error('some other wording');
+      const { adapter, consume } = setup(() => Promise.resolve(), {
+        delivery: 'push',
+        getPushConsumer: () => Promise.reject(refused),
+        consumerConfig: { ack_wait: 30_000_000_000, max_ack_pending: 1 },
+      });
+      const err = await adapter.start().catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(NatsConfigError);
+      expect((err as Error).message).toMatch(/"ORD\/d" for C\.m is not a push consumer/);
+      expect((err as Error).cause).toBe(refused);
+      expect(consume).not.toHaveBeenCalled();
+    });
+
+    it('rethrows that error when the consumer info looks fine', async () => {
+      const refused = new Error('boom');
+      const { adapter } = setup(() => Promise.resolve(), {
+        delivery: 'push',
+        getPushConsumer: () => Promise.reject(refused),
+      });
+      await expect(adapter.start()).rejects.toBe(refused);
+    });
+
+    it('explains a consumer already bound by another subscriber', async () => {
+      const bound = Object.assign(new Error('consumer is already bound'), {
+        name: 'InvalidOperationError',
+      });
+      const { adapter } = setup(() => Promise.resolve(), {
+        delivery: 'push',
+        consume: () => Promise.reject(bound),
+      });
+      const err = await adapter.start().catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(NatsConfigError);
+      expect((err as Error).message).toMatch(/"ORD\/d".*C\.m.*already bound.*deliverGroup/);
+      expect((err as Error).cause).toBe(bound);
+    });
+
+    it('forceStop naks messages waiting for a slot, which then never run', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const handled: unknown[] = [];
+      const { adapter, fake } = setup(
+        async (payload) => {
+          handled.push(payload);
+          await gate;
+        },
+        {
+          delivery: 'push',
+          consumerConfig: {
+            ack_wait: 30_000_000_000,
+            deliver_subject: '_nats.push.ORD.d',
+            max_ack_pending: 1000,
+          },
+        },
+      );
+      await adapter.start();
+      const msgs = [1, 2, 3].map((id) => fakeMsg(id));
+      for (const m of msgs) fake.push(m as unknown as JsMsg);
+      await tick();
+      expect(handled).toEqual([1]);
+      await adapter.stop();
+      // The hung one, and the two waiting for its slot.
+      expect(adapter.forceStop()).toEqual({ nakked: 3, cancelledRetries: 0 });
+      for (const m of msgs) expect(m.nak).toHaveBeenCalledTimes(1);
+      release();
+      await adapter.idle();
+      expect(handled).toEqual([1]);
+      for (const m of msgs) {
+        expect(m.nak).toHaveBeenCalledTimes(1);
+        expect(m.ack).not.toHaveBeenCalled();
+      }
     });
 
     it('push start rejects unlimited max_ack_pending', async () => {

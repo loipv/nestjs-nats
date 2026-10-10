@@ -231,6 +231,38 @@ describe('Dispatcher', () => {
     }
   });
 
+  it('abandon returns pushes waiting for a slot, which never start nor get rejected', async () => {
+    const gate = deferred();
+    const { d, seen, onRejected } = setup({ process: () => gate.promise });
+    await d.push('a'); // running
+    const b = d.push('b');
+    const c = d.push('c');
+    await tick();
+    expect(d.abandon()).toEqual(['b', 'c']);
+    gate.resolve();
+    await b;
+    await c;
+    await d.idle();
+    expect(seen.map((items) => items.map((i) => i.msg))).toEqual([['a']]);
+    expect(onRejected).not.toHaveBeenCalled();
+    expect(d.active).toBe(0);
+    expect(d.abandon()).toEqual([]);
+  });
+
+  it('does not return pushes that already started or were rejected', async () => {
+    const gate = deferred();
+    const { d, onRejected } = setup({ process: () => gate.promise });
+    await d.push('a');
+    const b = d.push('b');
+    await tick();
+    void d.stop();
+    gate.resolve();
+    await b; // got the slot after stop(): rejected
+    expect(onRejected).toHaveBeenCalledWith('b');
+    expect(d.abandon()).toEqual([]);
+    await d.idle();
+  });
+
   describe('batch', () => {
     function batchSetup(
       batch: { maxSize: number; maxWait: number },

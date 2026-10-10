@@ -103,9 +103,11 @@ const PUSH_IDLE_HEARTBEAT = 5_000_000_000;
 
 /**
  * Defaults for push consumers the library creates (merged under the declared config):
- * a deliver subject of their own and as many pending messages as the handler can hold
- * at once; flow control and idle heartbeats too, except for a deliver group, where the
- * server does not support them.
+ * a deliver subject of their own, flow control, idle heartbeats, and as many pending
+ * messages as the handler can hold at once. With a deliver group, only the subject and
+ * the group: the server supports neither flow control nor idle heartbeats there, and
+ * `max_ack_pending` is shared by every instance of the group, so the server default
+ * applies rather than one instance's capacity.
  */
 export function pushConsumerDefaults(o: {
   stream: string;
@@ -113,11 +115,12 @@ export function pushConsumerDefaults(o: {
   deliverGroup?: string;
   maxAckPending: number;
 }): Partial<ConsumerConfig> {
+  const deliver_subject = `_nats.push.${o.stream}.${o.durable}`;
+  if (o.deliverGroup !== undefined) return { deliver_subject, deliver_group: o.deliverGroup };
   return {
-    deliver_subject: `_nats.push.${o.stream}.${o.durable}`,
-    ...(o.deliverGroup !== undefined
-      ? { deliver_group: o.deliverGroup }
-      : { flow_control: true, idle_heartbeat: PUSH_IDLE_HEARTBEAT }),
+    deliver_subject,
+    flow_control: true,
+    idle_heartbeat: PUSH_IDLE_HEARTBEAT,
     max_ack_pending: o.maxAckPending,
   };
 }
