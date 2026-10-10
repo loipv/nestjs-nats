@@ -110,6 +110,7 @@ export async function publishAtomic(
       first,
       { ...opts, timeout },
       {
+        what,
         wrap: failed,
         expired: (ms) =>
           abortError(`the outbound plugins did not pass the message on within ${ms} ms`),
