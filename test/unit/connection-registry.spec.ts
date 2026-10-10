@@ -126,3 +126,66 @@ describe('ConnectionRegistry closeAll', () => {
     );
   });
 });
+
+describe('ConnectionRegistry abortStartup', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('does not wait for a connection still opening, and closes it once it opens', async () => {
+    let open!: (nc: NatsConnection) => void;
+    class SlowConnectionManager extends ConnectionRegistry {
+      protected override openConnection(): Promise<NatsConnection> {
+        // Like `waitOnFirstConnect` against a server that is not up: settles only when it is.
+        return new Promise((resolve) => {
+          open = resolve;
+        });
+      }
+    }
+    const mgr = new SlowConnectionManager();
+    let settled = false;
+    void mgr.connect('a', { connection: {}, logger: false }).then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    let aborted = false;
+    void mgr.abortStartup().then(() => {
+      aborted = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(aborted).toBe(true);
+
+    const nc = { ...stuckConnection(), close: vi.fn(() => Promise.resolve()) };
+    open(nc as unknown as NatsConnection);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(nc.close).toHaveBeenCalledTimes(1);
+    expect(mgr.has('a')).toBe(false);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(settled).toBe(false);
+  });
+
+  it('gives the connections already open 1 second to drain, not the default 10', async () => {
+    const nc = stuckConnection();
+    const mgr = new FakeConnectionManager(nc);
+    const warn = vi.fn();
+    await mgr.connect('stuck', { connection: {}, logger: { log() {}, error() {}, warn } });
+    let aborted = false;
+    void mgr.abortStartup().then(() => {
+      aborted = true;
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(nc.drain).toHaveBeenCalledTimes(1);
+    expect(nc.close).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/did not drain within 1000ms/));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(aborted).toBe(true);
+  });
+});
