@@ -21,7 +21,7 @@ await client.flush();
 |---|---|
 | `'timeout'` | No reply within the timeout |
 | `'no_responders'` | Nobody is subscribed to the subject |
-| `'service_error'` | The responder replied with an error. `serviceCode` and `description` are filled in |
+| `'service_error'` | The responder replied with an error. `serviceCode` (the `Nats-Service-Error-Code` header as a number; left unset when the header is not an integer) and `description` are filled in |
 
 ## `JetStreamClient`
 
