@@ -66,7 +66,7 @@ If the `Release` workflow runs before the bootstrap is done (for example because
 
 The workflow runs on pushes to `main` and can also be started by hand from the **Actions** tab (**Run workflow**). It only runs for `loipv/nestjs-nats` on `main` (forks and other branches skip it), is serialized by a `release` concurrency group, and has `id-token: write` so npm can verify the run through OIDC.
 
-The workflow pins `changesets/action` v2 by commit SHA. Action v2 requires `@changesets/cli` v3 and refuses to run with CLI v2 (action v1 is the line for CLI v2), so upgrade the two together.
+Every action in `.github/workflows/` is pinned by full commit SHA with a `# vX.Y.Z` comment, because tags are mutable and the release job holds write permissions; `npm run check:workflows` rejects an unpinned `uses:`. Dependabot (`.github/dependabot.yml`) proposes SHA bumps weekly; review the upstream release notes before merging one. `changesets/action` is on v2: action v2 requires `@changesets/cli` v3 and refuses to run with CLI v2 (action v1 is the line for CLI v2), so upgrade the two together.
 
 ### CI gating
 

@@ -1,6 +1,7 @@
 // Guards the security-relevant shape of the workflow files by matching strings in their text.
 // Fails (exit 1) on any violation. Cheap and dependency-free; actionlint covers the syntax.
-// Rules: release.yml is the only workflow allowed to publish; every other workflow is read-only.
+// Rules: release.yml is the only workflow allowed to publish; every other workflow is read-only;
+// every action is pinned by commit SHA.
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
@@ -46,7 +47,19 @@ if (!files.includes('release.yml')) violations.push('release.yml is missing');
 if (!files.includes('ci.yml')) violations.push('ci.yml is missing');
 
 for (const file of files) {
-  const body = stripComments(readFileSync(join(dir, file), 'utf8'));
+  const raw = readFileSync(join(dir, file), 'utf8');
+  const body = stripComments(raw);
+
+  // Every action is pinned by full commit SHA with a `# vX.Y.Z` comment (Dependabot keeps both
+  // current); tags are mutable. Local actions (`./...`) and `docker://` images are exempt.
+  for (const [, ref, rest] of raw.matchAll(/^\s*(?:-\s*)?uses:\s*(\S+)(.*)$/gm)) {
+    if (ref.startsWith('./') || ref.startsWith('docker://')) continue;
+    if (!/^[^@]+@[0-9a-f]{40}$/.test(ref) || !/^\s+#\s*v\d+\.\d+\.\d+\s*$/.test(rest)) {
+      violations.push(
+        `${file}: \`${ref}\` must be pinned by full commit SHA with a \`# vX.Y.Z\` comment`,
+      );
+    }
+  }
 
   if (/NPM_TOKEN/.test(body)) {
     violations.push(`${file}: must not reference NPM_TOKEN (use trusted publishing)`);
@@ -120,5 +133,5 @@ if (violations.length > 0) {
   process.exit(1);
 }
 console.log(
-  `check-workflows: ok (${files.join(', ')}; release.yml push-to-main (+ workflow_dispatch) only, id-token: write, no NPM_TOKEN; others read-only)`,
+  `check-workflows: ok (${files.join(', ')}; actions pinned by SHA; release.yml push-to-main (+ workflow_dispatch) only, id-token: write, no NPM_TOKEN; others read-only)`,
 );

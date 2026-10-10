@@ -1,0 +1,34 @@
+version: 2
+updates:
+  # The workflows pin every action by commit SHA (with a `# vX.Y.Z` comment); this keeps the pins
+  # current. Dependabot updates the SHA and the comment together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ['*']
+    commit-message:
+      prefix: ci
+
+  # Root devDependencies only. The peerDependencies ranges are the public contract: change them by
+  # hand (with a changeset), and check that a Dependabot PR leaves them alone. Majors arrive one PR
+  # per package; minors and patches in one grouped PR.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    versioning-strategy: increase
+    allow:
+      - dependency-type: development
+    # Give the registry a few days to catch a compromised release before it is proposed.
+    cooldown:
+      default-days: 7
+    groups:
+      dev-dependencies:
+        dependency-type: development
+        update-types: [minor, patch]
+    commit-message:
+      prefix: chore
+      include: scope
