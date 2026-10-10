@@ -3,11 +3,12 @@ import { Test } from '@nestjs/testing';
 import { describe, expect, it } from 'vitest';
 import { EventsRouter } from '../src/events.router.js';
 import { OrdersHandlers } from '../src/orders.handlers.js';
+import { OrdersProjection } from '../src/orders.projection.js';
 
 async function setup() {
   const app = await Test.createTestingModule({
     imports: [NatsTestingModule.forRoot({ cloudEvents: { source: 'urn:example:test' } })],
-    providers: [OrdersHandlers, EventsRouter],
+    providers: [OrdersHandlers, OrdersProjection, EventsRouter],
   }).compile();
   app.useLogger(false); // the failing-order tests would otherwise print their expected errors
   await app.init();
@@ -70,6 +71,33 @@ describe('OrdersHandlers.get (@Subscribe request/reply)', () => {
       { request: true },
     );
     expect(missing.reply).toEqual({ data: null });
+    await app.close();
+  });
+});
+
+describe('OrdersProjection.project (@ConsumeOrdered on orders.>)', () => {
+  it('counts orders by status and acknowledges nothing', async () => {
+    const { app, harness } = await setup();
+    for (const [subject, streamSequence] of [
+      ['orders.created', 1],
+      ['orders.created', 2],
+      ['orders.shipped', 3],
+    ] as const) {
+      const res = await harness.dispatch(
+        { handler: 'OrdersProjection.project' },
+        { id: `o-${streamSequence}` },
+        { subject, streamSequence },
+      );
+      // An ordered consumer has nothing to settle: a success leaves the message as it is.
+      expect(res.settlement).toBe('none');
+    }
+
+    const stats = await harness.dispatch(
+      { handler: 'OrdersProjection.stats' },
+      {},
+      { request: true },
+    );
+    expect(stats.reply).toEqual({ data: { created: 2, shipped: 1 } });
     await app.close();
   });
 });

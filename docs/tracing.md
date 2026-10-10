@@ -39,15 +39,16 @@ NatsModule.forRoot({
 
 | Span | Kind | Created for |
 |---|---|---|
-| `publish <subject>` | `PRODUCER` | `NatsClient.publish()` and `JetStreamClient.publish()`, including every item of `publishMany()` and `batcher()` |
+| `publish <subject>` | `PRODUCER` | `NatsClient.publish()` and `JetStreamClient.publish()`, including every item of `publishMany()` and `batcher()`, and every message of `publishAtomic()` |
 | `send <subject>` | `CLIENT` | `NatsClient.request()` |
-| `process <subject>` | `CONSUMER` | A message (or batch) handled by a `@Subscribe`, `@Consume` or `@CloudEventRouter` that sends no reply |
+| `process <subject>` | `CONSUMER` | A message (or batch) handled by a `@Subscribe`, `@Consume`, `@ConsumePush`, `@ConsumeOrdered` or `@CloudEventRouter` that sends no reply |
 | `process <subject>` | `SERVER` | A message that expects a reply: a `@ServiceEndpoint`, or a request to a `@Subscribe` handler or to a `@CloudEventRouter` on a core subject |
 
 - **Propagation.** An outbound span's context is injected into the message headers (`traceparent`, `tracestate` and whatever else your propagator writes). A `process` span of a single message is a child of the context extracted from the message's headers, or starts a new trace if there is none. Without a `traceparent` header, the context comes from the [CloudEvents](./cloudevents.md) distributed tracing extension: the `ce-traceparent` and `ce-tracestate` headers of a binary event, else, for a structured event, the envelope's `traceparent` and `tracestate` attributes.
 - **Publish parent.** A `publish` or `send` span is a child of the span active where you called `publish()`, `request()`, `publishMany()` or `batcher().add()`. A batcher publishes each message in the context of the `add()` call that collected it, whichever call or timer triggers the flush.
 - **Batches.** A `process` span of a batch starts a new trace and has a link to the context of each message that carried one.
 - **Span scope.** The `process` span covers the handler and the settlement (ack, retry, dead-lettering), and spans you create in the handler are its children.
+- **Atomic batches.** Each message of a `publishAtomic()` batch has its own `publish` span, and each span ends when the whole batch is committed (or fails with the commit's error). They carry `messaging.batch.message_count`.
 - **Dead letters.** DLQ publishes do not go through plugins, so they have no `publish` span.
 
 ## Attributes
@@ -61,7 +62,7 @@ NatsModule.forRoot({
 | `messaging.message.id` | `publish`, `send`, and single-message `process` | The `Nats-Msg-Id` header, else the CloudEvent `id`, when there is one |
 | `messaging.message.body.size` | single-message `process` | Size of the body in bytes |
 | `messaging.consumer.group.name` | `process` | The durable name of a `@Consume`, or the queue group of a `@Subscribe` that has one |
-| `messaging.batch.message_count` | batch `process` | Number of messages |
+| `messaging.batch.message_count` | batch `process`, and `publish` of an atomic batch | Number of messages in the batch |
 | `messaging.nats.stream`, `messaging.nats.seq`, `messaging.nats.delivery_count` | single-message `process` of a JetStream message | Stream, stream sequence and delivery count |
 | `messaging.header.<name>` | as set by `captureHeaders` | The header's value |
 

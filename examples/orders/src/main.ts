@@ -31,6 +31,15 @@ async function bootstrap() {
   // Fails on purpose: retried three times with backoff, then sent to `dlq.ORDERS.billing`.
   await js.publish('orders.created', { id: bad, total: 10, fail: true }, { msgId: bad });
 
+  // Placed with `publishAtomic`: the order and its stock reservation are stored together or not
+  // at all (needs NATS 2.12 and `allow_atomic` on the stream). Billed like the first order.
+  const placed = `o-3-${run}`;
+  const ack = await js.publishAtomic([
+    { subject: 'orders.created', data: { id: placed, total: 15 } },
+    { subject: 'stock.reserved', data: { orderId: placed, sku: 'sku-1', qty: 1 } },
+  ]);
+  logger.log(`placed ${placed}: ${ack.count} messages in one batch, last seq ${ack.seq}`);
+
   // Routed by `EventsRouter` on the CloudEvent type.
   nats.publish(
     'events.orders',
@@ -47,6 +56,10 @@ async function bootstrap() {
   await sleep(500);
   logger.log(
     `query.orders.get ${ok} -> ${JSON.stringify(await nats.request('query.orders.get', { id: ok }))}`,
+  );
+  // Counted by the ordered consumer of `OrdersProjection`.
+  logger.log(
+    `query.orders.stats -> ${JSON.stringify(await nats.request('query.orders.stats', {}))}`,
   );
 }
 

@@ -84,9 +84,12 @@ const PLACEHOLDER_NAMES = Object.keys(placeholders);
 // bare statements); blocks with their own imports are left exactly as written.
 const FRAGMENT_IMPORTS = [
   'Consume',
+  'ConsumeOrdered',
+  'ConsumePush',
   'Ctx',
   'NatsJetStreamContext',
   'NatsModule',
+  'NatsOrderedContext',
   'Payload',
   'Subject',
   'Subscribe',

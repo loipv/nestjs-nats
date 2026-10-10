@@ -36,12 +36,13 @@ interface ConsumePushOptions extends ConsumeOptions {
 ```
 
 - Mọi option của `ConsumeOptions` (`connection`, `stream`, `durable`, `config`, `ack`, `codec`, `concurrency`, `retry`, `dlq`, `idempotency`, `batch`) giữ nguyên nghĩa.
-- Khi lib **tạo** consumer (sync mode cho phép, consumer chưa có), defaults thêm vào config (user khai báo trong `config` thì thắng):
-  - `deliver_subject`: `_nats.push.<stream>.<durable>`.
-  - `deliver_group`: `deliverGroup` nếu có.
-  - `flow_control: true`, `idle_heartbeat: 5 s`.
-  - `max_ack_pending`: `batch ? max(batch.maxSize, concurrency) : concurrency`.
-  - Các default hiện có của consumer (ack_policy explicit, …) áp dụng như `@Consume`.
+- Khi lib **tạo** consumer (sync mode cho phép, consumer chưa có), defaults thêm vào config (user khai báo trong `config` thì thắng). Các default hiện có của consumer (ack_policy explicit, …) áp dụng như `@Consume`. Phần còn lại phụ thuộc consumer có group hay không:
+  - **Không group** (không có `deliverGroup` lẫn `config.deliver_group`):
+    - `deliver_subject`: `_nats.push.<stream>.<durable>`.
+    - `flow_control: true`, `idle_heartbeat: 5 s`.
+    - `max_ack_pending`: `batch ? max(batch.maxSize, concurrency) : concurrency`.
+  - **Có group** (`deliverGroup` hoặc `config.deliver_group`): chỉ thêm `deliver_subject` (như trên) và `deliver_group`. NATS cấm `flow_control`/`idle_heartbeat` cùng `deliver_group`, nên consumer có group không bao giờ báo `heartbeats_missed`. `max_ack_pending` để mặc định của server (1000) vì giá trị này dùng chung cho cả group; muốn giới hạn thì khai báo `config.max_ack_pending`.
+- Push không `deliverGroup` thì chỉ một instance bind được: instance thứ hai nhận `NatsConfigError` gợi ý dùng `deliverGroup`.
 - `deliverGroup` và `config.deliver_group` cùng khai báo mà khác nhau → `NatsConfigError`.
 
 ### 2.2 `@ConsumeOrdered(options: ConsumeOrderedOptions)`
@@ -119,22 +120,16 @@ Có mặt trên mọi message đi qua `publishAtomic` (kể cả trường hợp
 
 ### 3.1 Push — `JetStreamConsumerAdapter` + intake strategy
 
-`JetStreamConsumerAdapter` tách phần nhận message thành interface nội bộ:
+`JetStreamConsumerAdapter` dùng chung cho pull và push (`def.delivery`); phần mở consumer tách thành hai phương thức nội bộ trả `Intake { config, consume() }`:
 
-```ts
-interface Intake {
-  open(): Promise<ConsumerMessages>; // tạo/bind consumer, trả iterator
-  readonly eager: boolean;            // true: đọc ngay, không chờ slot
-}
-```
-
-- `PullIntake` (hiện tại): `consumers.get(stream, durable).consume({ max_messages })`, `eager: false` (vòng lặp `await dispatcher.push()`).
-- `PushIntake`: `consumers.getPushConsumer(stream, durable).consume()`, `eager: true`: mỗi message được đưa vào `unsettled` (heartbeat) và xếp hàng dispatcher **không chờ slot** (`Dispatcher` thêm `enqueue(msg, attempt): void` dùng chung hàng đợi/limiter với `push`). Hàng đợi bị chặn bởi `max_ack_pending` phía server ⇒ mọi message đã nhận đều được heartbeat (push không có lỗ hổng heartbeat của pull).
+- `openPull()` (hiện tại): `consumers.get(stream, durable)`, `consume({ max_messages: capacity })`. Vòng lặp `await dispatcher.push(msg, attempt)` nên chờ slot trước khi đọc tiếp.
+- `openPush()`: sau `ensureConsumer` (kèm default push, §2.1), `consumers.getPushConsumer(stream, durable)`, `consume()`. Vòng lặp **không** await `dispatcher.push(...)` (chỉ `.catch` để log): nats.js chỉ trả lời flow control khi iterator được đọc tiếp, nên phải đọc ngay; `Dispatcher` xếp hàng FIFO sẵn có. Mỗi message nhận được đều vào `unsettled` (heartbeat) ngay, và hàng đợi bị chặn bởi `max_ack_pending` phía server ⇒ mọi message đã nhận đều được heartbeat (push không có lỗ hổng heartbeat của pull). Không thêm `Dispatcher.enqueue`.
+- `forceStop()` nak cả message còn xếp hàng chờ slot (`dispatcher.abandon()`), với cả pull (message đang chờ duy nhất) lẫn push.
 - Khởi động push (sau `ensureConsumer` như `@Consume`), đọc `consumer.info()` và ném `NatsConfigError` khi:
   - consumer không có `deliver_subject` (là pull consumer);
   - `deliverGroup` khai báo khác `deliver_group` trên server (kể cả một bên có một bên không);
   - `max_ack_pending` ≤ 0 (không giới hạn).
-- `checkMaxDeliver`, `checkBatchWait`, `watchStatus` (thêm `flow_control` không log; `heartbeats_missed` warn như hiện tại), settlement JetStream, retry `nak(delay)`, DLQ, idempotency (scope `consume:<stream>/<durable>|`), batch, `stop/idle/forceStop` dùng chung không đổi.
+- `checkMaxDeliver`, `checkBatchWait`, `watchStatus` (thêm `flow_control` không log; `heartbeats_missed` warn như hiện tại, nhưng consumer có group không bao giờ báo vì không có `idle_heartbeat`), settlement JetStream, retry `nak(delay)`, DLQ, idempotency (scope `consume:<stream>/<durable>|`), batch, `stop/idle` dùng chung không đổi.
 - Label log: `Class.method on "<stream>/<durable>" (push)`.
 
 ### 3.2 Ordered — `OrderedConsumerAdapter` (mới)
@@ -190,7 +185,7 @@ interface Intake {
 
 ## 6. Kế hoạch test của lib
 
-- **Unit:** settlement ordered (bảng §3.2, huỷ retry khi stop, DLQ publish retry), Dispatcher `enqueue`, push intake (eager + heartbeat phủ hàng đợi), validator (§4), staging atomic (thứ tự với plugin async, huỷ khi plugin ném, `next()` thấy lỗi commit, timeout ≠ 0, 1 message → publish thường, validate n/msgId), harness + mock.
+- **Unit:** settlement ordered (bảng §3.2, huỷ retry khi stop, DLQ publish retry), push intake (đọc ngay không chờ slot + heartbeat phủ hàng đợi, forceStop nak hàng đợi), validator (§4), staging atomic (thứ tự với plugin async, huỷ khi plugin ném, `next()` thấy lỗi commit, timeout ≠ 0, 1 message → publish thường, validate n/msgId), harness + mock.
 - **Integration (nats:2.12):**
   - Push: 2 app cùng `deliverGroup` chia tải (mỗi message xử lý đúng 1 lần); `ack_wait` 2 s + handler 5 s + `concurrency: 2` không redeliver; retry → DLQ; shutdown nak in-flight; consumer pull khai báo cho `@ConsumePush` → `NatsConfigError`.
   - Ordered: thứ tự giữ khi message giữa lỗi 2 lần rồi thành công; 2 replica dead-letter cùng message → DLQ có 1 bản; xoá consumer phía server → tự tạo lại và tiếp tục; `deliverPolicy: { startSeq }`.

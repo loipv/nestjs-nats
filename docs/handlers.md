@@ -62,6 +62,52 @@ The full rules, including `@Subscribe`, are in [Retry and dead-letter queue](./r
 
 With `ack: 'manual'` you settle the message yourself with `ctx.ack()`, `ctx.nak(delayMs?)` or `ctx.term(reason?)`. If the handler throws before settling, the library handles the failure like in `'auto'` mode (retry, then DLQ). If it throws after settling, the message stays as you settled it, and the error is kept on the [message outcome](./plugins.md#observing-outcomes) (so a [tracing](./tracing.md) span is marked as failed). If the handler returns without settling, the message stays unacknowledged until the consumer's `ack_wait` runs out. Only the first settle call takes effect. Long-running work needs no `ctx.working()` call: the library [extends the ack deadline for you](./retry-and-dlq.md).
 
+## `@ConsumePush(options)`: JetStream push consumer
+
+```ts
+@ConsumePush({
+  stream: 'ORDERS',
+  durable: 'billing-push',
+  deliverGroup: 'billing',
+  config: { filter_subject: 'orders.created' },
+})
+async bill(@Payload() order: OrderDto, @Ctx() ctx: NatsJetStreamContext) {
+  console.log(ctx.stream, ctx.seq, ctx.deliveryCount);
+}
+```
+
+Takes every option of `@Consume`, and settles messages, retries and dead-letters them the same way. One more option:
+
+| Option | Default | Description |
+|---|---|---|
+| `deliverGroup` | none | The consumer's `deliver_group`: instances that use the same group share the messages of the durable. Without it only one instance can bind the consumer. If `config.deliver_group` is also set, both must be equal |
+
+The server pushes messages as they arrive, so the handler reads them without waiting for a free slot, and `max_ack_pending` bounds how many are in the process. The defaults of a consumer the library creates, and the rest of the differences, are in [Pull, push and ordered consumers](./consumers.md#push-consumepush).
+
+## `@ConsumeOrdered(options)`: JetStream ordered consumer
+
+```ts
+@ConsumeOrdered({ stream: 'ORDERS', filterSubjects: 'orders.status.>' })
+project(@Payload() event: OrderEvent, @Ctx() ctx: NatsOrderedContext) {
+  console.log(ctx.streamSequence, ctx.pending);
+}
+```
+
+An ephemeral consumer without acknowledgements: every instance receives every message, one at a time and in stream order.
+
+| Option | Default | Description |
+|---|---|---|
+| `stream` | required | Stream to read. It must exist |
+| `filterSubjects` | whole stream | A subject or an array of subjects |
+| `deliverPolicy` | `'all'` | `'all'`, `'last'`, `'new'`, `'last_per_subject'`, `{ startSeq }` or `{ startTime }` (a `Date` or an ISO 8601 string) |
+| `headersOnly` | `false` | Deliver headers without the payload (`@Payload()` is `undefined`) |
+| `connection`, `codec` | | As for `@Subscribe` |
+| `retry`, `dlq`, `idempotency` | | As for `@Subscribe`. A failed message is retried in place, then dead-lettered or dropped. See [Retry and dead-letter queue](./retry-and-dlq.md#ordered-consumers) |
+
+There is no `durable`, `config`, `ack`, `concurrency` or `batch`, and an option that does not belong to `@ConsumeOrdered` fails startup with a `NatsConfigError`. `ctx.ack()`, `ctx.nak()`, `ctx.term()` and `ctx.working()` throw. A message the handler has not finished when the application shuts down is not redelivered unless the next start replays it: see [Pull, push and ordered consumers](./consumers.md#ordered-consumeordered).
+
+**`@CloudEventRouter` and the new consumers.** A [`@CloudEventRouter`](./cloudevents.md#receiving-cloudevents) supports `subscribe` and `consume` (pull) only. It cannot receive from a push or an ordered consumer.
+
 ## `@NatsService()` and `@ServiceEndpoint()`: NATS services
 
 ```ts
@@ -88,8 +134,8 @@ Each `@NatsService` class becomes one service registered with `@nats-io/services
 | `@Payload(property?, ...pipes)` | Decoded message body, or one property of it |
 | `@Headers(name?)` | All headers as `Record<string, string \| string[]>`, or one header |
 | `@Subject()` | The subject the message arrived on |
-| `@Msg()` | The raw `Msg` (core and services) or `JsMsg` (JetStream) |
-| `@Ctx()` | `NatsContext`, or `NatsJetStreamContext` in `@Consume` handlers |
+| `@Msg()` | The raw `Msg` (core and services) or `JsMsg` (JetStream, ordered consumers included) |
+| `@Ctx()` | `NatsContext`, `NatsJetStreamContext` in `@Consume` and `@ConsumePush` handlers, or `NatsOrderedContext` in `@ConsumeOrdered` handlers |
 
 Handlers run through Nest's `ExternalContextCreator`, so everything you use on HTTP controllers works here too:
 

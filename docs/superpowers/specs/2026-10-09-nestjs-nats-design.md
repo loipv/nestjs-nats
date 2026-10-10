@@ -388,7 +388,9 @@ Yêu cầu user gọi `app.enableShutdownHooks()` (ghi trong README). Trong `bef
 
 ## 18. Ngoài phạm vi v1
 
-KV, Object Store, ordered consumer, push consumer, handler request/transient-scoped, atomic batch publish, adapter `@MessagePattern`/custom transport strategy, idempotency store phân tán built-in, schema registry, helper rotate credentials.
+KV, Object Store, handler request/transient-scoped, adapter `@MessagePattern`/custom transport strategy, idempotency store phân tán built-in, schema registry, helper rotate credentials.
+
+Ordered consumer, push consumer và atomic batch publish không còn nằm ngoài phạm vi: xem [2026-10-10-consumers-atomic-design.md](./2026-10-10-consumers-atomic-design.md).
 
 ## 19. Thứ tự triển khai (đầu vào cho implementation plan)
 
