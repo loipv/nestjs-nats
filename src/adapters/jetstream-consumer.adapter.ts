@@ -22,13 +22,12 @@ import {
 } from '../pipeline/delivery.js';
 import { backoffDelay, DEFAULT_RETRY, type RetryPolicy } from '../settlement/retry.js';
 import { errorTrace } from '../util/errors.js';
+import { isPowerOfTwo } from '../util/power-of-two.js';
 import type { ForceStopResult, HandlerAdapter } from './adapter.js';
 import { Dispatcher, type DispatchItem } from './dispatcher.js';
 import { createHandlerPipeline, defaultPipelineDeps } from './handler-pipeline.js';
 
 type ConsumeDefinition = HandlerDefinition & { kind: 'consume' };
-
-const isPowerOfTwo = (n: number): boolean => n >= 1 && (n & (n - 1)) === 0;
 
 /** A bound consumer: its config as the server reports it, and how to start receiving. */
 interface Intake {
