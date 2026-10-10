@@ -1,7 +1,10 @@
 import { Injectable, Module } from '@nestjs/common';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { NatsClient } from '../../src/client/nats-client.js';
-import { NatsConnectionManager } from '../../src/connection/connection-manager.js';
+import {
+  type ConnectionEntry,
+  NatsConnectionManager,
+} from '../../src/connection/connection-manager.js';
 import { NatsConfigError } from '../../src/errors/errors.js';
 import { JetStreamClient } from '../../src/jetstream/jetstream-client.js';
 import { NatsStreamManager } from '../../src/jetstream/stream-manager.js';
@@ -15,11 +18,34 @@ import {
   NATS_FEATURE_TOKEN_PREFIX,
 } from '../../src/module/tokens.js';
 import { createTestApp } from './support/app.js';
+import { eventually, sleep } from './support/eventually.js';
 import { type NatsTestServer, startNats } from './support/nats-server.js';
+
+/** Records every connection the managers open, also when connect() rejects afterwards. */
+function recordConnections(): ConnectionEntry[] {
+  const opened: ConnectionEntry[] = [];
+  const proto = NatsConnectionManager.prototype as unknown as {
+    openConnection: (...args: unknown[]) => Promise<ConnectionEntry['nc']>;
+  };
+  const original = proto.openConnection;
+  vi.spyOn(proto, 'openConnection').mockImplementation(async function (
+    this: unknown,
+    ...args: unknown[]
+  ) {
+    const nc = await original.apply(this, args);
+    opened.push({ name: args[0] as string, nc } as ConnectionEntry);
+    return nc;
+  });
+  return opened;
+}
 
 describe('NatsModule', () => {
   let srv: NatsTestServer;
   let url: string;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
 
   beforeAll(async () => {
     srv = await startNats();
@@ -56,6 +82,30 @@ describe('NatsModule', () => {
     });
     try {
       expect(app.get(getNatsClientToken())).toBeInstanceOf(NatsClient);
+      expect(app.get(getConnectionToken()).isClosed()).toBe(false);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('forRootAsync passes only the injected dependencies to the factory', async () => {
+    @Module({ providers: [{ provide: 'NATS_URL', useValue: url }], exports: ['NATS_URL'] })
+    class ConfigModule {}
+    let received: unknown[] = [];
+    const app = await createTestApp({
+      imports: [
+        NatsModule.forRootAsync({
+          imports: [ConfigModule],
+          inject: ['NATS_URL'],
+          useFactory: (...args: unknown[]) => {
+            received = args;
+            return { connection: { servers: args[0] as string }, logger: false };
+          },
+        }),
+      ],
+    });
+    try {
+      expect(received).toEqual([url]);
       expect(app.get(getConnectionToken()).isClosed()).toBe(false);
     } finally {
       await app.close();
@@ -144,6 +194,7 @@ describe('NatsModule', () => {
   });
 
   it('fails bootstrap on duplicate name', async () => {
+    const opened = recordConnections();
     await expect(
       createTestApp({
         imports: [
@@ -152,6 +203,56 @@ describe('NatsModule', () => {
         ],
       }),
     ).rejects.toThrow(NatsConfigError);
+    // The first connection may still be connecting when the duplicate is rejected.
+    await eventually(() => expect(opened).toHaveLength(1));
+    await eventually(() => expect(opened.every((e) => e.nc.isClosed())).toBe(true));
+  });
+
+  it('closes the connections already open when another options factory fails during DI', async () => {
+    const opened = recordConnections();
+    await expect(
+      createTestApp({
+        imports: [
+          NatsModule.forRoot({ connection: { servers: url }, logger: false }),
+          NatsModule.forRootAsync({
+            name: 'b',
+            useFactory: async () => {
+              // Let the default connection open first.
+              await sleep(200);
+              throw new Error('missing NATS_B_URL');
+            },
+          }),
+        ],
+      }),
+    ).rejects.toThrow('missing NATS_B_URL');
+    expect(opened.map((e) => e.name)).toEqual(['default']);
+    expect(opened.every((e) => e.nc.isClosed())).toBe(true);
+  });
+
+  it('does not leave open a connection whose options resolve after another one failed', async () => {
+    const opened = recordConnections();
+    await expect(
+      createTestApp({
+        imports: [
+          NatsModule.forRootAsync({
+            useFactory: async () => {
+              // Still connecting when the other connection fails.
+              await sleep(200);
+              return { connection: { servers: url }, logger: false };
+            },
+          }),
+          NatsModule.forRootAsync({
+            name: 'b',
+            useFactory: () => {
+              throw new Error('missing NATS_B_URL');
+            },
+          }),
+        ],
+      }),
+    ).rejects.toThrow('missing NATS_B_URL');
+    // Without the abort, the default connection would open after its factory returns.
+    await sleep(500);
+    expect(opened.every((e) => e.nc.isClosed())).toBe(true);
   });
 
   it('close() drains connections', async () => {
