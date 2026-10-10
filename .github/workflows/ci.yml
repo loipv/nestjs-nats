@@ -8,9 +8,12 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels its previous run. Pushes to main are never cancelled or
+# dropped: each commit gets its own group (a shared group would still replace a pending run), so
+# every main commit keeps a CI result (RELEASING.md relies on it before merging the version PR).
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   checks:
@@ -96,8 +99,13 @@ jobs:
       - run: npm run example:check
 
   # Single required status check for branch protection: fails unless every job above succeeded.
+  # Without an `if`, a failed need would make this job *skipped*, and branch protection counts a
+  # skipped required check as passing; `!cancelled()` makes it run (and fail) whenever a need
+  # failed, was skipped or timed out. Only when the whole run is cancelled (a superseded pull
+  # request run) is it skipped instead of reported as a failure; the newer run reports for the
+  # new head commit.
   ci-ok:
-    if: always()
+    if: ${{ !cancelled() }}
     needs: [checks, test, smoke, example]
     runs-on: ubuntu-latest
     timeout-minutes: 5
