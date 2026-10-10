@@ -56,9 +56,14 @@ export class BatchCollector<T> {
     return this.items.length;
   }
 
-  /** Collects `item`; resolves once it is collected, or flushed when it completed a batch. */
-  async add(item: T): Promise<void> {
+  /**
+   * Collects `item`; resolves once it is collected, or flushed when it completed a batch.
+   * `admit` is asked once a running flush is over: when it returns `false`, `item` is not
+   * collected.
+   */
+  async add(item: T, admit?: () => boolean): Promise<void> {
     while (this.flushing) await this.flushing;
+    if (admit && !admit()) return;
     this.items.push(item);
     if (this.items.length >= this.opts.maxSize) {
       await this.flushNow();

@@ -130,6 +130,25 @@ describe('BatchCollector', () => {
     expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'boom' }));
   });
 
+  it('asks admit once a running flush is over and skips the item when it refuses', async () => {
+    const gate = deferred();
+    const { collector, flushed } = setup(2, 1000, () => gate.promise);
+    await collector.add('a');
+    const running = collector.add('b');
+    const admit = vi.fn(() => false);
+    const refused = collector.add('c', admit);
+    const accepted = collector.add('d', () => true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(admit).not.toHaveBeenCalled();
+    gate.resolve();
+    await running;
+    await refused;
+    await accepted;
+    expect(admit).toHaveBeenCalledTimes(1);
+    expect(collector.take()).toEqual(['d']);
+    expect(flushed).toEqual([['a', 'b']]);
+  });
+
   it('take removes the collected items without flushing them', async () => {
     const { collector, flushed } = setup(10, 100);
     await collector.add('a');
