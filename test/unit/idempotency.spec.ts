@@ -151,6 +151,13 @@ describe('idempotencyKey', () => {
     expect(idempotencyKey(ce, () => 'x')).toBe('svc|7');
   });
 
+  it('percent-encodes the CloudEvent source so a "|" in it is unambiguous', () => {
+    const ce = (source: string, id: string) =>
+      msgWith({ 'ce-specversion': '1.0', 'ce-id': id, 'ce-source': source, 'ce-type': 't' });
+    expect(idempotencyKey(ce('a|b', 'c'))).toBe('a%7Cb|c');
+    expect(idempotencyKey(ce('a', 'b|c'))).toBe('a|b|c');
+  });
+
   it('prefers Nats-Msg-Id over the CloudEvent key', () => {
     const ce = msgWith({
       'Nats-Msg-Id': 'm1',
@@ -183,6 +190,11 @@ describe('idempotencyKey', () => {
       extensions: {},
     };
     expect(idempotencyKey(msg, () => 'x', ctx)).toBe('svc|cached');
+    // A "|" in the source is percent-encoded, so (a|b, c) and (a, b|c) do not collide.
+    ctx[CLOUD_EVENT] = { id: 'c', source: 'a|b', type: 't', specversion: '1.0', extensions: {} };
+    expect(idempotencyKey(msg, undefined, ctx)).toBe('a%7Cb|c');
+    ctx[CLOUD_EVENT] = { id: 'b|c', source: 'a', type: 't', specversion: '1.0', extensions: {} };
+    expect(idempotencyKey(msg, undefined, ctx)).toBe('a|b|c');
     ctx[CLOUD_EVENT] = undefined;
     expect(idempotencyKey(msg, () => 'x', ctx)).toBe('x');
     // A Nats-Msg-Id header still wins.

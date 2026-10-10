@@ -1,4 +1,4 @@
-import { cloudEventKey } from '../cloudevents/codec.js';
+import { cloudEventKey, cloudEventKeyOf } from '../cloudevents/codec.js';
 import type { ConnectionEntry } from '../connection/connection-manager.js';
 import { type NatsContext, NatsJetStreamContext } from '../context/nats-context.js';
 import { NatsModuleError } from '../errors/errors.js';
@@ -38,7 +38,7 @@ const DEFAULT_IN_PROGRESS_NAK_MS = 1000;
 
 /**
  * The idempotency key of a message: its `Nats-Msg-Id` header, else the CloudEvent
- * `source|id`, else what `extractor` returns. `undefined` when there is none. With the
+ * `source|id` (source percent-encoded, see `cloudEventKeyOf`), else what `extractor` returns. `undefined` when there is none. With the
  * message's context, its (cached) CloudEvent attributes are used instead of reading them
  * from the message again.
  */
@@ -52,7 +52,7 @@ export function idempotencyKey(
   let ceKey: string | undefined;
   if (ctx) {
     const meta = ctx.cloudEvent;
-    if (meta) ceKey = `${meta.source}|${meta.id}`;
+    if (meta) ceKey = cloudEventKeyOf(meta);
   } else {
     ceKey = cloudEventKey(msg);
   }
