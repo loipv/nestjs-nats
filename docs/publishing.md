@@ -25,6 +25,8 @@ Invalid arguments are the exception: a bad header name or value, or an invalid `
 | `'no_responders'` | Nobody is subscribed to the subject |
 | `'service_error'` | The responder replied with an error. `serviceCode` (the `Nats-Service-Error-Code` header as a number; left unset when the header is not an integer) and `description` are filled in |
 
+Outbound plugins must pass a request on within its timeout, or `request()` rejects with a `NatsModuleError` and nothing is sent; once it is sent, `request()` settles with the reply (or the `NatsRequestError`) without waiting for the plugins to return. A message given to `publish()` that the plugins do not pass on within 5000 ms is dropped, with an error logged. See [Outbound timing](./plugins.md#outbound-timing).
+
 ## `JetStreamClient`
 
 ```ts
@@ -45,6 +47,8 @@ class OrderPublisher {
 ```
 
 `publish()` also accepts `expect` (optimistic concurrency, for example `{ lastSubjectSequence: 41 }`), `headers`, `codec` and `timeout`. `msgId` is sent as the `Nats-Msg-Id` header, so plugins can see it. Prefer `msgId` over passing the header yourself: a `Nats-Msg-Id` header in `headers` is still honoured (it also replaces the CloudEvent `id` default), and one with another case, such as `nats-msg-id`, is sent as `Nats-Msg-Id`, but `msgId` states the intent and wins if both are given. To publish a [CloudEvent](./cloudevents.md), pass `cloudEvent` instead of building its headers. To publish many messages at once, see [Batch publishing](./batching.md#batch-publishing), and for all-or-nothing, [Atomic batches](#atomic-batches).
+
+Outbound plugins must pass the message on within `timeout` (default the JetStream client's), or `publish()` rejects with a `NatsModuleError` and nothing is sent. Once the message is sent, `publish()` settles with the `PubAck` (or the publish failure) without waiting for the plugins to return; a plugin failing after that is logged. See [Outbound timing](./plugins.md#outbound-timing).
 
 ### Atomic batches
 
@@ -68,12 +72,12 @@ class OrderPlacer {
 }
 ```
 
-Each message is `{ subject, data?, headers?, codec?, cloudEvent? }`. The result is `{ stream, seq, count, batch, duplicate: false }`: `seq` is the sequence of the last message and `batch` is the batch id (unset for a single message). `opts` takes `timeout` (the wait for the commit's ack, and for the outbound plugins to pass every message on before the batch is sent, in ms, above `0` and at most `2147483647`, which is 2^31-1: a larger or infinite value throws a `NatsConfigError`; default the JetStream client's) and `expect` (checked on the first message; there is no `lastMsgID`).
+Each message is `{ subject, data?, headers?, codec?, cloudEvent? }`. The result is `{ stream, seq, count, batch, duplicate: false }`: `seq` is the sequence of the last message and `batch` is the batch id (unset for a single message). `opts` takes `timeout` (the wait for the commit's ack, and for the outbound plugins to pass every message on before the batch is sent, in ms, above `0` and at most `2147483647`, which is 2^31-1: a larger or infinite value throws a `NatsConfigError`; default the JetStream client's, at most 2^31-1) and `expect` (checked on the first message; there is no `lastMsgID`).
 
 - **Requirements.** NATS server 2.12 or later, and a stream declared with `allow_atomic: true` (see [Streams](./streams.md)). A stream without `allow_atomic` rejects the batch.
 - **Limits.** 1 to 1000 messages per batch. The server abandons a batch that is idle for 10 seconds, and allows 50 open batches per stream.
 - **No de-duplication.** A message with a `Nats-Msg-Id` header makes `publishAtomic()` throw a `NatsConfigError` before anything is sent, and a CloudEvent's `id` is not used as `Nats-Msg-Id`, unlike in `publish()`. Retrying a batch whose commit ack was lost can store it twice.
-- **One message** is published like `JetStreamClient.publish()`: it needs no `allow_atomic`, and `batch` is unset.
+- **One message** is published like `JetStreamClient.publish()`: it needs no `allow_atomic`, `batch` is unset, and outbound plugins that do not pass it on within `timeout` make `publishAtomic()` reject with a `NatsModuleError` (nothing is sent).
 - **Failures.** A server or transport error rejects with a `NatsAtomicPublishError` (`subject`, `count`, a `cause` with credentials masked). Some commit-time refusals come from nats.js as the generic error "batch didn't contain number of published messages": that error is wrapped the same way, so it arrives as a `NatsAtomicPublishError` whose message ends with that text and whose `cause` is a copy of that error with credentials masked. Nothing is stored when the server refused the batch or when it was aborted before being sent. A timeout waiting for the commit's ack is different: the server may have stored the batch anyway, so check the stream before retrying (see No de-duplication above). Invalid arguments throw a `NatsConfigError` instead.
 - **Plugins.** Every message goes through the outbound plugins in array order, with `message.atomic = { index, count }`, and the batch is sent once all of them are ready. A plugin that throws before that aborts the whole batch: nothing is sent and `publishAtomic()` rejects with the plugin's error. If the plugins have not passed every message on within `timeout`, the batch is aborted too: nothing is sent and `publishAtomic()` rejects with a `NatsAtomicPublishError` ("aborted: not every message was staged within … ms"). Once the batch is sent, `publishAtomic()` settles with the commit's result, the ack or a `NatsAtomicPublishError`, without waiting for the plugins to return. A plugin that throws after that (after its `next()`, or giving up on a `next()` still waiting for the commit) is logged as an error on the connection's logger when it does, and does not change the result. [Tracing](./tracing.md) adds `messaging.batch.message_count` to the spans.
 
