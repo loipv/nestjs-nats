@@ -1,6 +1,7 @@
 import { HealthIndicatorService } from '@nestjs/terminus';
 import { describe, expect, it, vi } from 'vitest';
 import type { NatsConnectionManager } from '../../src/connection/connection-manager.js';
+import { NatsConfigError } from '../../src/errors/errors.js';
 import { NatsHealthIndicator } from '../../src/health/nats-health.indicator.js';
 
 type State = 'connected' | 'reconnecting' | 'draining' | 'closed';
@@ -69,6 +70,24 @@ describe('NatsHealthIndicator', () => {
       nats: { status: 'down', connection: 'default', reason: state },
     });
     expect(rtt).not.toHaveBeenCalled();
+  });
+
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 31])(
+    'rejects rttTimeout %s with a NatsConfigError',
+    async (rttTimeout) => {
+      const { ind, rtt } = setup();
+      const err = await ind.isHealthy('nats', { rttTimeout }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(NatsConfigError);
+      expect((err as Error).message).toContain('rttTimeout');
+      expect(rtt).not.toHaveBeenCalled();
+    },
+  );
+
+  it('accepts the largest timer delay as rttTimeout', async () => {
+    const { ind } = setup({ rtt: async () => 1 });
+    expect((await ind.isHealthy('nats', { rttTimeout: 2 ** 31 - 1 })).nats).toMatchObject({
+      status: 'up',
+    });
   });
 
   it('is down when rtt exceeds the timeout', async () => {
