@@ -22,6 +22,19 @@ describe('codec', () => {
     expect(decodePayload(jsonCodec(), new Uint8Array(0))).toBeUndefined();
   });
 
+  it.each([
+    ['a function', () => 1],
+    ['a symbol', Symbol('s')],
+    ['a toJSON returning undefined', { toJSON: () => undefined }],
+  ])('rejects %s instead of sending an empty payload', (_, value) => {
+    expect(() => encodePayload(jsonCodec(), value)).toThrow(TypeError);
+    expect(() => encodePayload(jsonCodec(), value)).toThrow(/not JSON-serializable/);
+  });
+
+  it('encodes undefined passed straight to jsonCodec().encode as empty', () => {
+    expect(jsonCodec().encode(undefined).length).toBe(0);
+  });
+
   it('wraps decode failures in NatsDecodeError', () => {
     const bad = new TextEncoder().encode('hello');
     expect(() => decodePayload(jsonCodec(), bad)).toThrow(NatsDecodeError);

@@ -46,7 +46,7 @@ class OrderPublisher {
 
 ## Codecs
 
-Payloads are JSON by default. A `Uint8Array` is always sent as-is, and an empty payload decodes to `undefined`. You can provide your own codec per connection (`codec` in `forRoot`), per handler, or per publish call:
+Payloads are JSON by default. A `Uint8Array` is always sent as-is, `undefined` is sent as an empty payload, and an empty payload decodes to `undefined`. A value JSON cannot represent (a function, a symbol, a `toJSON()` returning `undefined`, as well as circular values and BigInts) is not sent: encoding throws a `TypeError`, which `request()` and `JetStreamClient.publish()` reject with and `NatsClient.publish()` logs. You can provide your own codec per connection (`codec` in `forRoot`), per handler, or per publish call:
 
 ```ts
 import type { Codec } from '@loipv/nestjs-nats';

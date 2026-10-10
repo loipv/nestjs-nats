@@ -10,10 +10,23 @@ export interface Codec {
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
+/**
+ * The default codec: JSON. `undefined` encodes as an empty payload; a value
+ * `JSON.stringify` cannot represent at the top level (a function, a symbol, a `toJSON`
+ * returning `undefined`) throws a `TypeError`, as circular values and BigInts already do,
+ * instead of silently sending an empty payload.
+ */
 export function jsonCodec(): Codec {
   return {
     contentType: 'application/json',
-    encode: (data) => textEncoder.encode(JSON.stringify(data)),
+    encode: (data) => {
+      if (data === undefined) return new Uint8Array(0);
+      const json = JSON.stringify(data);
+      if (json === undefined) {
+        throw new TypeError(`jsonCodec: value is not JSON-serializable (${typeof data})`);
+      }
+      return textEncoder.encode(json);
+    },
     decode: (bytes) => JSON.parse(textDecoder.decode(bytes)),
   };
 }
