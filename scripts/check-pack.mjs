@@ -33,7 +33,8 @@ const violations = [];
 // 1. Only allowed paths, and every required top-level file is present.
 const requiredTop = ['package.json', 'README.md', 'LICENSE', 'CHANGELOG.md'];
 const allowedTop = new Set(requiredTop);
-const allowed = (p) => allowedTop.has(p) || p.startsWith('dist/') || p.startsWith('src/');
+// Only the build output ships: no sources, tests, docs or tooling.
+const allowed = (p) => allowedTop.has(p) || p.startsWith('dist/');
 for (const p of files) {
   if (!allowed(p)) violations.push(`unexpected file in tarball: ${p}`);
 }
@@ -57,14 +58,15 @@ for (const [entry, conditions] of Object.entries(exportsMap)) {
   }
 }
 
-// 3. No test files under src.
+// 3. No test files.
 for (const p of files) {
-  if (p.startsWith('src/') && /\.(spec|test)\.[cm]?[jt]sx?$/.test(p)) {
+  if (/\.(spec|test)\.[cm]?[jt]sx?$/.test(p) || /\.(spec|test)\.d\.[cm]?ts$/.test(p)) {
     violations.push(`test file shipped in tarball: ${p}`);
   }
 }
 
-// 4. Sourcemap `sources` must resolve to files inside the tarball.
+// 4. Sourcemaps are self-contained: `src/` does not ship, so every source must be inlined
+//    (`sourcesContent`).
 for (const p of files) {
   if (!p.startsWith('dist/') || !p.endsWith('.js.map')) continue;
   let map;
@@ -74,13 +76,13 @@ for (const p of files) {
     violations.push(`cannot read sourcemap ${p}: ${err.message}`);
     continue;
   }
-  const sourceRoot = map.sourceRoot ?? '';
-  for (const source of map.sources ?? []) {
-    const resolved = posix.normalize(posix.join(posix.dirname(p), sourceRoot, source));
-    if (!fileSet.has(resolved)) {
-      violations.push(`sourcemap ${p} references file not in tarball: ${resolved}`);
+  const sources = map.sources ?? [];
+  const contents = map.sourcesContent ?? [];
+  sources.forEach((source, i) => {
+    if (typeof contents[i] !== 'string') {
+      violations.push(`sourcemap ${p} does not inline its source ${source}`);
     }
-  }
+  });
 }
 
 if (violations.length > 0) {
