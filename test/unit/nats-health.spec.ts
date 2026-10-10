@@ -15,6 +15,14 @@ interface FakeOptions {
   pass?: string;
 }
 
+/** Builds the indicator as Nest's property injection would. */
+function indicator(registry: ConnectionRegistry): NatsHealthIndicator {
+  return Object.assign(new NatsHealthIndicator(), {
+    health: new HealthIndicatorService(),
+    registry,
+  });
+}
+
 function setup(opts: FakeOptions = {}) {
   const getAccountInfo = vi.fn(opts.accountInfo ?? (async () => ({})));
   const rtt = vi.fn(opts.rtt ?? (async () => 2.6));
@@ -35,7 +43,7 @@ function setup(opts: FakeOptions = {}) {
     }),
   } as unknown as ConnectionRegistry;
   return {
-    ind: new NatsHealthIndicator(new HealthIndicatorService(), manager),
+    ind: indicator(manager),
     entry,
     rtt,
     getAccountInfo,
@@ -199,7 +207,7 @@ describe('NatsHealthIndicator', () => {
         throw new Error('kaput');
       },
     } as unknown as ConnectionRegistry;
-    const ind = new NatsHealthIndicator(new HealthIndicatorService(), manager);
+    const ind = indicator(manager);
     expect((await ind.isHealthy('nats')).nats).toMatchObject({
       status: 'down',
       connection: 'default',

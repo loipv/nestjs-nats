@@ -41,6 +41,7 @@ function describeDiffs(diffs: ConfigDiff[]): string {
 }
 
 export class NatsStreamManager {
+  /** Instances are provided by `NatsModule`; this constructor is not part of the public API. */
   constructor(private readonly entry: ConnectionEntry) {}
 
   jsm(): Promise<JetStreamManager> {

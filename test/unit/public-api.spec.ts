@@ -179,6 +179,13 @@ it('exposes only the query API on NatsConnectionManager', () => {
   expect(methods.sort()).toEqual(['has', 'names', 'status', 'status$']);
 });
 
+it('keeps internal types out of the constructors of the DI-only classes', () => {
+  // Injected as properties: a constructor parameter would hand users the internal registry
+  // (and the handler explorer) through `ConstructorParameters`.
+  expectTypeOf<ConstructorParameters<typeof health.NatsHealthIndicator>>().toEqualTypeOf<[]>();
+  expectTypeOf<ConstructorParameters<typeof testing.NatsTestHarness>>().toEqualTypeOf<[]>();
+});
+
 it('exports NatsHeadersInit, not a HeadersInit shadowing the global one', () => {
   expectTypeOf<NatsHeadersInit>().toEqualTypeOf<Record<string, string | string[]>>();
   // @ts-expect-error renamed to NatsHeadersInit before 0.1.0
