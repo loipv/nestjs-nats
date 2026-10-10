@@ -52,11 +52,16 @@ export class JetStreamClient {
   ): Promise<PubAck> {
     const message = createOutgoingMessage(this.entry, 'jetstream', subject, data, opts);
     // As a header (rather than the `msgID` publish option) so outbound plugins see it. A
-    // `Nats-Msg-Id` header given by the caller wins over the CloudEvent id.
+    // `Nats-Msg-Id` header given by the caller wins over the CloudEvent id. The server
+    // matches the name exactly, so a caller's header of another case is re-set canonically.
     if (opts.msgId !== undefined) {
       message.headers.delete(MSG_ID_HEADER, 'insensitive');
       message.headers.set(MSG_ID_HEADER, opts.msgId);
-    } else if (!message.headers.has(MSG_ID_HEADER, 'insensitive')) {
+    } else if (message.headers.has(MSG_ID_HEADER, 'insensitive')) {
+      const values = message.headers.values(MSG_ID_HEADER, 'insensitive');
+      message.headers.delete(MSG_ID_HEADER, 'insensitive');
+      for (const v of values) message.headers.append(MSG_ID_HEADER, v);
+    } else {
       const ceId = message.cloudEvent?.meta.id;
       if (ceId !== undefined) message.headers.set(MSG_ID_HEADER, ceId);
     }
