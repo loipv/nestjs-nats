@@ -59,6 +59,7 @@ it('exports the runtime API', () =>
       'NatsJetStreamContext',
       'NatsModule',
       'NatsModuleError',
+      'NatsOrderedContext',
       'NatsRequestError',
       'NatsService',
       'NatsStreamManager',

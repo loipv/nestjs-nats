@@ -3,9 +3,11 @@ import { BadRequestException } from '@nestjs/common';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ConnectionEntry } from '../../src/connection/connection-registry.js';
 import { NatsContext, NatsJetStreamContext } from '../../src/context/nats-context.js';
+import { NatsOrderedContext } from '../../src/context/nats-ordered-context.js';
 import { NatsDecodeError, NatsModuleError, NonRetryableError } from '../../src/errors/errors.js';
 import { IdempotencyStoreError } from '../../src/idempotency/idempotency.js';
 import {
+  ABORT_SIGNAL,
   type Delivery,
   HANDLER_DEFINITION,
   type InboundMessage,
@@ -18,6 +20,7 @@ import { createSettlement } from '../../src/settlement/settlement.js';
 const retry = resolveRetryPolicy({ initialDelay: 100, jitter: 0 }) as RetryPolicy;
 const consumeDlq = resolveDlqPolicy('consume', true) as DlqPolicy;
 const coreDlq = resolveDlqPolicy('subscribe', true) as DlqPolicy;
+const orderedDlq = resolveDlqPolicy('ordered', undefined, true) as DlqPolicy;
 
 function logger() {
   return { log: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn(), verbose: vi.fn() };
@@ -110,6 +113,47 @@ function coreDelivery(opts: { reply?: string; attempt?: number; kind?: string } 
     logger: log,
   } as unknown as Delivery;
   return { d, log, msg, schedule };
+}
+
+function orderedDelivery(opts: { attempt?: number; signal?: AbortSignal | null } = {}) {
+  const log = logger();
+  const attempt = opts.attempt ?? 1;
+  const raw = {
+    subject: 'proj.created',
+    reply: '$JS.ACK.ORDERS.ordered_x.1.42.7.0.0',
+    data: new Uint8Array([1, 2]),
+    headers: undefined,
+    info: {
+      stream: 'ORDERS',
+      consumer: 'ordered_x',
+      streamSequence: 42,
+      deliverySequence: 7,
+      pending: 0,
+    },
+  };
+  const context = new NatsOrderedContext({ connection: 'default', raw: raw as never, attempt });
+  const msg: InboundMessage = { subject: raw.subject, data: raw.data, raw: raw as never, attempt };
+  const schedule = vi.fn();
+  const controller = new AbortController();
+  const signal = opts.signal === undefined ? controller.signal : opts.signal;
+  const handler = {
+    kind: 'ordered',
+    stream: 'ORDERS',
+    filterSubjects: [],
+    className: 'Proj',
+    methodName: 'on',
+  };
+  const d = {
+    handler,
+    [HANDLER_DEFINITION]: { ...handler, options: { stream: 'ORDERS' } },
+    [RETRY_SCHEDULER]: schedule,
+    ...(signal ? { [ABORT_SIGNAL]: signal } : {}),
+    messages: [msg],
+    outcomes: new Map(),
+    context,
+    logger: log,
+  } as unknown as Delivery;
+  return { d, log, msg, schedule, controller };
 }
 
 const nextWith = (err: unknown) => async () => {
@@ -469,6 +513,196 @@ describe('createSettlement — subscribe', () => {
     expect(schedule).not.toHaveBeenCalled();
     expect(log.error).not.toHaveBeenCalled();
     expect(log.warn).not.toHaveBeenCalled();
+  });
+});
+
+describe('createSettlement — ordered', () => {
+  const twoRetries = resolveRetryPolicy({
+    initialDelay: 100,
+    jitter: 0,
+    maxRetries: 2,
+  }) as RetryPolicy;
+  const dlqHeaders = (call: unknown) =>
+    (call as [string, Uint8Array, { headers: MsgHdrs }])[2].headers;
+
+  it('does nothing on success', async () => {
+    const { entry, jsPublish } = fakeEntry();
+    const { d, msg, schedule } = orderedDelivery();
+    await createSettlement({ entry, retry: twoRetries, dlq: orderedDlq }).handle(
+      d,
+      nextWith(undefined),
+    );
+    expect(d.outcomes.get(msg)).toEqual({ action: 'none' });
+    expect(schedule).not.toHaveBeenCalled();
+    expect(jsPublish).not.toHaveBeenCalled();
+  });
+
+  it('retries a retryable failure through the scheduler', async () => {
+    const { entry, jsPublish } = fakeEntry();
+    const { d, msg, schedule, log } = orderedDelivery({ attempt: 1 });
+    const err = new Error('x');
+    await createSettlement({ entry, retry: twoRetries, dlq: orderedDlq }).handle(d, nextWith(err));
+    expect(schedule).toHaveBeenCalledExactlyOnceWith(msg, 100);
+    expect(d.outcomes.get(msg)).toEqual({ action: 'retry', delayMs: 100, error: err });
+    expect(jsPublish).not.toHaveBeenCalled();
+    expect(log.warn).toHaveBeenCalledWith(
+      'Proj.on on "proj.created" failed (attempt 1/3), retrying in 100ms: x',
+    );
+  });
+
+  it('dead-letters once the retries are exhausted, under its own consumer name', async () => {
+    const { entry, jsPublish } = fakeEntry();
+    const { d, msg, schedule, log } = orderedDelivery({ attempt: 3 });
+    const err = new Error('x');
+    await createSettlement({ entry, retry: twoRetries, dlq: orderedDlq }).handle(d, nextWith(err));
+    expect(schedule).not.toHaveBeenCalled();
+    expect(jsPublish).toHaveBeenCalledTimes(1);
+    expect(jsPublish).toHaveBeenCalledWith('dlq.ORDERS.ordered.Proj.on', expect.anything(), {
+      headers: expect.anything(),
+    });
+    const h = dlqHeaders(jsPublish.mock.calls[0]);
+    expect(h.get('Nats-DLQ-Consumer')).toBe('ordered:Proj.on');
+    expect(h.get('Nats-Msg-Id')).toBe('dlq:ORDERS:ordered:Proj.on:42');
+    expect(h.get('Nats-DLQ-Seq')).toBe('42');
+    expect(h.get('Nats-DLQ-Deliveries')).toBe('3');
+    expect(d.outcomes.get(msg)).toEqual({
+      action: 'dlq',
+      subject: 'dlq.ORDERS.ordered.Proj.on',
+      error: err,
+    });
+    expect(log.error).toHaveBeenCalledWith(
+      'Proj.on on "proj.created" failed, sent to DLQ dlq.ORDERS.ordered.Proj.on after 3 attempts: x',
+    );
+  });
+
+  it('dead-letters a NonRetryableError on the first attempt', async () => {
+    const { entry, jsPublish } = fakeEntry();
+    const { d, msg, schedule } = orderedDelivery({ attempt: 1 });
+    const err = new NonRetryableError('poison');
+    await createSettlement({ entry, retry: twoRetries, dlq: orderedDlq }).handle(d, nextWith(err));
+    expect(schedule).not.toHaveBeenCalled();
+    expect(jsPublish).toHaveBeenCalledTimes(1);
+    expect(d.outcomes.get(msg)).toMatchObject({ action: 'dlq', error: err });
+  });
+
+  it('drops a NonRetryableError with an error log when the DLQ is off', async () => {
+    const { entry, jsPublish } = fakeEntry();
+    const { d, msg, schedule, log } = orderedDelivery({ attempt: 1 });
+    const err = new NonRetryableError('poison');
+    await createSettlement({ entry, retry: twoRetries, dlq: false }).handle(d, nextWith(err));
+    expect(schedule).not.toHaveBeenCalled();
+    expect(jsPublish).not.toHaveBeenCalled();
+    expect(d.outcomes.get(msg)).toEqual({ action: 'drop', error: err });
+    expect(log.error).toHaveBeenCalledWith(
+      'Proj.on on "proj.created" failed, gave up after 1 attempt: poison',
+    );
+  });
+
+  it('retries a failing DLQ publish with backoff until it succeeds', async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const { entry, jsPublish } = fakeEntry({
+      jsPublish: () =>
+        ++calls <= 2
+          ? Promise.reject(new Error('no stream'))
+          : Promise.resolve({ stream: 'DLQ', seq: 1 }),
+    });
+    const { d, msg, log } = orderedDelivery({ attempt: 3 });
+    const err = new Error('x');
+    let done = false;
+    const p = createSettlement({ entry, retry: twoRetries, dlq: orderedDlq })
+      .handle(d, nextWith(err))
+      .then(() => {
+        done = true;
+      });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(jsPublish).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(jsPublish).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(199);
+    expect(jsPublish).toHaveBeenCalledTimes(2);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await p;
+    expect(jsPublish).toHaveBeenCalledTimes(3);
+    const failures = log.error.mock.calls.filter((c) => String(c[0]).includes('could not be sent'));
+    expect(failures).toHaveLength(2);
+    expect(String(failures[0]?.[0])).toContain('retrying in 100ms');
+    expect(String(failures[0]?.[0])).toContain('no stream');
+    expect(String(failures[1]?.[0])).toContain('retrying in 200ms');
+    expect(d.outcomes.get(msg)).toEqual({
+      action: 'dlq',
+      subject: 'dlq.ORDERS.ordered.Proj.on',
+      error: err,
+    });
+  });
+
+  it('caps the DLQ publish backoff at maxDelay and uses the default policy when retries are off', async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const { entry, jsPublish } = fakeEntry({
+      jsPublish: () =>
+        ++calls <= 1
+          ? Promise.reject(new Error('no stream'))
+          : Promise.resolve({ stream: 'DLQ', seq: 1 }),
+    });
+    const { d, log } = orderedDelivery({ attempt: 1 });
+    const p = createSettlement({
+      entry,
+      retry: false,
+      dlq: orderedDlq,
+      random: () => 0.5,
+    }).handle(d, nextWith(new Error('x')));
+    await vi.advanceTimersByTimeAsync(1000);
+    await p;
+    expect(jsPublish).toHaveBeenCalledTimes(2);
+    expect(String(log.error.mock.calls[0]?.[0])).toContain('retrying in 1000ms');
+  });
+
+  it('abandons the DLQ publish retry when the signal aborts', async () => {
+    vi.useFakeTimers();
+    const { entry, jsPublish } = fakeEntry({
+      jsPublish: () => Promise.reject(new Error('no stream')),
+    });
+    const { d, msg, log, controller } = orderedDelivery({ attempt: 3 });
+    const err = new Error('x');
+    const p = createSettlement({ entry, retry: twoRetries, dlq: orderedDlq }).handle(
+      d,
+      nextWith(err),
+    );
+    await vi.advanceTimersByTimeAsync(50);
+    controller.abort();
+    await p;
+    expect(jsPublish).toHaveBeenCalledTimes(1);
+    expect(d.outcomes.get(msg)).toEqual({ action: 'drop', error: err });
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    expect(String(log.warn.mock.calls[0]?.[0])).toContain('abandoned at shutdown');
+    expect(String(log.warn.mock.calls[0]?.[0])).toContain('42');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('drops like a core message when the DLQ publish fails without a signal', async () => {
+    const { entry, jsPublish } = fakeEntry({
+      jsPublish: () => Promise.reject(new Error('no stream')),
+    });
+    const { d, msg, log } = orderedDelivery({ attempt: 3, signal: null });
+    const err = new Error('x');
+    await createSettlement({ entry, retry: twoRetries, dlq: orderedDlq }).handle(d, nextWith(err));
+    expect(jsPublish).toHaveBeenCalledTimes(1);
+    expect(dlqHeaders(jsPublish.mock.calls[0]).get('Nats-DLQ-Consumer')).toBe('ordered:Proj.on');
+    expect(d.outcomes.get(msg)).toEqual({ action: 'drop', error: err });
+    expect(log.error).toHaveBeenCalledTimes(1);
+    expect(String(log.error.mock.calls[0]?.[0])).toMatch(/could not be sent to DLQ.*no stream/);
+  });
+
+  it('reschedules on an idempotency store failure, like a core message', async () => {
+    const { entry, jsPublish } = fakeEntry();
+    const { d, msg, schedule } = orderedDelivery({ attempt: 9 });
+    const err = new IdempotencyStoreError(new Error('redis down'));
+    await createSettlement({ entry, retry: twoRetries, dlq: orderedDlq }).handle(d, nextWith(err));
+    expect(schedule).toHaveBeenCalledTimes(1);
+    expect(jsPublish).not.toHaveBeenCalled();
+    expect(d.outcomes.get(msg)).toMatchObject({ action: 'retry', error: err });
   });
 });
 

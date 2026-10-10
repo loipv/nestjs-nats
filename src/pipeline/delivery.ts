@@ -113,6 +113,12 @@ export const HANDLER_DEFINITION: unique symbol = Symbol('nats.handlerDefinition'
 /** Internal: key of the in-process retry scheduler on core subscription deliveries. */
 export const RETRY_SCHEDULER: unique symbol = Symbol('nats.retryScheduler');
 
+/**
+ * Internal: key of the signal aborting the in-place waits of a delivery (the DLQ publish
+ * retries of an ordered consumer) at shutdown.
+ */
+export const ABORT_SIGNAL: unique symbol = Symbol('nats.abortSignal');
+
 /** Internal: key of the set of messages the handler must not process (idempotency). */
 export const SKIPPED: unique symbol = Symbol('nats.skipped');
 
@@ -131,6 +137,8 @@ export interface InternalDelivery extends Delivery {
   readonly [FAILURES]: Map<InboundMessage, unknown>;
   /** Processes `msg` again (as the next attempt) after `delayMs`; set by the core adapter. */
   readonly [RETRY_SCHEDULER]?: (msg: InboundMessage, delayMs: number) => void;
+  /** Aborts the in-place waits of the settlement; set by the ordered adapter. */
+  readonly [ABORT_SIGNAL]?: AbortSignal;
 }
 
 /** One message of a delivery together with its own context. */
@@ -151,6 +159,8 @@ export interface DeliveryInit {
   codec: Codec;
   logger: LoggerService;
   retry?: (msg: InboundMessage, delayMs: number) => void;
+  /** Aborted at shutdown: cancels the in-place waits of the settlement. */
+  signal?: AbortSignal;
 }
 
 /** Internal: builds the delivery of one message, or of a batch of messages. */
@@ -181,6 +191,7 @@ export function createDelivery(init: DeliveryInit): InternalDelivery {
     [SKIPPED]: new Set(),
     [FAILURES]: failures,
     ...(init.retry ? { [RETRY_SCHEDULER]: init.retry } : {}),
+    ...(init.signal ? { [ABORT_SIGNAL]: init.signal } : {}),
     messages: parts.map((p) => p.message),
     outcomes: new Map(),
     context,

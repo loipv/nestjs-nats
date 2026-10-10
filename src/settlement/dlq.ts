@@ -89,13 +89,15 @@ function isJsMsg(raw: InboundMessage['raw']): raw is JsMsg {
  * `Nats-DLQ-Msg-Id`. A dead letter of a JetStream message gets its own deterministic
  * `Nats-Msg-Id` (`dlq:<stream>:<consumer>:<stream sequence>`), so a re-sent dead letter is
  * deduplicated by the DLQ stream while each consumer's dead letter is kept; a dead letter
- * of a core message has none.
+ * of a core message has none. `consumer` replaces the consumer name of the delivery info
+ * (an ordered consumer's name is random: `ordered:<Class>.<method>` is used instead).
  */
 export function buildDlqHeaders(
   msg: InboundMessage,
   err: unknown,
   deliveries: number,
   now: Date,
+  consumer?: string,
 ): MsgHdrs {
   const out = headers();
   let originalMsgId: string | undefined;
@@ -113,10 +115,11 @@ export function buildDlqHeaders(
   out.set(DLQ_HEADERS.subject, msg.subject);
   if (isJsMsg(msg.raw)) {
     const { info } = msg.raw;
+    const name = consumer ?? info.consumer;
     out.set(DLQ_HEADERS.stream, info.stream);
-    out.set(DLQ_HEADERS.consumer, info.consumer);
+    out.set(DLQ_HEADERS.consumer, name);
     out.set(DLQ_HEADERS.seq, String(info.streamSequence));
-    out.set('Nats-Msg-Id', `dlq:${info.stream}:${info.consumer}:${info.streamSequence}`);
+    out.set('Nats-Msg-Id', `dlq:${info.stream}:${name}:${info.streamSequence}`);
   }
   if (originalMsgId) out.set(DLQ_HEADERS.msgId, originalMsgId);
   out.set(DLQ_HEADERS.deliveries, String(deliveries));
@@ -137,7 +140,10 @@ export function isNoResponders(err: unknown): boolean {
   return false;
 }
 
-/** Internal: publishes a dead letter to an already resolved subject. */
+/**
+ * Internal: publishes a dead letter to an already resolved subject; `consumer` overrides
+ * the consumer name of the headers (see `buildDlqHeaders`).
+ */
 export async function sendToDlq(
   entry: ConnectionEntry,
   subject: string,
@@ -145,8 +151,9 @@ export async function sendToDlq(
   msg: InboundMessage,
   err: unknown,
   deliveries: number,
+  consumer?: string,
 ): Promise<void> {
-  const h = buildDlqHeaders(msg, err, deliveries, new Date());
+  const h = buildDlqHeaders(msg, err, deliveries, new Date(), consumer);
   if (mode === 'core') {
     entry.nc.publish(subject, msg.data, { headers: h });
     return;

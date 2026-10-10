@@ -4,7 +4,7 @@ import { readCloudEventMeta } from '../cloudevents/codec.js';
 import type { CloudEventMeta } from '../cloudevents/types.js';
 import { fromMsgHdrs } from '../codec/headers.js';
 
-export type NatsContextKind = 'core' | 'jetstream' | 'service';
+export type NatsContextKind = 'core' | 'jetstream' | 'ordered' | 'service';
 
 export interface NatsContextInit<R extends NatsMsg | JsMsg = NatsMsg | JsMsg> {
   kind: NatsContextKind;
@@ -48,7 +48,7 @@ export class NatsContext<R extends NatsMsg | JsMsg = NatsMsg | JsMsg> {
   /** The subject to reply to, if the sender expects a reply (never for JetStream messages). */
   get replyTo(): string | undefined {
     // A JetStream message's reply subject is its `$JS.ACK...` subject, not a reply target.
-    if (this.#kind === 'jetstream') return undefined;
+    if (this.#kind === 'jetstream' || this.#kind === 'ordered') return undefined;
     return (this.#raw as NatsMsg).reply || undefined;
   }
 
