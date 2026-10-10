@@ -9,6 +9,7 @@ import type { InstanceWrapper } from '@nestjs/core/injector/instance-wrapper.js'
 import type { HandlerAdapter } from '../adapters/adapter.js';
 import { CoreSubscriptionAdapter } from '../adapters/core-subscription.adapter.js';
 import { JetStreamConsumerAdapter } from '../adapters/jetstream-consumer.adapter.js';
+import { OrderedConsumerAdapter } from '../adapters/ordered-consumer.adapter.js';
 import {
   NatsServiceAdapter,
   type ServiceEndpointDefinition,
@@ -147,8 +148,8 @@ export class NatsLifecycle
           });
           break;
         case 'ordered':
-          // Replaced by the ordered consumer adapter.
-          throw new NatsConfigError('@ConsumeOrdered is not wired yet');
+          adapters.push({ adapter: new OrderedConsumerAdapter(def, entry), entry });
+          break;
         case 'service-endpoint': {
           // `validateHandlers` already rejected endpoints of classes without `@NatsService`.
           if (def.service === undefined) break;
