@@ -1,7 +1,7 @@
 node_modules
 dist
 coverage
-.docs-check-tmp
+.docs-check-tmp*
 test/smoke/*/node_modules
 test/smoke/*/package-lock.json
 examples/*/node_modules

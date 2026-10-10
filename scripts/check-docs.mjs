@@ -1,4 +1,4 @@
-// Checks the documentation: every ```ts block in README.md and docs/*.md must typecheck
+// Checks the documentation: every ```ts (or ```typescript, ```tsx) block in README.md and docs/*.md must typecheck
 // against the real build (dist/, resolved through the package's own `exports`), and every
 // relative Markdown link must point to an existing file and, if it has one, an existing anchor.
 // Run through `npm run docs:check`, which builds first (`npm run docs:check:only` skips the
@@ -9,9 +9,16 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-// The temp dir lives inside the repo (git-ignored) so that `@loipv/nestjs-nats` and its subpaths
-// resolve through the package self-reference, exactly like for a consumer. It is always removed.
-const tmp = join(root, '.docs-check-tmp');
+// The temp dir lives inside the repo (git-ignored as `.docs-check-tmp*`) so that
+// `@loipv/nestjs-nats` and its subpaths resolve through the package self-reference, exactly like
+// for a consumer. The pid suffix keeps concurrent runs apart. It is always removed.
+const tmp = join(root, `.docs-check-tmp-${process.pid}`);
+// Fence languages that are typechecked, with the extension the generated file gets.
+const TS_FENCES = new Map([
+  ['ts', '.ts'],
+  ['typescript', '.ts'],
+  ['tsx', '.tsx'],
+]);
 const LIB = '@loipv/nestjs-nats';
 
 if (!existsSync(join(root, 'dist', 'index.d.ts'))) {
@@ -55,19 +62,8 @@ function scan(text) {
 
 // ---------------------------------------------------------------- examples
 
-const PLACEHOLDER_NAMES = [
-  'OrderDto',
-  'OrderEvent',
-  'CreateOrderDto',
-  'OrderService',
-  'PaymentService',
-  'PaymentDeclinedError',
-  'InvoiceService',
-  'AnalyticsService',
-  'TenantGuard',
-  'client',
-];
-
+// Declarations for names the examples use without defining them; each is added to a block that
+// does not declare the name itself.
 const placeholders = {
   OrderDto: 'declare class OrderDto { id: string; total: number }',
   OrderEvent: 'declare class OrderEvent { id: string; total: number }',
@@ -82,6 +78,7 @@ const placeholders = {
   TenantGuard: 'declare class TenantGuard { canActivate(): boolean }',
   client: `declare const client: __lib.NatsClient`,
 };
+const PLACEHOLDER_NAMES = Object.keys(placeholders);
 
 // Identifiers made available to blocks that have no imports at all (decorator fragments and
 // bare statements); blocks with their own imports are left exactly as written.
@@ -151,10 +148,17 @@ function checkExamples(failures) {
   rmSync(tmp, { recursive: true, force: true });
   mkdirSync(tmp, { recursive: true });
   const cleanup = () => rmSync(tmp, { recursive: true, force: true });
-  process.on('SIGINT', () => {
-    cleanup();
-    process.exit(130);
-  });
+  // tsc runs through spawnSync, so a handler only runs once it returns; registering one still
+  // matters, because it stops a signal from killing this process before `finally` cleans up.
+  for (const [signal, code] of [
+    ['SIGINT', 130],
+    ['SIGTERM', 143],
+  ]) {
+    process.on(signal, () => {
+      cleanup();
+      process.exit(code);
+    });
+  }
   try {
     const index = new Map(); // generated file name -> { label, headLines, startLine }
     let count = 0;
@@ -162,10 +166,11 @@ function checkExamples(failures) {
       const { blocks } = scan(readFileSync(join(root, file), 'utf8'));
       let n = 0;
       for (const block of blocks) {
-        if (block.lang !== 'ts') continue;
+        const ext = TS_FENCES.get(block.lang);
+        if (ext === undefined) continue;
         n++;
         count++;
-        const name = `${file.replace(/[^A-Za-z0-9]+/g, '_')}__block${n}.ts`;
+        const name = `${file.replace(/[^A-Za-z0-9]+/g, '_')}__block${n}${ext}`;
         const { text, headLines } = buildExample(block.code);
         writeFileSync(join(tmp, name), text);
         index.set(name, {
@@ -187,8 +192,9 @@ function checkExamples(failures) {
             sourceMap: false,
             noUnusedLocals: false,
             noUnusedParameters: false,
+            jsx: 'preserve',
           },
-          include: ['./*.ts'],
+          include: ['./*.ts', './*.tsx'],
         },
         null,
         2,
@@ -209,7 +215,7 @@ function checkExamples(failures) {
     if (res.status !== 0) {
       for (const line of output.split('\n')) {
         if (line.trim() === '') continue;
-        const m = /^(?:\.docs-check-tmp[\\/])?([^()]+)\((\d+),(\d+)\): (.*)$/.exec(line);
+        const m = /^(?:\.docs-check-tmp-\d+[\\/])?([^()]+)\((\d+),(\d+)\): (.*)$/.exec(line);
         const info = m ? index.get(m[1].split(/[\\/]/).pop()) : undefined;
         if (m && info) {
           const srcLine = info.startLine + (Number(m[2]) - info.headLines);
@@ -310,5 +316,5 @@ if (linkFailures.length > 0) {
 }
 if (exampleFailures.length > 0 || linkFailures.length > 0) process.exit(1);
 console.log(
-  `docs:check: ${blocks} ts block(s) typecheck, ${links} relative link(s) resolve, in ${docFiles.length} file(s)`,
+  `docs:check: ${blocks} TypeScript block(s) typecheck, ${links} relative link(s) resolve, in ${docFiles.length} file(s)`,
 );
