@@ -62,7 +62,7 @@ const deadLetterAlerts: NatsPlugin = {
 
 | `action` | Meaning | Other fields |
 |---|---|---|
-| `'ack'` | Acknowledged: automatically after success, or by the handler itself | |
+| `'ack'` | Acknowledged: automatically after success, or by the handler itself | `error?`: set when the handler acked and then threw |
 | `'retry'` | Handed back for another attempt: a JetStream `nak(delay)`, or an in-process retry of a core message | `delayMs`, `error` |
 | `'dlq'` | Failed for good and published to the dead-letter subject | `subject`, `error` |
 | `'term'` | A JetStream message terminated without a dead letter | `error?` |

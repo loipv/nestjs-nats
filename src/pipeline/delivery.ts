@@ -53,8 +53,11 @@ export type HandlerInfo =
  * settlement or the idempotency middleware handled.
  */
 export type MessageOutcome =
-  /** Acked: auto ack after success, or the handler acked it itself. */
-  | { action: 'ack' }
+  /**
+   * Acked: auto ack after success, or the handler acked it itself. `error` is set when the
+   * handler acked it and then threw.
+   */
+  | { action: 'ack'; error?: unknown }
   /** Handed back for another attempt: JetStream `nak(delay)`, or a core in-process retry. */
   | { action: 'retry'; delayMs: number; error: unknown }
   /** Failed for good and published to the dead-letter subject. */

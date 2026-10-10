@@ -193,6 +193,11 @@ it('exports MessageOutcome as the outcome type of Delivery.outcomes', () => {
   expectTypeOf<MessageOutcome['action']>().toEqualTypeOf<
     'ack' | 'retry' | 'dlq' | 'term' | 'drop' | 'skipped' | 'replied' | 'none'
   >();
+  // A handler that acked and then threw keeps its error on the 'ack' outcome.
+  expectTypeOf<Extract<MessageOutcome, { action: 'ack' }>>().toEqualTypeOf<{
+    action: 'ack';
+    error?: unknown;
+  }>();
 });
 
 it('exports the subpath entries', () => {
