@@ -64,6 +64,8 @@ interface InternalEntry {
 }
 
 const DEFAULT_CLOSE_TIMEOUT = 10_000;
+/** How long a forced close (after the drain timed out) may take before it is abandoned. */
+const FORCED_CLOSE_TIMEOUT = 1000;
 
 const LOGGED_EVENTS = new Set<Status['type']>([
   'disconnect',
@@ -216,7 +218,8 @@ export class NatsConnectionManager {
   /**
    * Closes every connection: runs its close hooks, then drains it. Hooks and drain together
    * get at most `timeoutMs` (default 10_000) per connection, after which the connection is
-   * closed without draining. Never rejects; failures are logged.
+   * closed without draining, waiting at most `FORCED_CLOSE_TIMEOUT` more. Never rejects;
+   * failures are logged.
    */
   closeAll({ timeoutMs = DEFAULT_CLOSE_TIMEOUT }: { timeoutMs?: number } = {}): Promise<void> {
     // Each close starts synchronously: a connection without hooks is draining on return.
@@ -235,11 +238,18 @@ export class NatsConnectionManager {
     entry.logger.warn(
       `NATS connection "${entry.name}" did not drain within ${timeoutMs}ms; closed forcefully`,
     );
-    try {
-      await entry.nc.close();
-    } catch (err) {
-      entry.logger.error(
-        `NATS connection "${entry.name}" failed to close: ${redactText(errorMessage(err))}`,
+    const closing = (async () => {
+      try {
+        await entry.nc.close();
+      } catch (err) {
+        entry.logger.error(
+          `NATS connection "${entry.name}" failed to close: ${redactText(errorMessage(err))}`,
+        );
+      }
+    })();
+    if (!(await settlesWithin(closing, FORCED_CLOSE_TIMEOUT))) {
+      entry.logger.warn(
+        `NATS connection "${entry.name}" did not close within ${FORCED_CLOSE_TIMEOUT}ms; abandoned`,
       );
     }
   }

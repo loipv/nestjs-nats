@@ -1,5 +1,6 @@
 import { inspect } from 'node:util';
-import { describe, expect, it } from 'vitest';
+import type { NatsConnection } from '@nats-io/transport-node';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NatsConnectionManager } from '../../src/connection/connection-manager.js';
 import { NatsConnectionError } from '../../src/errors/errors.js';
 
@@ -65,5 +66,63 @@ describe('NatsConnectionManager connect errors', () => {
     expect(err).toBeInstanceOf(NatsConnectionError);
     expect(ownProps(err)).not.toContain('tok-s3cret');
     expect(inspect(err, { depth: 10 })).not.toContain('tok-s3cret');
+  });
+});
+
+const never = () => new Promise<never>(() => {});
+
+/** A connection that never finishes draining nor closing (e.g. a dead socket). */
+function stuckConnection() {
+  return {
+    status: () => ({ [Symbol.asyncIterator]: () => ({ next: never }) }),
+    isClosed: () => false,
+    isDraining: () => false,
+    drain: vi.fn(never),
+    close: vi.fn(never),
+    closed: never,
+  };
+}
+
+class FakeConnectionManager extends NatsConnectionManager {
+  constructor(private readonly fake: unknown) {
+    super();
+  }
+
+  protected override openConnection(): Promise<NatsConnection> {
+    return Promise.resolve(this.fake as NatsConnection);
+  }
+}
+
+describe('NatsConnectionManager closeAll', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('bounds a forced close that never settles and logs that it was abandoned', async () => {
+    const nc = stuckConnection();
+    const mgr = new FakeConnectionManager(nc);
+    const warn = vi.fn();
+    await mgr.connect('stuck', {
+      connection: {},
+      logger: { log() {}, error() {}, warn },
+    });
+    let done = false;
+    const closing = mgr.closeAll({ timeoutMs: 100 }).then(() => {
+      done = true;
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(nc.close).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/did not drain within 100ms/));
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1000);
+    await closing;
+    expect(done).toBe(true);
+    expect(warn).toHaveBeenLastCalledWith(
+      expect.stringMatching(/"stuck" did not close within 1000ms; abandoned/),
+    );
   });
 });
