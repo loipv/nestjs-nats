@@ -408,7 +408,7 @@ describe('Dispatcher', () => {
       expect(onRejected).toHaveBeenCalledWith('c');
     });
 
-    it('rejects a push that was waiting behind a flush when abandon() ran', async () => {
+    it('abandon returns pushes waiting behind a flush, which never start nor get rejected', async () => {
       const gate = deferred();
       let n = 0;
       const { d, seen, onRejected } = batchSetup({ maxSize: 1, maxWait: 60_000 }, () =>
@@ -419,13 +419,49 @@ describe('Dispatcher', () => {
       await tick();
       const late = d.push('c'); // waits behind that flush
       await tick();
-      expect(d.abandon()).toEqual(['b']);
+      expect(d.abandon()).toEqual(['b', 'c']);
       gate.resolve();
       await waiting;
       await late;
       await d.idle();
       expect(seen.map((items) => items.map((i) => i.msg))).toEqual([['a']]);
-      expect(onRejected).toHaveBeenCalledWith('c');
+      expect(onRejected).not.toHaveBeenCalled();
+      expect(d.abandon()).toEqual([]);
+    });
+
+    it('abandon returns non-awaited pushes queued behind a batch waiting for a slot', async () => {
+      // Push intake does not await push(): later messages pile up behind the waiting batch.
+      const gate = deferred();
+      let n = 0;
+      const { d, seen, onRejected } = batchSetup({ maxSize: 2, maxWait: 60_000 }, () =>
+        n++ === 0 ? gate.promise : Promise.resolve(),
+      );
+      const pushes = ['1', '2', '3', '4', '5', '6', '7', '8'].map((msg) => d.push(msg));
+      await tick();
+      expect(seen.map((items) => items.map((i) => i.msg))).toEqual([['1', '2']]);
+      expect(d.abandon()).toEqual(['3', '4', '5', '6', '7', '8']);
+      gate.resolve();
+      await Promise.all(pushes);
+      await d.idle();
+      expect(seen.map((items) => items.map((i) => i.msg))).toEqual([['1', '2']]);
+      expect(onRejected).not.toHaveBeenCalled();
+      expect(d.abandon()).toEqual([]);
+    });
+
+    it('collects a push that waited behind a flush when stop() ran, and processes it', async () => {
+      const gate = deferred();
+      let n = 0;
+      const { d, seen, onRejected } = batchSetup({ maxSize: 2, maxWait: 60_000 }, () =>
+        n++ === 0 ? gate.promise : Promise.resolve(),
+      );
+      const pushes = ['1', '2', '3', '4', '5'].map((msg) => d.push(msg));
+      await tick();
+      void d.stop();
+      gate.resolve();
+      await Promise.all(pushes);
+      await d.idle();
+      expect(seen.flatMap((items) => items.map((i) => i.msg))).toEqual(['1', '2', '3', '4', '5']);
+      expect(onRejected).not.toHaveBeenCalled();
     });
   });
 });

@@ -1030,6 +1030,45 @@ describe('JetStreamConsumerAdapter', () => {
       }
     });
 
+    it('forceStop with batch naks the messages queued behind a batch waiting for a slot', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const batches: unknown[] = [];
+      const { adapter, fake } = setup(
+        async (payload) => {
+          batches.push(payload);
+          await gate;
+        },
+        {
+          delivery: 'push',
+          batch: { maxSize: 2, maxWait: 60_000 },
+          consumerConfig: {
+            ack_wait: 30_000_000_000,
+            deliver_subject: '_nats.push.ORD.d',
+            max_ack_pending: 1000,
+          },
+        },
+      );
+      await adapter.start();
+      const msgs = [1, 2, 3, 4, 5, 6, 7, 8].map((id) => fakeMsg(id));
+      for (const m of msgs) fake.push(m as unknown as JsMsg);
+      await tick();
+      await tick();
+      // [1, 2] hangs, [3, 4] waits for its slot, 5..8 wait behind that batch.
+      expect(batches).toEqual([[1, 2]]);
+      await adapter.stop();
+      expect(adapter.forceStop()).toEqual({ nakked: 8, cancelledRetries: 0 });
+      for (const m of msgs) expect(m.nak).toHaveBeenCalledTimes(1);
+      release();
+      await adapter.idle();
+      await tick();
+      expect(batches).toEqual([[1, 2]]);
+      for (const m of msgs) {
+        expect(m.nak).toHaveBeenCalledTimes(1);
+        expect(m.ack).not.toHaveBeenCalled();
+      }
+    });
+
     it('push start rejects unlimited max_ack_pending', async () => {
       const { adapter } = setup(() => Promise.resolve(), {
         delivery: 'push',

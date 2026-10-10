@@ -40,6 +40,8 @@ export class Dispatcher<M> {
   private readonly waiting = new Set<DispatchItem<M>[]>();
   /** Pushed messages waiting for a slot (without `batch`). */
   private readonly queued = new Set<DispatchItem<M>>();
+  /** Pushed messages waiting behind a running flush before they are collected (`batch`). */
+  private readonly adding = new Set<DispatchItem<M>>();
   private stopped = false;
   private abandoned = false;
 
@@ -69,19 +71,21 @@ export class Dispatcher<M> {
       this.reject(msg);
       return;
     }
+    const item = { msg, attempt };
     if (this.collector) {
-      // Resolves once collected, or once its batch started when it completed one.
-      await this.collector.add({ msg, attempt });
-      if (this.abandoned) {
-        // Collected after `abandon()` (it waited behind a running flush): never processed.
-        for (const item of this.collector.take()) this.reject(item.msg);
-        return;
+      // Waits behind a running flush before it is collected; `abandon()` can take it back
+      // meanwhile, and then it is never collected.
+      this.adding.add(item);
+      try {
+        // Resolves once collected, or once its batch started when it completed one.
+        await this.collector.add(item, () => this.adding.delete(item));
+      } finally {
+        this.adding.delete(item);
       }
       // Collected after `stop()` flushed (it waited behind a running flush): flush it too.
       if (this.stopped && this.collector.size > 0) await this.drain();
       return;
     }
-    const item = { msg, attempt };
     this.queued.add(item);
     await this.limiter.acquire();
     if (!this.queued.delete(item)) {
@@ -136,16 +140,19 @@ export class Dispatcher<M> {
 
   /**
    * Gives up on every message received but not started: the ones waiting for a slot,
-   * being collected, and the batches waiting for a slot, which will never be processed.
-   * Also stops the dispatcher. Returns those messages so the caller can hand them back.
+   * being collected or waiting to be collected, and the batches waiting for a slot, which
+   * will never be processed. Also stops the dispatcher. Returns those messages (in the
+   * order received) so the caller can hand them back.
    */
   abandon(): M[] {
     this.stopped = true;
     this.abandoned = true;
-    const items = [...this.queued, ...(this.collector?.take() ?? [])];
+    const items = [...this.queued];
     this.queued.clear();
     for (const batch of this.waiting) items.push(...batch);
     this.waiting.clear();
+    items.push(...(this.collector?.take() ?? []), ...this.adding);
+    this.adding.clear();
     return items.map((item) => item.msg);
   }
 

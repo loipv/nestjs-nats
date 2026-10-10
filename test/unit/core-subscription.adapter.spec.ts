@@ -329,7 +329,7 @@ describe('CoreSubscriptionAdapter', () => {
       await tick();
       expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0 });
       expect(logger.warn).toHaveBeenCalledWith(
-        'Dropped 2 collected messages for C.m on "a.b" at forced stop',
+        'Dropped 2 unstarted messages (collected or queued) for C.m on "a.b" at forced stop',
       );
       await adapter.stop();
       await adapter.idle();
