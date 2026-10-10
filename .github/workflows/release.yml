@@ -28,8 +28,12 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
       # Trusted publishing (OIDC) needs npm CLI 11.5.1 or newer.
-      - run: npm install -g npm@^11.5.1
-      - run: npm ci
+      - run: npm install -g --ignore-scripts npm@^11.5.1
+      # No dependency lifecycle scripts while this job holds id-token/contents/pull-requests write:
+      # a compromised dependency's install script could otherwise mint the OIDC token and publish.
+      # Nothing the job runs needs them (native binaries come as optional dependencies). The
+      # package's own scripts (prepublishOnly on publish) still run.
+      - run: npm ci --ignore-scripts
       # changesets/action v2 is the line that supports @changesets/cli v3 (v1 is for CLI v2).
       # It uses the job's GITHUB_TOKEN through its `github-token` input default.
       - uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2

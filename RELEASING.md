@@ -17,11 +17,11 @@ Do the steps in this order: publish `0.1.0` by hand, tag it, configure the trust
 2. From a clean checkout of the commit you are about to push as `main`, publish `0.1.0`:
 
    ```sh
-   npm ci
+   npm ci --ignore-scripts
    npm publish --access public --provenance=false
    ```
 
-   `--provenance=false` is required: `publishConfig.provenance` is `true`, and npm refuses to generate provenance outside a supported CI provider (`EUSAGE: Automatic provenance generation not supported for provider: null`). `prepublishOnly` runs the build, tarball check, package checks, typecheck and unit tests first. npm asks for a one-time password (2FA). Do not create a changeset for `0.1.0`; the first changelog entry is written by hand in `CHANGELOG.md`.
+   `--ignore-scripts` keeps dependency install scripts from running on the machine that holds your npm session, as in the workflow; nothing needs them. `--provenance=false` is required: `publishConfig.provenance` is `true`, and npm refuses to generate provenance outside a supported CI provider (`EUSAGE: Automatic provenance generation not supported for provider: null`). `prepublishOnly` runs the build, tarball check, package checks, typecheck and unit tests first. npm asks for a one-time password (2FA). Do not create a changeset for `0.1.0`; the first changelog entry is written by hand in `CHANGELOG.md`.
 
 3. Tag the published commit and push the tag. The workflow creates tags and GitHub Releases only for the versions it publishes, so `0.1.0` needs this by hand:
 
@@ -64,7 +64,7 @@ If the `Release` workflow runs before the bootstrap is done (for example because
 
 3. Review and merge the **chore: version packages** PR. The `Release` workflow runs again, finds no pending changesets and publishes the new version to npm with provenance. It also pushes the `vX.Y.Z` git tag and creates a GitHub Release with the changelog entry.
 
-The workflow runs on pushes to `main` and can also be started by hand from the **Actions** tab (**Run workflow**). It only runs for `loipv/nestjs-nats` on `main` (forks and other branches skip it), is serialized by a `release` concurrency group, and has `id-token: write` so npm can verify the run through OIDC.
+The workflow runs on pushes to `main` and can also be started by hand from the **Actions** tab (**Run workflow**). It only runs for `loipv/nestjs-nats` on `main` (forks and other branches skip it), is serialized by a `release` concurrency group, and has `id-token: write` so npm can verify the run through OIDC. Because the job holds that token and write access to the repository, it installs with `npm ci --ignore-scripts`: no dependency install script runs (native binaries such as `@swc/core` arrive as optional dependencies and need none). The package's own `prepublishOnly` still runs on publish. CI installs the same way, so a dependency that starts to need an install script fails CI first; `npm run check:workflows` guards the flag in `release.yml`.
 
 Every action in `.github/workflows/` is pinned by full commit SHA with a `# vX.Y.Z` comment, because tags are mutable and the release job holds write permissions; `npm run check:workflows` rejects an unpinned `uses:`. Dependabot (`.github/dependabot.yml`) proposes SHA bumps weekly; review the upstream release notes before merging one. `changesets/action` is on v2: action v2 requires `@changesets/cli` v3 and refuses to run with CLI v2 (action v1 is the line for CLI v2), so upgrade the two together.
 
@@ -98,7 +98,7 @@ Note that `0.1.0` was published manually and has no provenance. Provenance start
 
 Check these in order:
 
-- **npm CLI too old.** Trusted publishing needs npm CLI 11.5.1 or newer. The workflow runs `npm install -g npm@^11.5.1` before publishing; keep that step. Confirm the version in the workflow log.
+- **npm CLI too old.** Trusted publishing needs npm CLI 11.5.1 or newer. The workflow runs `npm install -g --ignore-scripts npm@^11.5.1` before publishing; keep that step. Confirm the version in the workflow log.
 - **Missing `id-token: write`.** The `release` job must declare `permissions: id-token: write` (together with `contents: write` and `pull-requests: write`). Without it GitHub does not issue an OIDC token and npm falls back to token authentication, which fails. `npm run check:workflows` guards this.
 - **Wrong trusted publisher configuration.** On npmjs.com the provider must be GitHub Actions, owner `loipv`, repository `nestjs-nats` and workflow filename exactly `release.yml` (the file name, not the workflow's display name, and case-sensitive). If you rename the workflow file, update the npm configuration too.
 - **Publishing from a fork or another repository.** Trusted publishing only matches the configured repository.
@@ -116,6 +116,10 @@ The workflow only opens it when `main` contains changesets that are not yet rele
 
 `npm publish` runs `prepublishOnly` (build, tarball check, package checks, typecheck, unit tests). Read the failing step in the workflow log, fix it on `main` and push (or, if nothing needs fixing, run the workflow again by hand from the **Actions** tab); the workflow will try to publish again. A version that is already on npm is skipped.
 
+### A dependency needs its install script
+
+All installs in the workflows use `--ignore-scripts`. If a new dependency only works after its install script (a native addon built by `node-gyp`, a binary downloaded in `postinstall`), CI fails first. Prefer a dependency that ships prebuilt binaries as optional dependencies. Otherwise run just that package's script after the install (`npm rebuild <package>`) in the job that needs it, and keep it out of `release.yml` unless the release really runs that code; do not drop `--ignore-scripts` for the whole install.
+
 ### Publishing a version manually
 
-Only as a last resort, from a clean checkout of `main` at the release commit: `npm ci && npm publish --provenance=false` (provenance is only available from GitHub Actions, and `publishConfig.provenance` would otherwise make the publish fail). Then restore the normal flow.
+Only as a last resort, from a clean checkout of `main` at the release commit: `npm ci --ignore-scripts && npm publish --provenance=false` (provenance is only available from GitHub Actions, and `publishConfig.provenance` would otherwise make the publish fail). Then restore the normal flow.
