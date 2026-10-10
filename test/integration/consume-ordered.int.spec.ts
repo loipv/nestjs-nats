@@ -88,11 +88,15 @@ describe('@ConsumeOrdered', () => {
   let jsm: JetStreamManager;
   const apps: TestingModule[] = [];
 
-  const start = async <T>(provider: Type<T>): Promise<T> => {
-    const app = await createTestApp({
-      imports: [NatsModule.forRoot({ connection: { servers: srv.url }, logger: false })],
-      providers: [provider],
-    });
+  /** `silent`: the handlers fail on purpose, so Nest's error logs are silenced. */
+  const start = async <T>(provider: Type<T>, opts: { silent?: boolean } = {}): Promise<T> => {
+    const app = await createTestApp(
+      {
+        imports: [NatsModule.forRoot({ connection: { servers: srv.url }, logger: false })],
+        providers: [provider],
+      },
+      opts,
+    );
     apps.push(app);
     return app.get(provider);
   };
@@ -119,7 +123,7 @@ describe('@ConsumeOrdered', () => {
   });
 
   it('keeps stream order across retries', async () => {
-    const h = await start(RetryingHandlers);
+    const h = await start(RetryingHandlers, { silent: true });
     await publish('or1.x', [1, 2, 3, 4, 5]);
     await eventually(() => expect(h.seen).toEqual([1, 2, 3, 3, 3, 4, 5]));
   });
@@ -136,8 +140,8 @@ describe('@ConsumeOrdered', () => {
   });
 
   it('dead-letters once across replicas', async () => {
-    const a = await start(PoisonHandlers);
-    const b = await start(PoisonHandlers);
+    const a = await start(PoisonHandlers, { silent: true });
+    const b = await start(PoisonHandlers, { silent: true });
     await publish('or3.x', [1, 2, 3]);
     // Message 3 is processed once message 2 is dead-lettered.
     await eventually(() => {
