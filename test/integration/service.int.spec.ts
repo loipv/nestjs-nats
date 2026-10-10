@@ -88,6 +88,18 @@ class InvalidEndpoint {
   x() {}
 }
 
+@NatsService({ name: 'denied', version: '1.0.0' })
+@Injectable()
+class Denied {
+  @ServiceEndpoint('ok', { subject: 'den.ok' })
+  ok() {
+    return 'ok';
+  }
+
+  @ServiceEndpoint('forbidden', { subject: 'den.forbidden' })
+  forbidden() {}
+}
+
 async function infos(nc: NatsConnection, name: string): Promise<ServiceInfo[]> {
   const out: ServiceInfo[] = [];
   for await (const info of await new Svcm(nc).client().info(name)) out.push(info);
@@ -244,5 +256,48 @@ describe('@NatsService / @ServiceEndpoint', () => {
       await nc.close();
       await solo.stop();
     }
+  });
+});
+
+describe('@NatsService killed by a subscription error', () => {
+  let srv: NatsTestServer;
+
+  beforeAll(async () => {
+    srv = await startNats([], {
+      config: `authorization {
+        users = [{ user: "svc", password: "pw", permissions: { subscribe: { deny: ["den.forbidden"] } } }]
+      }`,
+    });
+  });
+
+  afterAll(async () => {
+    await srv?.stop();
+  });
+
+  it('logs the failure and does not hold up shutdown until drainTimeout', async () => {
+    const errors: string[] = [];
+    const logger = {
+      log() {},
+      warn() {},
+      error: (m: unknown) => errors.push(String(m)),
+    };
+    const app = await createTestApp({
+      imports: [
+        NatsModule.forRoot({
+          connection: { servers: srv.url, user: 'svc', pass: 'pw' },
+          logger,
+          shutdown: { drainTimeout: 10_000 },
+        }),
+      ],
+      providers: [Denied],
+    });
+    await eventually(() =>
+      expect(errors).toContainEqual(
+        expect.stringMatching(/service "denied" stopped: .*den\.forbidden.*no more requests/i),
+      ),
+    );
+    const started = Date.now();
+    await app.close();
+    expect(Date.now() - started).toBeLessThan(5_000);
   });
 });

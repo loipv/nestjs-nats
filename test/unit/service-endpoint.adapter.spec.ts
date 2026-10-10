@@ -21,6 +21,10 @@ function fakeIterator() {
   let wake: (() => void) | undefined;
   let stopped = false;
   const iterator = {
+    stop() {
+      stopped = true;
+      wake?.();
+    },
     async *[Symbol.asyncIterator]() {
       for (;;) {
         const next = queue.shift();
@@ -59,6 +63,8 @@ function setup(
   plugins: unknown[] = [],
 ) {
   const iterators = new Map<string, ReturnType<typeof fakeIterator>>();
+  let resolveStopped!: (err: Error | null) => void;
+  const stopped = new Promise<Error | null>((resolve) => (resolveStopped = resolve));
   const service = {
     addEndpoint: vi.fn((name: string) => {
       const it = fakeIterator();
@@ -67,8 +73,14 @@ function setup(
     }),
     stop: vi.fn(() => {
       for (const it of iterators.values()) it.end();
+      resolveStopped(null);
       return Promise.resolve(null);
     }),
+    stopped,
+    /** What `@nats-io/services` does when a subscription fails: the iterators never end. */
+    fail(err: Error) {
+      resolveStopped(err);
+    },
   };
   svcm.add.mockReset();
   svcm.add.mockResolvedValue(service);
@@ -147,6 +159,30 @@ describe('NatsServiceAdapter', () => {
     await adapter.idle();
   });
 
+  it('warns when it replies 5xx because a plugin failed, as the core adapter does', async () => {
+    const plugin = {
+      name: 'p',
+      inbound: {
+        handle() {
+          return Promise.reject(new Error('plugin broke'));
+        },
+      },
+    };
+    const { iterators, logger, entry, endpoint } = setup(() => Promise.resolve('ok'), [plugin]);
+    const adapter = new NatsServiceAdapter({ name: 'svc', version: '1' }, [endpoint('a')], entry);
+    await adapter.start();
+    const msg = fakeMsg('x');
+    iterators.get('a')?.push(msg);
+    await tick();
+    await tick();
+    expect(msg.respondError).toHaveBeenCalledWith(500, 'Internal Server Error');
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringMatching(/Replied 500 to request on "x" for S\.a.*svc.*plugin broke/),
+    );
+    await adapter.stop();
+    await adapter.idle();
+  });
+
   it('logs an error when an endpoint iterator ends while not stopping', async () => {
     const { iterators, logger, entry, endpoint } = setup();
     const adapter = new NatsServiceAdapter({ name: 'svc', version: '1' }, [endpoint('a')], entry);
@@ -155,6 +191,24 @@ describe('NatsServiceAdapter', () => {
     await adapter.idle();
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringMatching(/S\.a.*svc.*ended unexpectedly/),
+    );
+  });
+
+  it('logs and ends the endpoints when the service stops because of an error', async () => {
+    const { service, logger, entry, endpoint } = setup();
+    const adapter = new NatsServiceAdapter(
+      { name: 'svc', version: '1' },
+      [endpoint('a'), endpoint('b')],
+      entry,
+    );
+    await adapter.start();
+    service.fail(new Error('Permissions Violation for Subscription to "svc.a"'));
+    // Without the fix the endpoint loops never end and idle() hangs.
+    await expect(adapter.idle()).resolves.toBeUndefined();
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringMatching(/service "svc" stopped.*Permissions Violation.*no more requests/i),
+      expect.stringContaining('Permissions Violation'),
     );
   });
 
