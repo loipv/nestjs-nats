@@ -27,7 +27,14 @@ export class NatsClient {
   private readonly inflight = new Set<Promise<void>>();
 
   /** Instances are provided by `NatsModule`; this constructor is not part of the public API. */
-  constructor(private readonly entry: ConnectionEntry) {}
+  constructor(private readonly entry: ConnectionEntry) {
+    // Publishes still in their outbound plugins are sent before the connection drains. Each
+    // settles within its bound, and the registry bounds close hooks by the close timeout.
+    const off = entry.onClose(async () => {
+      off();
+      await this.settleInflight();
+    });
+  }
 
   publish(
     subject: string,
@@ -133,9 +140,14 @@ export class NatsClient {
   }
 
   async flush(): Promise<void> {
+    await this.settleInflight();
+    await this.entry.nc.flush();
+  }
+
+  /** Waits until no publish is still in its outbound plugins. */
+  private async settleInflight(): Promise<void> {
     while (this.inflight.size > 0) {
       await Promise.allSettled([...this.inflight]);
     }
-    await this.entry.nc.flush();
   }
 }

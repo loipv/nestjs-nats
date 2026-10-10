@@ -1,8 +1,12 @@
 import { inspect } from 'node:util';
 import type { NatsConnection } from '@nats-io/transport-node';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { NatsClient } from '../../src/client/nats-client.js';
+import { jsonCodec } from '../../src/codec/codec.js';
 import { ConnectionRegistry } from '../../src/connection/connection-registry.js';
 import { NatsConnectionError } from '../../src/errors/errors.js';
+import type { NatsPlugin } from '../../src/pipeline/types.js';
+import { FakeNatsConnection } from '../../src/testing/fake-connection.js';
 
 /** Every own property (enumerable or not) of `err` and of its cause chain, as text. */
 function ownProps(err: unknown, depth = 0): string {
@@ -187,5 +191,33 @@ describe('ConnectionRegistry abortStartup', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringMatching(/did not drain within 1000ms/));
     await vi.advanceTimersByTimeAsync(1000);
     expect(aborted).toBe(true);
+  });
+});
+
+describe('NatsClient at close', () => {
+  it('sends a publish still in its outbound plugins before the connection drains', async () => {
+    const fake = new FakeNatsConnection(jsonCodec());
+    const events: string[] = [];
+    fake.onPublish((m) => events.push(`publish ${m.subject}`));
+    const drain = fake.drain.bind(fake);
+    vi.spyOn(fake, 'drain').mockImplementation(() => {
+      events.push('drain');
+      return drain();
+    });
+    const slow: NatsPlugin = {
+      name: 'slow',
+      outbound: {
+        async handle(_m, next) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          await next();
+        },
+      },
+    };
+    const mgr = new FakeConnectionManager(fake);
+    const entry = await mgr.connect('default', { connection: {}, logger: false, plugins: [slow] });
+    const client = new NatsClient(entry);
+    client.publish('o', 1);
+    await mgr.closeAll();
+    expect(events).toEqual(['publish o', 'drain']);
   });
 });
