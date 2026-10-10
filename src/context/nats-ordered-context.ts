@@ -24,11 +24,6 @@ export class NatsOrderedContext extends NatsContext<JsMsg> {
     this.#attempt = init.attempt;
   }
 
-  /** Always `undefined`: the reply subject of a JetStream message is not a reply target. */
-  override get replyTo(): string | undefined {
-    return undefined;
-  }
-
   get stream(): string {
     return this.raw.info.stream;
   }
