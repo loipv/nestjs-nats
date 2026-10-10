@@ -256,4 +256,94 @@ describe('NatsLifecycle shutdown', () => {
     await shutdown;
     expect(done).toBe(true);
   });
+
+  it('gives store close its own minimum budget when closing connections used it all', async () => {
+    const { manager, entries, stores } = fakeManager({
+      default: { shutdown: { drainTimeout: 1000 } },
+    });
+    let closed = false;
+    const slow = fakeStore(
+      () =>
+        new Promise<void>((resolve) =>
+          setTimeout(() => {
+            closed = true;
+            resolve();
+          }, 500),
+        ),
+    );
+    stores.push({ connection: 'default', store: slow, owned: false });
+    // The server is gone: closing the connections takes the whole bound.
+    manager.closeAll.mockImplementation(
+      () => new Promise<void>((resolve) => setTimeout(resolve, 1000)),
+    );
+    const lifecycle = await startLifecycle(manager, []);
+    let done = false;
+    const shutdown = lifecycle.beforeApplicationShutdown().then(() => {
+      done = true;
+    });
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(400);
+    await shutdown;
+    expect(closed).toBe(true);
+    expect(entries.get('default')?.logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('warns when a store close is abandoned', async () => {
+    const { manager, entries, stores } = fakeManager({
+      default: { shutdown: { drainTimeout: 1000 } },
+    });
+    stores.push({ connection: 'default', store: fakeStore(never), owned: false });
+    const lifecycle = await startLifecycle(manager, []);
+    const shutdown = lifecycle.beforeApplicationShutdown();
+    await vi.advanceTimersByTimeAsync(1000);
+    await shutdown;
+    expect(entries.get('default')?.logger.warn).toHaveBeenCalledWith(
+      'NATS connection "default" idempotency store did not close within 1000ms; abandoned',
+    );
+  });
+
+  it('closes a store only once when shutdown runs again', async () => {
+    const close = vi.fn(async () => {});
+    const { manager, stores } = fakeManager({ default: {} });
+    stores.push({ connection: 'default', store: fakeStore(close), owned: false });
+    const lifecycle = await startLifecycle(manager, []);
+    await lifecycle.beforeApplicationShutdown();
+    await lifecycle.beforeApplicationShutdown();
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('NatsLifecycle failed bootstrap', () => {
+  it('stops, force-stops, closes the connections and closes the stores', async () => {
+    const order: string[] = [];
+    const { manager, stores } = fakeManager({ default: { shutdown: { drainTimeout: 1000 } } });
+    stores.push({
+      connection: 'default',
+      store: fakeStore(async () => {
+        order.push('store');
+      }),
+      owned: false,
+    });
+    manager.closeAll.mockImplementation(async () => {
+      order.push('closeAll');
+    });
+    const started = fakeAdapter({
+      stop: vi.fn(async () => {
+        order.push('stop');
+      }),
+      forceStop: vi.fn(() => {
+        order.push('forceStop');
+        return { nakked: 0, cancelledRetries: 0 };
+      }),
+    });
+    const failing = fakeAdapter({
+      start: vi.fn(() => Promise.reject(new Error('start failed'))),
+    });
+    await expect(
+      startLifecycle(manager, [{ adapter: started }, { adapter: failing }]),
+    ).rejects.toThrow('start failed');
+    expect(order).toEqual(['stop', 'forceStop', 'closeAll', 'store']);
+    expect(failing.forceStop).toHaveBeenCalledTimes(1);
+  });
 });
