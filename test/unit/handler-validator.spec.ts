@@ -348,11 +348,50 @@ describe('validateHandlers', () => {
       ['bad startTime', { startTime: 'nope' }, 'invalid deliverPolicy.startTime'],
       ['invalid Date', { startTime: new Date('nope') }, 'invalid deliverPolicy.startTime'],
       ['unknown policy', 'sometimes', 'invalid deliverPolicy "sometimes"'],
+      [
+        'both startSeq and startTime',
+        { startSeq: 5, startTime: '2026-01-01T00:00:00Z' },
+        'invalid deliverPolicy; expected only one of startSeq or startTime',
+      ],
     ])('rejects deliverPolicy with %s', (_, deliverPolicy, message) => {
       const run = () => validateHandlers([orderedDef({ options: { deliverPolicy } })], mgr);
       expect(run).toThrow(NatsConfigError);
       expect(run).toThrow(message);
     });
+
+    it.each([
+      ['an empty stream', { stream: '' }, 'invalid stream ""; expected a non-empty string'],
+      ['a missing stream', { stream: undefined }, 'invalid stream undefined'],
+      [
+        'an empty filter subject',
+        { filterSubjects: '' },
+        'invalid filterSubjects ""; expected a non-empty string or an array of non-empty strings',
+      ],
+      [
+        'an empty filter subject in an array',
+        { filterSubjects: ['a', ''] },
+        'invalid filterSubjects ["a",""]',
+      ],
+      [
+        'a filter subject that is not a string',
+        { filterSubjects: [1] },
+        'invalid filterSubjects [1]',
+      ],
+    ])('rejects %s', (_, options, message) => {
+      const run = () => validateHandlers([orderedDef({ options: options as never })], mgr);
+      expect(run).toThrow(NatsConfigError);
+      expect(run).toThrow(message);
+    });
+
+    it.each([
+      ['a filter subject', 'S.a'],
+      ['filter subjects', ['S.a', 'S.b']],
+      ['no filter subjects', []],
+    ])('accepts %s', (_, filterSubjects) =>
+      expect(() =>
+        validateHandlers([orderedDef({ options: { filterSubjects } })], mgr),
+      ).not.toThrow(),
+    );
 
     it.each([
       ['concurrency', 2],
