@@ -48,7 +48,7 @@ NatsModule.forRoot({
 - **Publish parent.** A `publish` or `send` span is a child of the span active where you called `publish()`, `request()`, `publishMany()` or `batcher().add()`. A batcher publishes each message in the context of the `add()` call that collected it, whichever call or timer triggers the flush.
 - **Batches.** A `process` span of a batch starts a new trace and has a link to the context of each message that carried one.
 - **Span scope.** The `process` span covers the handler and the settlement (ack, retry, dead-lettering), and spans you create in the handler are its children.
-- **Atomic batches.** Each message of a `publishAtomic()` batch has its own `publish` span, and each span ends when the whole batch is committed (or fails with the commit's error). They carry `messaging.batch.message_count`.
+- **Atomic batches.** Each message of a `publishAtomic()` batch has its own `publish` span, and each span ends when the batch settles: with the commit's result once it is sent (or its error), or, for a batch aborted before sending (an outbound plugin failed, or staging outlasted the timeout), with the abort error. A span can end after `publishAtomic()` has already settled: once the batch is sent, `publishAtomic()` does not wait for the plugins to return. They carry `messaging.batch.message_count`.
 - **Dead letters.** DLQ publishes do not go through plugins, so they have no `publish` span.
 
 ## Attributes
