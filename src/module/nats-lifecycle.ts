@@ -39,17 +39,21 @@ interface ManagedAdapter {
 }
 
 const DEFAULT_DRAIN_TIMEOUT = 10_000;
+/** The least time stores get to close, even when closing the connections used it all. */
+const MIN_STORE_CLOSE_TIMEOUT = 1000;
 
 /**
  * Syncs declared streams/consumers on module init, starts handler adapters on
  * bootstrap and shuts them down gracefully, within `shutdown.drainTimeout`, before closing
- * the connections. A failed init/bootstrap closes everything before rethrowing.
+ * the connections. A failed init/bootstrap shuts down the same way before rethrowing.
  */
 @Injectable()
 export class NatsLifecycle
   implements OnModuleInit, OnApplicationBootstrap, BeforeApplicationShutdown
 {
   private adapters: ManagedAdapter[] = [];
+  /** Stores already closed: a failed bootstrap followed by `app.close()` shuts down twice. */
+  private readonly closedStores = new WeakSet<IdempotencyStore>();
 
   constructor(
     private readonly manager: NatsConnectionManager,
@@ -66,7 +70,8 @@ export class NatsLifecycle
         for (const { stream, config } of consumers) await sm.ensureConsumer(stream, config);
       }
     } catch (err) {
-      await this.abort();
+      // Releases everything so no socket or store stays open.
+      await this.shutdown();
       throw err;
     }
   }
@@ -80,21 +85,27 @@ export class NatsLifecycle
         await managed.adapter.start();
       }
     } catch (err) {
-      await this.abort();
+      await this.shutdown();
       throw err;
     }
   }
 
+  async beforeApplicationShutdown(): Promise<void> {
+    await this.shutdown();
+  }
+
   /**
-   * Shuts down in phases (spec §14), none waiting longer than `drainTimeout` (counted from
-   * the start of shutdown for phases 1–2, so at most about `2 × drainTimeout` overall):
+   * Shuts down in phases (spec §14), on shutdown and after a failed init/bootstrap. Phases
+   * 1–2 share one `drainTimeout`, phases 4–5 another; a forced close may take 1 s more and
+   * stores always get at least `min(1 s, drainTimeout)`, so about `2 × drainTimeout + 2 s`
+   * at most overall:
    * 1. stop receiving new messages;
    * 2. wait for in-flight handlers;
    * 3. force-stop: nak JetStream messages still not settled, cancel pending retries;
    * 4. close the connections (close hooks, then drain; closed forcefully past the timeout);
    * 5. close the idempotency stores.
    */
-  async beforeApplicationShutdown(): Promise<void> {
+  private async shutdown(): Promise<void> {
     const adapters = this.adapters;
     this.adapters = [];
     const drainTimeout = this.drainTimeout();
@@ -111,7 +122,9 @@ export class NatsLifecycle
 
     const closeDeadline = Date.now() + drainTimeout;
     await this.manager.closeAll({ timeoutMs: drainTimeout });
-    await this.closeIdempotencyStores(closeDeadline - Date.now());
+    await this.closeIdempotencyStores(
+      Math.max(closeDeadline - Date.now(), Math.min(MIN_STORE_CLOSE_TIMEOUT, drainTimeout)),
+    );
   }
 
   private createAdapters(defs: HandlerDefinition[]): ManagedAdapter[] {
@@ -152,15 +165,6 @@ export class NatsLifecycle
     return adapters;
   }
 
-  /** Releases everything after a failed init/bootstrap so no socket stays open. */
-  private async abort(): Promise<void> {
-    const adapters = this.adapters;
-    this.adapters = [];
-    const drainTimeout = this.drainTimeout();
-    await settlesWithin(this.stopAdapters(adapters), drainTimeout);
-    await this.manager.closeAll({ timeoutMs: drainTimeout });
-  }
-
   private async stopAdapters(adapters: ManagedAdapter[]): Promise<void> {
     // Adapters log their own failures; a failing stop must not block the others.
     await Promise.allSettled(adapters.map(({ adapter }) => adapter.stop()));
@@ -193,7 +197,8 @@ export class NatsLifecycle
 
   /**
    * Closes each idempotency store once: the ones handed to handlers and the ones given in
-   * the module options (a store may be shared by several connections). Waits at most `ms`.
+   * the module options (a store may be shared by several connections). Waits at most `ms`,
+   * then warns about each store still closing.
    */
   private async closeIdempotencyStores(ms: number): Promise<void> {
     const stores = new Map<IdempotencyStore, ConnectionEntry>();
@@ -205,16 +210,29 @@ export class NatsLifecycle
       const store = entry.options.idempotency?.store;
       if (store && !stores.has(store)) stores.set(store, entry);
     }
-    const closing = [...stores].map(async ([store, entry]) => {
+    const pending = new Map<IdempotencyStore, ConnectionEntry>();
+    for (const [store, entry] of stores) {
+      if (this.closedStores.has(store)) continue;
+      this.closedStores.add(store);
+      pending.set(store, entry);
+    }
+    const closing = [...pending].map(async ([store, entry]) => {
       try {
         await store.close?.();
       } catch (err) {
         entry.logger.error(
           `NATS connection "${entry.name}" failed to close its idempotency store: ${redactText(errorMessage(err))}`,
         );
+      } finally {
+        pending.delete(store);
       }
     });
-    await settlesWithin(Promise.all(closing), ms);
+    if (await settlesWithin(Promise.all(closing), ms)) return;
+    for (const entry of pending.values()) {
+      entry.logger.warn(
+        `NATS connection "${entry.name}" idempotency store did not close within ${ms}ms; abandoned`,
+      );
+    }
   }
 
   /** The effective `shutdown.drainTimeout`: the largest one of every connection. */
