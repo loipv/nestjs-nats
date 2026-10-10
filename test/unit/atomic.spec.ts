@@ -187,6 +187,34 @@ describe('publishAtomic', () => {
     expect(fake.jsPublished).toEqual([]);
   });
 
+  it('sends nothing once aborted, even when the remaining messages stage later', async () => {
+    // Index 0 is staged, then its plugin gives up on next(); index 1 stages after that.
+    const racing = plugin(async (m, next) => {
+      if (m.atomic?.index === 0) {
+        await Promise.race([
+          next(),
+          delay(30).then(() => {
+            throw new Error('plugin timeout');
+          }),
+        ]);
+      } else {
+        await delay(100);
+        await next();
+      }
+    });
+    const { client, fake, fakeJs } = setup({ plugins: [racing] });
+    const startBatch = vi.spyOn(fakeJs, 'startBatch');
+    await expect(
+      client.publishAtomic([
+        { subject: 'o', data: 0 },
+        { subject: 'o', data: 1 },
+      ]),
+    ).rejects.toThrow('plugin timeout');
+    await delay(150);
+    expect(startBatch).not.toHaveBeenCalled();
+    expect(fake.jsPublished).toEqual([]);
+  });
+
   it('aborts when a plugin does not pass a message on', async () => {
     const dropping = plugin(async (m, next) => {
       if (m.atomic?.index !== 1) await next();
@@ -267,6 +295,12 @@ describe('publishAtomic', () => {
     const startBatch = vi.spyOn(fakeJs, 'startBatch');
     await client.publishAtomic(three, { expect: { lastSequence: 0 } });
     expect(startBatch.mock.calls[0]?.[2]).toMatchObject({ expect: { lastSequence: 0 } });
+  });
+
+  it('has a fake batch that rejects a second commit, as nats.js does', async () => {
+    const batch = await new FakeNatsConnection(jsonCodec()).jetstream().startBatch('o');
+    await batch.commit('o');
+    await expect(batch.commit('o')).rejects.toThrow('batch publisher is done');
   });
 
   describe('timeout', () => {

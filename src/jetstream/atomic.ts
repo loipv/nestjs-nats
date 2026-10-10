@@ -94,7 +94,7 @@ export async function publishAtomic(
       cause: redactError(err, secrets),
     });
   };
-  const aborted = (reason: string, cause?: unknown): NatsAtomicPublishError =>
+  const abortError = (reason: string, cause?: unknown): NatsAtomicPublishError =>
     new NatsAtomicPublishError(`${what} aborted: ${reason}`, { subject, count, cause });
 
   const [first] = outgoing;
@@ -106,6 +106,7 @@ export async function publishAtomic(
   const staged = new Array<Staged>(count);
   let stagedCount = 0;
   let sending: Promise<AtomicPublishAck> | undefined;
+  let aborted = false;
   let resolveCommit!: () => void;
   let rejectCommit!: (err: unknown) => void;
   const committed = new Promise<void>((resolve, reject) => {
@@ -114,6 +115,12 @@ export async function publishAtomic(
   });
   // Nothing may be waiting on it when the batch is aborted.
   committed.catch(() => {});
+  /** Aborts the batch unless it was sent (then its commit settles every plugin's next()). */
+  const abort = (err: NatsAtomicPublishError): void => {
+    if (sending) return;
+    aborted = true;
+    rejectCommit(err);
+  };
 
   const send = async (): Promise<AtomicPublishAck> => {
     // Called once every message is staged.
@@ -126,7 +133,8 @@ export async function publishAtomic(
         ...(opts.expect ? { expect: opts.expect } : {}),
       });
       for (const m of staged.slice(1, -1)) batch.add(m.subject, m.payload, { headers: m.headers });
-      // Always explicit: nats.js's commit defaults its timeout to 0.
+      // Explicit rather than nats.js's fallback: its commit passes 0, which its publish
+      // replaces with the client's timeout.
       const ack = await batch.commit(last.subject, last.payload, {
         headers: last.headers,
         timeout,
@@ -141,7 +149,8 @@ export async function publishAtomic(
   const chains = outgoing.map((message, index) =>
     compose(middlewares, async (m) => {
       staged[index] = { subject: m.subject, payload: encodeOutgoing(m), headers: m.headers };
-      if (++stagedCount === count) {
+      // A chain may fail after staging its own message, before the last one is staged.
+      if (++stagedCount === count && !aborted) {
         sending = send();
         sending.then(resolveCommit, rejectCommit);
       }
@@ -149,13 +158,12 @@ export async function publishAtomic(
     })(message).then(
       () => {
         if (staged[index]) return;
-        const err = aborted(`an outbound plugin did not pass message ${index} on`);
-        rejectCommit(err);
+        const err = abortError(`an outbound plugin did not pass message ${index} on`);
+        abort(err);
         throw err;
       },
       (err: unknown) => {
-        // Once the batch is sent, its commit settles every plugin's next().
-        if (!sending) rejectCommit(aborted(`message ${index} failed in an outbound plugin`, err));
+        abort(abortError(`message ${index} failed in an outbound plugin`, err));
         throw err;
       },
     ),

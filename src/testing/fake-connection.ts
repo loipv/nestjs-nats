@@ -287,6 +287,8 @@ export class FakeNatsConnection {
         stage(subject, payload, opts);
       },
       commit: (subject, payload, opts) => {
+        // Rejects (nats.js's commit is async); `add` throws, as in nats.js.
+        if (done) return Promise.reject(new Error('batch publisher is done'));
         stage(subject, payload, opts).set(BATCH_COMMIT_HEADER, '1');
         done = true;
         const count = staged.length;
