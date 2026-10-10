@@ -6,7 +6,7 @@ import {
 } from '@nats-io/transport-node';
 import type { CloudEventInit } from '../cloudevents/types.js';
 import { type Codec, decodePayload } from '../codec/codec.js';
-import type { HeadersInit } from '../codec/headers.js';
+import type { NatsHeadersInit } from '../codec/headers.js';
 import type { ConnectionEntry } from '../connection/connection-manager.js';
 import { redactText } from '../connection/redact.js';
 import { NatsModuleError, NatsRequestError } from '../errors/errors.js';
@@ -36,7 +36,7 @@ export class NatsClient {
     subject: string,
     data?: unknown,
     opts: {
-      headers?: HeadersInit;
+      headers?: NatsHeadersInit;
       codec?: Codec;
       reply?: string;
       /** Publishes a CloudEvent: its attributes go in `ce-*` headers or a JSON envelope. */
@@ -62,7 +62,7 @@ export class NatsClient {
   async request<T = unknown>(
     subject: string,
     data?: unknown,
-    opts: { timeout?: number; headers?: HeadersInit; codec?: Codec } = {},
+    opts: { timeout?: number; headers?: NatsHeadersInit; codec?: Codec } = {},
   ): Promise<T> {
     const message = createOutgoingMessage(this.entry, 'request', subject, data, opts);
     let result: { value: unknown } | undefined;

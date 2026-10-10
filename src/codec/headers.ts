@@ -1,8 +1,8 @@
 import { headers, type MsgHdrs } from '@nats-io/transport-node';
 
-export type HeadersInit = Record<string, string | string[]>;
+export type NatsHeadersInit = Record<string, string | string[]>;
 
-export function toMsgHdrs(init?: HeadersInit, base?: MsgHdrs): MsgHdrs {
+export function toMsgHdrs(init?: NatsHeadersInit, base?: MsgHdrs): MsgHdrs {
   const out = base ?? headers();
   if (!init) return out;
   for (const [key, value] of Object.entries(init)) {
