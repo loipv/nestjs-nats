@@ -105,7 +105,7 @@ It rejects with a `NatsConfigError` when the handlers are misconfigured (as boot
 | `subject` | The message's actual subject. Defaults to the target's subject, else to the handler's own: its subject pattern (which can be a wildcard), its first `filter_subject`, or the stream name for a `@Consume` without a filter. Pass it for realistic values in `@Subject()` and `ctx.subject` |
 | `deliveryCount` | JetStream delivery count (default `1`); above `1` the message counts as redelivered. Ignored for core handlers and `@ConsumeOrdered` |
 | `attempt` | Core and ordered delivery attempt (default `1`), as after in-process retries (`ctx.attempt` of an ordered handler). Ignored for `@Consume` and `@ConsumePush` handlers |
-| `streamSequence` | Stream sequence of a JetStream message (default `1`): `ctx.seq` of `@Consume` and `@ConsumePush`, `ctx.streamSequence` of `@ConsumeOrdered`, and the `Nats-DLQ-Seq` of its dead letters. It no longer increases by itself from one dispatch to the next, so pass it when a test needs distinct sequences |
+| `streamSequence` | Stream sequence of a JetStream message (default `1`): `ctx.seq` of `@Consume` and `@ConsumePush`, `ctx.streamSequence` of `@ConsumeOrdered`, and the `Nats-DLQ-Seq` of its dead letters. The messages of a batch get `streamSequence`, `streamSequence + 1`, and so on. It does not increase from one dispatch to the next, so pass it when a test needs distinct sequences across dispatches |
 | `request` | Core subscriptions: the message is a request, with a reply subject. Ignored for JetStream handlers |
 | `cloudEvent` | Sends the payload as a [CloudEvent](./cloudevents.md), with the same options as publishing |
 
