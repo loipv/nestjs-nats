@@ -23,13 +23,19 @@ export function jetStreamTimeout(entry: ConnectionEntry): number {
  * Runs `message` through the outbound plugins of `entry` and publishes it to JetStream. The
  * plugins must pass it on within the timeout (`opts.timeout`, else the JetStream client's);
  * once it is published, the result is the PubAck (or the publish failure), without waiting
- * for the plugins. `wrapError` maps a failure of the publish itself (not of a plugin).
+ * for the plugins. `errors` replaces the errors of the publish itself (not of a plugin):
+ * `wrap` maps its failure, `expired` and `skipped` are the plugins not passing it on in time
+ * or at all.
  */
 export function publishOutgoing(
   entry: ConnectionEntry,
   message: OutgoingMessage,
   opts: { expect?: Partial<StreamExpectations>; timeout?: number },
-  wrapError: (err: unknown) => unknown = (err) => err,
+  errors: {
+    wrap?: (err: unknown) => unknown;
+    expired?: (ms: number) => Error;
+    skipped?: () => Error;
+  } = {},
 ): Promise<PubAck> {
   const { subject } = message;
   const what = `JetStream publish to "${subject}"`;
@@ -45,13 +51,14 @@ export function publishOutgoing(
       try {
         return await entry.js().publish(m.subject, payload, publishOpts);
       } catch (err) {
-        throw wrapError(err);
+        throw errors.wrap ? errors.wrap(err) : err;
       }
     },
     {
       what,
       timeout: opts.timeout || jetStreamTimeout(entry),
-      skipped: () => new NatsModuleError(`${what} produced no acknowledgement`),
+      ...(errors.expired ? { expired: errors.expired } : {}),
+      skipped: errors.skipped ?? (() => new NatsModuleError(`${what} produced no acknowledgement`)),
     },
   );
 }
