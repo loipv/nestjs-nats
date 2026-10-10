@@ -133,3 +133,18 @@ describe('createMockJetStreamClient', () => {
     expect(js.published[1]?.headers['Nats-Msg-Id']).toBe('e1');
   });
 });
+
+describe('createMockJetStreamClient publishAtomic', () => {
+  it('records each message of the batch with its position', async () => {
+    const mock = createMockJetStreamClient();
+    await mock.publishAtomic([
+      { subject: 'a.1', data: { n: 1 } },
+      { subject: 'a.2', data: { n: 2 } },
+    ]);
+    expect(mock.published).toHaveLength(2);
+    expect(mock.published.map((m) => m.data)).toEqual([{ n: 1 }, { n: 2 }]);
+    const [first, second] = mock.published;
+    expect(first?.atomic).toEqual({ batch: expect.any(String), index: 0, count: 2 });
+    expect(second?.atomic).toEqual({ batch: first?.atomic?.batch, index: 1, count: 2 });
+  });
+});

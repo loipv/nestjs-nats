@@ -14,9 +14,12 @@ import { NatsConnectionManager } from '../../src/connection/connection-manager.j
 import { ConnectionRegistry } from '../../src/connection/connection-registry.js';
 import type { NatsBatchContext } from '../../src/context/nats-batch-context.js';
 import type { NatsContext, NatsJetStreamContext } from '../../src/context/nats-context.js';
+import { NatsOrderedContext } from '../../src/context/nats-ordered-context.js';
 import { CloudEventRouter, OnCloudEvent } from '../../src/decorators/cloudevent.decorators.js';
 import {
   Consume,
+  ConsumeOrdered,
+  ConsumePush,
   NatsService,
   ServiceEndpoint,
   Subscribe,
@@ -459,5 +462,127 @@ describe('NatsTestHarness fake messages', () => {
       NatsConfigError,
     );
     await moduleRef.close();
+  });
+});
+
+describe('NatsTestHarness push and ordered consumers', () => {
+  const seen: { ctx?: unknown } = {};
+
+  @Injectable()
+  class Svc {
+    @ConsumePush({
+      stream: 'S',
+      durable: 'D',
+      deliverGroup: 'g',
+      config: { filter_subject: 'p.*' },
+    })
+    onPush(@Payload() p: unknown, @Ctx() ctx: NatsJetStreamContext) {
+      return { p, seq: ctx.seq };
+    }
+
+    @ConsumePush({ stream: 'S', durable: 'flaky' })
+    pushFlaky() {
+      throw new Error('boom');
+    }
+
+    @ConsumeOrdered({ stream: 'S', filterSubjects: 'o.*', dlq: true })
+    onOrdered(@Payload() p: unknown, @Ctx() ctx: NatsOrderedContext) {
+      seen.ctx = ctx;
+      if (p === 'fail') throw new Error('bad');
+      return p;
+    }
+
+    @ConsumeOrdered({ stream: 'S', filterSubjects: 'n.*' })
+    noDlq() {
+      throw new Error('bad');
+    }
+  }
+
+  let moduleRef: TestingModule;
+  let h: NatsTestHarness;
+
+  beforeAll(async () => {
+    moduleRef = await Test.createTestingModule({
+      imports: [NatsTestingModule.forRoot({ retry: { initialDelay: 10, jitter: 0 } })],
+      providers: [Svc],
+    }).compile();
+    h = NatsTestHarness.create(moduleRef);
+  });
+
+  afterAll(async () => {
+    await moduleRef.close();
+  });
+
+  it('acks a successful @ConsumePush handler', async () => {
+    const r = await h.dispatch({ handler: 'Svc.onPush' }, { id: 1 }, { streamSequence: 7 });
+    expect(r).toMatchObject({ settlement: 'ack', result: { p: { id: 1 }, seq: 7 } });
+    expect((await h.dispatch({ subject: 'p.x' }, 1)).settlement).toBe('ack');
+  });
+
+  it('naks a failing @ConsumePush handler with the backoff delay', async () =>
+    expect(await h.dispatch({ handler: 'Svc.pushFlaky' }, {})).toMatchObject({
+      settlement: 'nak',
+      nakDelay: 10,
+    }));
+
+  it('names push and ordered handlers in its errors', async () => {
+    const err = await h.dispatch({ handler: 'Nope.x' }, 1).catch((e: unknown) => e);
+    expect((err as Error).message).toContain('Svc.onPush (consume push S/D, "p.*")');
+    expect((err as Error).message).toContain('Svc.onOrdered (ordered S, "o.*")');
+  });
+
+  it('gives an ordered handler a NatsOrderedContext and leaves nothing to settle', async () => {
+    const r = await h.dispatch({ handler: 'Svc.onOrdered' }, 'ok', { streamSequence: 42 });
+    expect(r).toMatchObject({ settlement: 'none', result: 'ok', dlq: [] });
+    const ctx = seen.ctx as NatsOrderedContext;
+    expect(ctx).toBeInstanceOf(NatsOrderedContext);
+    expect(ctx).toMatchObject({
+      streamSequence: 42,
+      stream: 'S',
+      deliverySequence: 42,
+      pending: 0,
+      attempt: 1,
+      subject: 'o.*',
+    });
+    expect(() => ctx.ack()).toThrow(NatsConfigError);
+    await h.dispatch({ handler: 'Svc.onOrdered' }, 'ok');
+    expect((seen.ctx as NatsOrderedContext).streamSequence).toBe(1);
+  });
+
+  it('retries a failing ordered handler without running it again', async () => {
+    const r = await h.dispatch({ handler: 'Svc.onOrdered' }, 'fail');
+    expect(r).toMatchObject({ settlement: 'retry', retryDelay: 10 });
+    expect(r.outcomes[0]).toMatchObject({ action: 'retry', delayMs: 10 });
+    expect(r.nakDelay).toBeUndefined();
+    await h.dispatch({ handler: 'Svc.onOrdered' }, 'fail', { attempt: 3 });
+    expect((seen.ctx as NatsOrderedContext).attempt).toBe(3);
+  });
+
+  it('dead-letters an ordered message past its last attempt', async () => {
+    const r = await h.dispatch({ handler: 'Svc.onOrdered' }, 'fail', {
+      attempt: 6,
+      streamSequence: 9,
+      deliveryCount: 4,
+    });
+    expect(r.settlement).toBe('dlq');
+    expect(r.dlq).toHaveLength(1);
+    expect(r.dlq[0]).toMatchObject({ subject: 'dlq.S.ordered.Svc.onOrdered' });
+    expect(r.dlq[0]?.headers['Nats-DLQ-Consumer']).toBe('ordered:Svc.onOrdered');
+    expect(r.dlq[0]?.headers['Nats-DLQ-Seq']).toBe('9');
+    // deliveryCount is ignored: the attempt comes from `attempt`.
+    expect((seen.ctx as NatsOrderedContext).attempt).toBe(6);
+  });
+
+  it('drops an exhausted ordered message when the DLQ is off', async () => {
+    const r = await h.dispatch({ handler: 'Svc.noDlq' }, 1, { attempt: 6 });
+    expect(r).toMatchObject({ settlement: 'drop', dlq: [] });
+  });
+
+  it('validates streamSequence', async () => {
+    for (const streamSequence of [0, 1.5]) {
+      await expect(h.dispatch({ handler: 'Svc.onOrdered' }, 1, { streamSequence })).rejects.toThrow(
+        NatsConfigError,
+      );
+    }
   });
 });
