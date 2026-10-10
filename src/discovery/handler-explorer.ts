@@ -74,8 +74,9 @@ export const ROUTER_METHOD_NAME = '@CloudEventRouter';
 const UNMATCHED_POLICIES: ReadonlyArray<CloudEventRouting['unmatched']> = ['ack', 'term', 'dlq'];
 
 /**
- * Finds `@Subscribe`, `@Consume`, `@ConsumePush`, `@ConsumeOrdered`, `@NatsService`/`@ServiceEndpoint` handlers and
- * `@CloudEventRouter` classes (one subscribe/consume definition per class).
+ * Finds `@Subscribe`, `@Consume`, `@ConsumePush`, `@ConsumeOrdered`,
+ * `@NatsService`/`@ServiceEndpoint` handlers and `@CloudEventRouter` classes (one
+ * subscribe/consume definition per class).
  */
 @Injectable()
 export class HandlerExplorer {
