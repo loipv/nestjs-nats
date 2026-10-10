@@ -36,6 +36,12 @@ The inbound order is: `outer` plugins, then acknowledgement handling, then `inne
 
 Outbound plugins also see the messages of [`publishAtomic()`](./publishing.md#atomic-batches): `message.atomic` is `{ index, count }` there (and `undefined` otherwise), and `next()` settles when the whole batch is committed.
 
+## Outbound timing
+
+An outbound plugin must pass the message on (call `next()`) within the timeout of the call: the `timeout` option of `JetStreamClient.publish()` (and of the items of `publishMany()` and `batcher()`; default the JetStream client's timeout) or of `NatsClient.request()` (default 5000 ms). If it does not, the call rejects with a `NatsModuleError` ("the outbound plugins did not pass the message on within … ms") and nothing is sent: a `next()` called later rejects with that error. `NatsClient.publish()` gives the plugins 5000 ms; a message not passed on by then is dropped, an error is logged, and `flush()` stops waiting for it.
+
+Once the message is sent, the call settles with the outcome of the send (the `PubAck`, the reply, or the send's own error such as a `NatsRequestError`) without waiting for the plugins to return, so a plugin that never settles after `next()` does not hold the caller. A plugin that throws after that is logged as an error on the connection's logger and does not change the result; rethrowing the error `next()` rejected with is not logged. A plugin that throws before calling `next()` makes the call reject with that error (`NatsClient.publish()` logs it). [`publishAtomic()`](./publishing.md#atomic-batches) applies the same rule to a whole batch.
+
 ## Observing outcomes
 
 `delivery.outcomes` is a `Map` from each message of the delivery (`delivery.messages`) to a `MessageOutcome` that says what became of it. The settlement and idempotency middlewares fill it in, so it is complete once the `next()` of an `outer` plugin has resolved or rejected. Read it there, after awaiting `next()`:
