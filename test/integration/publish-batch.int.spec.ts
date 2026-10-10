@@ -1,6 +1,7 @@
 import { jetstreamManager } from '@nats-io/jetstream';
 import { connect } from '@nats-io/transport-node';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { ConnectionRegistry } from '../../src/connection/connection-registry.js';
 import { NatsConfigError } from '../../src/errors/errors.js';
 import type { JetStreamClient } from '../../src/jetstream/jetstream-client.js';
 import type { NatsStreamManager } from '../../src/jetstream/stream-manager.js';
@@ -78,24 +79,23 @@ describe('publishMany / Batcher', () => {
   });
 
   it('caps in-flight publishes at window', async () => {
-    let active = 0;
-    let max = 0;
-    const counter: NatsPlugin = {
-      name: 'counter',
-      outbound: {
-        async handle(_m, next) {
-          active++;
-          max = Math.max(max, active);
-          try {
-            await next();
-          } finally {
-            active--;
-          }
-        },
-      },
-    };
-    const { app, js } = await setup([counter]);
+    const { app, js } = await setup();
     try {
+      // Counts the publishes awaiting their PubAck (an outbound plugin's own code after next()
+      // is not waited for, so it would not tell).
+      const natsJs = app.get(ConnectionRegistry).get().js();
+      const publish = natsJs.publish.bind(natsJs);
+      let active = 0;
+      let max = 0;
+      vi.spyOn(natsJs, 'publish').mockImplementation(async (...args) => {
+        active++;
+        max = Math.max(max, active);
+        try {
+          return await publish(...args);
+        } finally {
+          active--;
+        }
+      });
       const items = Array.from({ length: 50 }, (_, i) => ({ subject: 'pb.w', data: i }));
       const r = await js.publishMany(items, { window: 4 });
       expect(r.every((x) => x.ok)).toBe(true);

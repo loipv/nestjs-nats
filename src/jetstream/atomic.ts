@@ -11,15 +11,14 @@ import { compose } from '../pipeline/compose.js';
 import {
   createOutgoingMessage,
   encodeOutgoing,
+  logLateOutboundError,
   outboundMiddlewares,
 } from '../pipeline/outbound.js';
-import { errorMessage, errorTrace } from '../util/errors.js';
-import { MSG_ID_HEADER, publishOutgoing } from './publish.js';
+import { errorMessage } from '../util/errors.js';
+import { jetStreamTimeout, MSG_ID_HEADER, publishOutgoing } from './publish.js';
 
 /** The most messages the server accepts in one atomic batch. */
 export const MAX_ATOMIC_MESSAGES = 1000;
-/** The commit timeout (ms) when the JetStream client has none. */
-export const DEFAULT_ATOMIC_TIMEOUT = 5000;
 
 export interface AtomicMessage {
   subject: string;
@@ -33,7 +32,7 @@ export interface AtomicPublishOptions {
   /**
    * Timeout (ms) of the commit's ack, and of staging the messages through the outbound plugins
    * before the batch is sent. A number of ms in (0, 2^31-1] (a larger or infinite value would
-   * overflow the timers). Defaults to the JetStream client's timeout; never 0.
+   * overflow the timers). Defaults to the JetStream client's timeout (at most 2^31-1); never 0.
    */
   timeout?: number;
   /** Expectations checked on the first message (there is no `lastMsgID`). */
@@ -89,8 +88,7 @@ export async function publishAtomic(
     message.atomic = { index, count };
     return message;
   });
-  // `getOptions` is missing on the fake JetStream client of /testing.
-  const timeout = opts.timeout ?? entry.js().getOptions?.().timeout ?? DEFAULT_ATOMIC_TIMEOUT;
+  const timeout = opts.timeout ?? jetStreamTimeout(entry);
   const subject = outgoing[0]?.subject ?? '';
   const what = `Atomic publish of ${count} message${count === 1 ? '' : 's'} to "${subject}"`;
   const failed = (err: unknown): NatsAtomicPublishError => {
@@ -130,21 +128,13 @@ export async function publishAtomic(
     rejectCommit(err);
   };
   /** Logs a plugin failure after the batch was sent, which does not change its result. */
-  const late = (sent: Promise<AtomicPublishAck>, index: number, err: unknown): void => {
-    void sent
-      .then(
-        () => undefined,
-        (commitError: unknown) => commitError,
-      )
-      .then((commitError) => {
-        // A plugin rethrowing the commit's failure is not a failure of its own.
-        if (err === commitError) return;
-        entry.logger.error(
-          `${what}: an outbound plugin failed on message ${index} after the batch was sent`,
-          errorTrace(err),
-        );
-      });
-  };
+  const late = (sent: Promise<AtomicPublishAck>, index: number, err: unknown): void =>
+    logLateOutboundError(
+      entry,
+      sent,
+      err,
+      `${what}: an outbound plugin failed on message ${index} after the batch was sent`,
+    );
 
   const send = async (): Promise<AtomicPublishAck> => {
     // Called once every message is staged.
@@ -182,6 +172,7 @@ export async function publishAtomic(
       abort(err);
       fail(err);
     }, timeout);
+    staging.unref?.();
     outgoing.forEach((message, index) => {
       compose(middlewares, async (m) => {
         staged[index] = { subject: m.subject, payload: encodeOutgoing(m), headers: m.headers };
