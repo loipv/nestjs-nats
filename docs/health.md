@@ -40,7 +40,7 @@ class AppModule {}
 | Option | Default | Description |
 |---|---|---|
 | `connection` | `'default'` | Name of the connection to check |
-| `rttTimeout` | `1000` | Longest wait, in ms, for the round trip to the server and, separately, for the JetStream check |
+| `rttTimeout` | `1000` | Longest wait, in ms, for the round trip to the server and, separately, for the JetStream check. A finite number above `0`, at most `2147483647` (2^31 - 1) |
 | `jetstream` | `false` | Also require JetStream to answer an account info request |
 
 When the connection is up, the result is `{ nats: { status: 'up', connection, server, rtt } }`, where `rtt` is the round trip time in ms. Otherwise it is `{ nats: { status: 'down', connection, reason } }`, and `HealthCheckService` turns that into a `503` response. `reason` is one of:
@@ -51,4 +51,4 @@ When the connection is up, the result is `{ nats: { status: 'up', connection, se
 - `jetstream unavailable: <error>` (also for a timeout)
 - `check failed: <error>`
 
-The indicator never throws, and the result holds no credentials: the server URL is redacted and error text is scrubbed of the connection's password and token. The check can wait up to `rttTimeout` for the round trip plus up to `rttTimeout` for the JetStream check, so up to twice `rttTimeout` in the worst case. Set your probe's timeout above that.
+The indicator never throws for an unhealthy connection; only an invalid `rttTimeout` (a programming error) rejects, with a `NatsConfigError`. The result holds no credentials: the server URL is redacted and error text is scrubbed of the connection's password and token. The check can wait up to `rttTimeout` for the round trip plus up to `rttTimeout` for the JetStream check, so up to twice `rttTimeout` in the worst case. Set your probe's timeout above that.

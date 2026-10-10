@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { type HealthIndicatorResult, HealthIndicatorService } from '@nestjs/terminus';
 import { NatsConnectionManager } from '../connection/connection-manager.js';
 import { redactServers, redactText } from '../connection/redact.js';
+import { NatsConfigError } from '../errors/errors.js';
 import { DEFAULT_CONNECTION } from '../module/tokens.js';
 import { errorMessage } from '../util/errors.js';
 import { settlesWithin } from '../util/timeout.js';
@@ -9,11 +10,17 @@ import { settlesWithin } from '../util/timeout.js';
 export interface NatsHealthCheckOptions {
   /** The connection to check (default `'default'`). */
   connection?: string;
-  /** Longest wait, in ms, for the round trip (and the JetStream check) (default 1000). */
+  /**
+   * Longest wait, in ms, for the round trip (and the JetStream check) (default 1000). A
+   * finite number in (0, 2^31 - 1]; anything else rejects with a `NatsConfigError`.
+   */
   rttTimeout?: number;
   /** Also require JetStream to answer an account info request (default `false`). */
   jetstream?: boolean;
 }
+
+/** The largest delay `setTimeout` honours; above it Node fires after 1 ms. */
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 
 type Bounded<T> =
   | { kind: 'value'; value: T }
@@ -44,6 +51,13 @@ export class NatsHealthIndicator {
     key: K,
     options: NatsHealthCheckOptions = {},
   ): Promise<HealthIndicatorResult<K>> {
+    const timeout = options.rttTimeout ?? 1000;
+    // A misconfigured probe, not an unhealthy connection: fail loudly instead of `down`.
+    if (!(Number.isFinite(timeout) && timeout > 0 && timeout <= MAX_TIMEOUT_MS)) {
+      throw new NatsConfigError(
+        `NATS health check rttTimeout must be a finite number of ms in (0, ${MAX_TIMEOUT_MS}], got ${timeout}`,
+      );
+    }
     const session = this.health.check(key);
     const connection = options.connection ?? DEFAULT_CONNECTION;
     const down = (reason: string): HealthIndicatorResult<K> =>
@@ -57,7 +71,6 @@ export class NatsHealthIndicator {
       const entry = this.manager.get(connection);
       const { pass, token } = entry.options.connection;
       secrets = [pass, token];
-      const timeout = options.rttTimeout ?? 1000;
 
       const rtt = await bounded(() => entry.nc.rtt(), timeout);
       if (rtt.kind === 'timeout') return down(`rtt timeout after ${timeout}ms`);
