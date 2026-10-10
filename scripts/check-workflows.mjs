@@ -104,6 +104,12 @@ for (const file of files) {
         "release.yml: release job needs `if: github.repository == 'loipv/nestjs-nats' && github.ref == 'refs/heads/main'`",
       );
     }
+    // No dependency lifecycle scripts while the job holds id-token and write permissions.
+    for (const [cmd] of body.matchAll(/\bnpm\s+(?:ci|install|i)\b.*$/gm)) {
+      if (!/\s--ignore-scripts\b/.test(cmd)) {
+        violations.push(`release.yml: \`${cmd.trim()}\` must pass --ignore-scripts`);
+      }
+    }
     // The only secret it may use is the built-in GITHUB_TOKEN.
     for (const [, name] of body.matchAll(/secrets\.([A-Za-z0-9_]+)/g)) {
       if (name !== 'GITHUB_TOKEN') {
@@ -133,5 +139,5 @@ if (violations.length > 0) {
   process.exit(1);
 }
 console.log(
-  `check-workflows: ok (${files.join(', ')}; actions pinned by SHA; release.yml push-to-main (+ workflow_dispatch) only, id-token: write, no NPM_TOKEN; others read-only)`,
+  `check-workflows: ok (${files.join(', ')}; actions pinned by SHA; release.yml push-to-main (+ workflow_dispatch) only, id-token: write, --ignore-scripts, no NPM_TOKEN; others read-only)`,
 );
