@@ -63,7 +63,7 @@ NatsModule.forRoot({
 | `messaging.message.body.size` | single-message `process` | Size of the body in bytes |
 | `messaging.consumer.group.name` | `process` | The durable name of a `@Consume`, or the queue group of a `@Subscribe` that has one |
 | `messaging.batch.message_count` | batch `process`, and `publish` of an atomic batch | Number of messages in the batch |
-| `messaging.nats.stream`, `messaging.nats.seq`, `messaging.nats.delivery_count` | single-message `process` of a JetStream message | Stream, stream sequence and delivery count |
+| `messaging.nats.stream`, `messaging.nats.seq`, `messaging.nats.delivery_count` | single-message `process` of a JetStream message | Stream, stream sequence and delivery count. An `@ConsumeOrdered` message has no delivery count (it is retried in place, never redelivered) |
 | `messaging.header.<name>` | as set by `captureHeaders` | The header's value |
 
 ## Events and errors
