@@ -88,6 +88,8 @@ function setup(
     delivery?: 'pull' | 'push';
     /** `js().consumers.getPushConsumer()`, by default resolving the fake consumer. */
     getPushConsumer?: () => Promise<unknown>;
+    /** `jsm().consumers.info()`, by default reporting the same consumer as `consumer.info()`. */
+    jsmInfo?: () => Promise<unknown>;
     deliverGroup?: string;
     config?: Record<string, unknown>;
     retry?: unknown;
@@ -146,7 +148,7 @@ function setup(
   // `jsm().consumers.info()` reports the same consumer as `consumer.info()`.
   const streams = {
     ensureConsumer,
-    jsm: () => Promise.resolve({ consumers: { info } }),
+    jsm: () => Promise.resolve({ consumers: { info: opts.jsmInfo ?? info } }),
   } as unknown as NatsStreamManager;
   const adapter = new JetStreamConsumerAdapter(def, entry, streams);
   return { adapter, fake, consume, info, logger, ensureConsumer };
@@ -978,6 +980,27 @@ describe('JetStreamConsumerAdapter', () => {
         getPushConsumer: () => Promise.reject(refused),
       });
       await expect(adapter.start()).rejects.toBe(refused);
+    });
+
+    it('rethrows that error when the consumer info cannot be read either', async () => {
+      const refused = new Error('boom');
+      const { adapter } = setup(() => Promise.resolve(), {
+        delivery: 'push',
+        getPushConsumer: () => Promise.reject(refused),
+        jsmInfo: () => Promise.reject(new Error('info timed out')),
+      });
+      await expect(adapter.start()).rejects.toBe(refused);
+    });
+
+    it('does not take another InvalidOperationError of consume() for an already bound consumer', async () => {
+      const other = Object.assign(new Error('consumer already started'), {
+        name: 'InvalidOperationError',
+      });
+      const { adapter } = setup(() => Promise.resolve(), {
+        delivery: 'push',
+        consume: () => Promise.reject(other),
+      });
+      await expect(adapter.start()).rejects.toBe(other);
     });
 
     it('explains a consumer already bound by another subscriber', async () => {
