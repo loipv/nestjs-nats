@@ -1,0 +1,16 @@
+# The published package is the build output only: `files` in package.json whitelists
+# `dist/` and CHANGELOG.md (npm adds package.json, README.md and LICENSE itself). This
+# file is a second guard for anything that ends up inside a whitelisted directory.
+src/
+test/
+docs/
+examples/
+scripts/
+coverage/
+.github/
+.changeset/
+*.tsbuildinfo
+*.spec.*
+*.test.*
+*.log
+.DS_Store
