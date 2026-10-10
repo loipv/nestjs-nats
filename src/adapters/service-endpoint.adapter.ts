@@ -7,7 +7,7 @@ import type { NatsServiceOptions } from '../decorators/handler.decorators.js';
 import type { HandlerDefinition } from '../discovery/handler-explorer.js';
 import { NatsConfigError } from '../errors/errors.js';
 import { createDelivery, type HandlerInfo, type InternalDelivery } from '../pipeline/delivery.js';
-import { toServiceError } from '../pipeline/reply.js';
+import { type ServiceError, toServiceError } from '../pipeline/reply.js';
 import { errorMessage, errorTrace } from '../util/errors.js';
 import type { ForceStopResult, HandlerAdapter } from './adapter.js';
 import { createHandlerPipeline, defaultPipelineDeps } from './handler-pipeline.js';
@@ -32,7 +32,10 @@ export class NatsServiceAdapter implements HandlerAdapter {
   private readonly endpoints: EndpointRuntime[];
   private service?: Service;
   private loops: Array<Promise<void>> = [];
+  private readonly iterators: Array<QueuedIterator<ServiceMsg>> = [];
   private stopping = false;
+  /** Set when the service stopped by itself because of an error (already logged). */
+  private failed = false;
 
   constructor(
     private readonly options: NatsServiceOptions,
@@ -75,6 +78,7 @@ export class NatsServiceAdapter implements HandlerAdapter {
       await this.stopService(service);
       return;
     }
+    void service.stopped.then((err) => this.onServiceStopped(err));
     for (const endpoint of this.endpoints) {
       const { subject, queue: endpointQueue, metadata: endpointMetadata } = endpoint.def.options;
       let iterator: QueuedIterator<ServiceMsg>;
@@ -92,6 +96,7 @@ export class NatsServiceAdapter implements HandlerAdapter {
           { cause: err },
         );
       }
+      this.iterators.push(iterator);
       this.loops.push(this.consume(iterator, endpoint));
     }
     // Make sure the server knows about the subscriptions before bootstrap completes.
@@ -114,6 +119,22 @@ export class NatsServiceAdapter implements HandlerAdapter {
   forceStop(): ForceStopResult {
     // Requests are not redelivered and are never retried in-process: nothing to force.
     return { nakked: 0, cancelledRetries: 0 };
+  }
+
+  /**
+   * A service also stops by itself, e.g. when one of its subscriptions fails (a permissions
+   * violation). The failed endpoint's iterator is then never ended by `@nats-io/services`,
+   * so end them all here: otherwise shutdown would wait for it until `drainTimeout`.
+   */
+  private onServiceStopped(err: Error | null): void {
+    if (err instanceof Error && !this.stopping) {
+      this.failed = true;
+      this.entry.logger.error(
+        `NATS service "${this.options.name}" stopped: ${errorMessage(err)}; no more requests will be received`,
+        errorTrace(err),
+      );
+    }
+    for (const iterator of this.iterators) iterator.stop();
   }
 
   private async stopService(service: Service): Promise<void> {
@@ -146,7 +167,7 @@ export class NatsServiceAdapter implements HandlerAdapter {
       this.entry.logger.error(`Endpoint of ${endpoint.label} failed`, errorTrace(err));
       return;
     }
-    if (!this.stopping) {
+    if (!this.stopping && !this.failed) {
       this.entry.logger.error(
         `Endpoint of ${endpoint.label} ended unexpectedly; no more requests will be received`,
       );
@@ -178,7 +199,12 @@ export class NatsServiceAdapter implements HandlerAdapter {
     try {
       await endpoint.run(d);
     } catch (err) {
-      this.respondError(msg, endpoint, err);
+      const { code } = this.respondError(msg, endpoint, err);
+      if (code >= 500) {
+        this.entry.logger.warn(
+          `Replied ${code} to request on "${msg.subject}" for ${endpoint.label}: ${errorMessage(err)}`,
+        );
+      }
       return;
     }
     let payload: Uint8Array;
@@ -192,11 +218,13 @@ export class NatsServiceAdapter implements HandlerAdapter {
     this.respond(msg, endpoint, () => msg.respond(payload));
   }
 
-  private respondError(msg: ServiceMsg, endpoint: EndpointRuntime, err: unknown): void {
-    const { code, description } = toServiceError(err);
+  private respondError(msg: ServiceMsg, endpoint: EndpointRuntime, err: unknown): ServiceError {
+    const error = toServiceError(err);
+    const { code, description } = error;
     // Header values must not contain CR/LF.
     const safe = description.replace(/[\r\n]+/g, ' ');
     this.respond(msg, endpoint, () => msg.respondError(code, safe));
+    return error;
   }
 
   private respond(msg: ServiceMsg, endpoint: EndpointRuntime, send: () => boolean): void {
