@@ -97,3 +97,27 @@ export function withConsumerDefaults(cfg: Partial<ConsumerConfig>): Partial<Cons
     max_deliver: cfg.max_deliver ?? -1,
   };
 }
+
+/** 5 s, in nanoseconds. */
+const PUSH_IDLE_HEARTBEAT = 5_000_000_000;
+
+/**
+ * Defaults for push consumers the library creates (merged under the declared config):
+ * a deliver subject of their own and as many pending messages as the handler can hold
+ * at once; flow control and idle heartbeats too, except for a deliver group, where the
+ * server does not support them.
+ */
+export function pushConsumerDefaults(o: {
+  stream: string;
+  durable: string;
+  deliverGroup?: string;
+  maxAckPending: number;
+}): Partial<ConsumerConfig> {
+  return {
+    deliver_subject: `_nats.push.${o.stream}.${o.durable}`,
+    ...(o.deliverGroup !== undefined
+      ? { deliver_group: o.deliverGroup }
+      : { flow_control: true, idle_heartbeat: PUSH_IDLE_HEARTBEAT }),
+    max_ack_pending: o.maxAckPending,
+  };
+}

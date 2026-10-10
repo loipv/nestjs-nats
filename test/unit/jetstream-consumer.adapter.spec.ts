@@ -1,9 +1,10 @@
 import type { ConsumerMessages, JsMsg } from '@nats-io/jetstream';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { JetStreamConsumerAdapter } from '../../src/adapters/jetstream-consumer.adapter.js';
 import type { ConnectionEntry } from '../../src/connection/connection-registry.js';
 import type { NatsJetStreamContext } from '../../src/context/nats-context.js';
 import type { HandlerDefinition } from '../../src/discovery/handler-explorer.js';
+import { NatsConfigError } from '../../src/errors/errors.js';
 import type { NatsStreamManager } from '../../src/jetstream/stream-manager.js';
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -77,7 +78,16 @@ function setup(
     plugins?: unknown[];
     consume?: () => Promise<ConsumerMessages>;
     /** The consumer's config as reported by `consumer.info()`. */
-    consumerConfig?: { ack_wait?: number; max_deliver?: number };
+    consumerConfig?: {
+      ack_wait?: number;
+      max_deliver?: number;
+      deliver_subject?: string;
+      deliver_group?: string;
+      max_ack_pending?: number;
+    };
+    delivery?: 'pull' | 'push';
+    deliverGroup?: string;
+    config?: Record<string, unknown>;
     retry?: unknown;
     batch?: unknown;
     ack?: 'auto' | 'manual';
@@ -88,24 +98,32 @@ function setup(
 ) {
   const fake = fakeMessages();
   const consume = vi.fn(opts.consume ?? (() => Promise.resolve(fake.messages)));
-  const info = vi.fn(() =>
-    Promise.resolve({
-      config: opts.consumerConfig ?? { ack_wait: 30_000_000_000, max_deliver: -1 },
-    }),
-  );
+  const push = opts.delivery === 'push';
+  const defaultConfig = push
+    ? {
+        ack_wait: 30_000_000_000,
+        max_deliver: -1,
+        deliver_subject: '_nats.push.ORD.d',
+        max_ack_pending: 1,
+      }
+    : { ack_wait: 30_000_000_000, max_deliver: -1 };
+  const info = vi.fn(() => Promise.resolve({ config: opts.consumerConfig ?? defaultConfig }));
   const logger = { log: vi.fn(), error: vi.fn(), warn: vi.fn() };
   const entry = {
     name: 'default',
     options: { plugins: opts.plugins },
     logger,
     js: () => ({
-      consumers: { get: () => Promise.resolve({ consume, info }) },
+      consumers: {
+        get: () => Promise.resolve({ consume, info }),
+        getPushConsumer: () => Promise.resolve({ consume, info }),
+      },
       publish: opts.publish ?? (() => Promise.resolve({ stream: 'DLQ', seq: 1 })),
     }),
   } as unknown as ConnectionEntry;
   const def = {
     kind: 'consume',
-    delivery: 'pull',
+    delivery: opts.delivery ?? 'pull',
     connection: 'default',
     className: 'C',
     methodName: 'm',
@@ -117,11 +135,15 @@ function setup(
       batch: opts.batch,
       ack: opts.ack,
       dlq: opts.dlq,
+      deliverGroup: opts.deliverGroup,
+      config: opts.config,
     },
     invoke,
   } as unknown as HandlerDefinition & { kind: 'consume' };
-  const adapter = new JetStreamConsumerAdapter(def, entry, {} as NatsStreamManager);
-  return { adapter, fake, consume, info, logger };
+  const ensureConsumer = vi.fn(() => Promise.resolve(undefined));
+  const streams = { ensureConsumer } as unknown as NatsStreamManager;
+  const adapter = new JetStreamConsumerAdapter(def, entry, streams);
+  return { adapter, fake, consume, info, logger, ensureConsumer };
 }
 
 describe('JetStreamConsumerAdapter', () => {
@@ -781,6 +803,226 @@ describe('JetStreamConsumerAdapter', () => {
       );
       if (warns) expect(logger.warn).toHaveBeenCalledWith(expected);
       else expect(logger.warn).not.toHaveBeenCalled();
+      await adapter.stop();
+      await adapter.idle();
+    });
+  });
+
+  describe('push', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('consumes the push consumer without options and labels its logs (push)', async () => {
+      const { adapter, fake, consume, logger } = setup(() => Promise.resolve(), {
+        delivery: 'push',
+      });
+      await adapter.start();
+      expect(consume).toHaveBeenCalledWith();
+      fake.end();
+      await adapter.idle();
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('C.m on "ORD/d" (push) ended unexpectedly'),
+      );
+    });
+
+    it('creates a declared consumer with the push defaults', async () => {
+      const { adapter, ensureConsumer } = setup(() => Promise.resolve(), {
+        delivery: 'push',
+        deliverGroup: 'g',
+        concurrency: 2,
+        batch: { maxSize: 5 },
+        config: { ack_wait: 10_000_000_000 },
+        consumerConfig: {
+          ack_wait: 10_000_000_000,
+          deliver_subject: '_nats.push.ORD.d',
+          deliver_group: 'g',
+          max_ack_pending: 5,
+        },
+      });
+      await adapter.start();
+      expect(ensureConsumer).toHaveBeenCalledWith(
+        'ORD',
+        { ack_wait: 10_000_000_000, durable_name: 'd' },
+        undefined,
+        { deliver_subject: '_nats.push.ORD.d', deliver_group: 'g', max_ack_pending: 5 },
+      );
+      await adapter.stop();
+      await adapter.idle();
+    });
+
+    it('push intake reads every message without waiting for a slot', async () => {
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const handled: unknown[] = [];
+      const { adapter, fake } = setup(
+        async (payload) => {
+          handled.push(payload);
+          await gate;
+        },
+        {
+          delivery: 'push',
+          concurrency: 1,
+          consumerConfig: {
+            ack_wait: 100_000_000,
+            max_deliver: -1,
+            deliver_subject: '_nats.push.ORD.d',
+            max_ack_pending: 5,
+          },
+        },
+      );
+      await adapter.start();
+      const msgs = [1, 2, 3, 4, 5].map((id) => fakeMsg(id));
+      for (const m of msgs) fake.push(m as unknown as JsMsg);
+      await tick();
+      expect(handled).toEqual([1]);
+      // Every received message is heartbeated, including the four waiting for the slot.
+      vi.advanceTimersByTime(50);
+      for (const m of msgs) expect(m.working).toHaveBeenCalledTimes(1);
+      release();
+      await adapter.stop();
+      await adapter.idle();
+    });
+
+    it('push start rejects a pull consumer', async () => {
+      const { adapter, consume } = setup(() => Promise.resolve(), {
+        delivery: 'push',
+        consumerConfig: { ack_wait: 30_000_000_000, max_deliver: -1, max_ack_pending: 1 },
+      });
+      const err = await adapter.start().catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(NatsConfigError);
+      expect((err as Error).message).toContain('is not a push consumer');
+      expect((err as Error).message).toMatch(/"ORD\/d".*C\.m/);
+      expect(consume).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['a', 'b'],
+      [undefined, 'b'],
+    ])('push start rejects deliverGroup %s against deliver_group %s', async (group, actual) => {
+      const { adapter } = setup(() => Promise.resolve(), {
+        delivery: 'push',
+        deliverGroup: group,
+        consumerConfig: {
+          ack_wait: 30_000_000_000,
+          deliver_subject: '_nats.push.ORD.d',
+          deliver_group: actual,
+          max_ack_pending: 1,
+        },
+      });
+      const err = await adapter.start().catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(NatsConfigError);
+      expect((err as Error).message).toContain(`deliver_group "${actual}"`);
+      expect((err as Error).message).toMatch(/"ORD\/d".*C\.m/);
+    });
+
+    it('push start rejects a declared deliverGroup the consumer does not have', async () => {
+      const { adapter } = setup(() => Promise.resolve(), {
+        delivery: 'push',
+        deliverGroup: 'a',
+      });
+      await expect(adapter.start()).rejects.toThrow(/deliverGroup "a"/);
+    });
+
+    it('accepts a matching deliver_group declared in config', async () => {
+      const { adapter, ensureConsumer } = setup(() => Promise.resolve(), {
+        delivery: 'push',
+        config: { deliver_group: 'g' },
+        consumerConfig: {
+          ack_wait: 30_000_000_000,
+          deliver_subject: '_nats.push.ORD.d',
+          deliver_group: 'g',
+          max_ack_pending: 1,
+        },
+      });
+      await adapter.start();
+      // The group decides the defaults even when declared in config only.
+      expect(ensureConsumer).toHaveBeenCalledWith(
+        'ORD',
+        { deliver_group: 'g', durable_name: 'd' },
+        undefined,
+        { deliver_subject: '_nats.push.ORD.d', deliver_group: 'g', max_ack_pending: 1 },
+      );
+      await adapter.stop();
+      await adapter.idle();
+    });
+
+    it('push start rejects unlimited max_ack_pending', async () => {
+      const { adapter } = setup(() => Promise.resolve(), {
+        delivery: 'push',
+        consumerConfig: {
+          ack_wait: 30_000_000_000,
+          deliver_subject: '_nats.push.ORD.d',
+          max_ack_pending: -1,
+        },
+      });
+      const err = await adapter.start().catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(NatsConfigError);
+      expect((err as Error).message).toContain('max_ack_pending');
+    });
+
+    it('processes every message when concurrency exceeds max_ack_pending', async () => {
+      const { adapter, fake } = setup(() => Promise.resolve(), {
+        delivery: 'push',
+        concurrency: 4,
+        consumerConfig: {
+          ack_wait: 30_000_000_000,
+          deliver_subject: '_nats.push.ORD.d',
+          max_ack_pending: 1,
+        },
+      });
+      await adapter.start();
+      // The server delivers the next message only once the previous one is acked.
+      const msgs = [1, 2, 3].map((id) => fakeMsg(id));
+      for (const m of msgs) {
+        fake.push(m as unknown as JsMsg);
+        await vi.waitFor(() => expect(m.ack).toHaveBeenCalledTimes(1));
+      }
+      await adapter.stop();
+      await expect(adapter.idle()).resolves.toBeUndefined();
+      for (const m of msgs) expect(m.nak).not.toHaveBeenCalled();
+    });
+
+    it('naks queued messages on stop and lets the in-flight one finish', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const handled: unknown[] = [];
+      const { adapter, fake } = setup(
+        async (payload) => {
+          handled.push(payload);
+          await gate;
+        },
+        { delivery: 'push' },
+      );
+      await adapter.start();
+      const [a, b, c] = [fakeMsg(1), fakeMsg(2), fakeMsg(3)];
+      for (const m of [a, b, c]) fake.push(m as unknown as JsMsg);
+      await tick();
+      await adapter.stop();
+      release();
+      await adapter.idle();
+      expect(handled).toEqual([1]);
+      expect(a.ack).toHaveBeenCalledTimes(1);
+      for (const m of [b, c]) {
+        expect(m.nak).toHaveBeenCalledTimes(1);
+        expect(m.ack).not.toHaveBeenCalled();
+      }
+    });
+
+    it('keeps the order of queued messages', async () => {
+      const handled: unknown[] = [];
+      const { adapter, fake } = setup(
+        async (payload) => {
+          await tick();
+          handled.push(payload);
+        },
+        { delivery: 'push' },
+      );
+      await adapter.start();
+      for (let i = 1; i <= 10; i++) fake.push(fakeMsg(i) as unknown as JsMsg);
+      await vi.waitFor(() => expect(handled).toHaveLength(10));
+      expect(handled).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
       await adapter.stop();
       await adapter.idle();
     });

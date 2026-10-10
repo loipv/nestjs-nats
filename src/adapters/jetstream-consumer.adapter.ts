@@ -1,4 +1,5 @@
 import {
+  type ConsumerConfig,
   type ConsumerMessages,
   JetStreamApiCodes,
   JetStreamApiError,
@@ -8,9 +9,11 @@ import { type ResolvedBatchOptions, resolveBatchOptions } from '../batch/collect
 import type { Codec } from '../codec/codec.js';
 import type { ConnectionEntry } from '../connection/connection-registry.js';
 import { NatsJetStreamContext } from '../context/nats-context.js';
+import type { ConsumePushOptions } from '../decorators/handler.decorators.js';
 import type { HandlerDefinition } from '../discovery/handler-explorer.js';
 import { NatsConfigError } from '../errors/errors.js';
 import type { NatsStreamManager } from '../jetstream/stream-manager.js';
+import { pushConsumerDefaults } from '../jetstream/stream-sync.js';
 import {
   createDelivery,
   type HandlerInfo,
@@ -27,7 +30,16 @@ type ConsumeDefinition = HandlerDefinition & { kind: 'consume' };
 
 const isPowerOfTwo = (n: number): boolean => n >= 1 && (n & (n - 1)) === 0;
 
-/** Runs a `@Consume` handler on a JetStream pull consumer (`consumer.consume()`). */
+/** A bound consumer: its config as the server reports it, and how to start receiving. */
+interface Intake {
+  config: ConsumerConfig;
+  consume(): Promise<ConsumerMessages>;
+}
+
+/**
+ * Runs a `@Consume` handler on a JetStream pull consumer (`consumer.consume()`), or a
+ * `@ConsumePush` handler on a durable push consumer.
+ */
 export class JetStreamConsumerAdapter implements HandlerAdapter {
   private readonly dispatcher: Dispatcher<JsMsg>;
   private readonly codec: Codec;
@@ -37,6 +49,10 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
   private readonly label: string;
   private readonly concurrency: number;
   private readonly batch?: ResolvedBatchOptions;
+  /** `@ConsumePush`: messages are read as soon as they arrive, not when a slot is free. */
+  private readonly push: boolean;
+  /** Messages the handler can hold at once: every slot busy, or a full batch. */
+  private readonly capacity: number;
   private messages?: ConsumerMessages;
   private loop?: Promise<void>;
   private stopping = false;
@@ -61,8 +77,10 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     this.info = pipeline.info;
     this.retry = pipeline.retry;
     this.run = pipeline.run;
-    this.label = `${def.className}.${def.methodName} on "${def.options.stream}/${def.options.durable}"`;
+    this.push = def.delivery === 'push';
+    this.label = `${def.className}.${def.methodName} on "${def.options.stream}/${def.options.durable}"${this.push ? ' (push)' : ''}`;
     this.batch = resolveBatchOptions(def.options.batch);
+    this.capacity = this.batch ? Math.max(this.batch.maxSize, this.concurrency) : this.concurrency;
     this.dispatcher = new Dispatcher<JsMsg>({
       concurrency: this.concurrency,
       ...(this.batch ? { batch: this.batch } : {}),
@@ -79,21 +97,13 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
 
   async start(): Promise<void> {
     if (this.messages) return;
-    const { stream, durable, config } = this.def.options;
-    if (config) await this.streams.ensureConsumer(stream, { ...config, durable_name: durable });
-    const consumer = await this.getConsumer(stream, durable, config !== undefined);
-    const { config: actual } = await consumer.info(true);
+    const intake = this.push ? await this.openPush() : await this.openPull();
+    const { config: actual } = intake;
     this.checkMaxDeliver(actual.max_deliver);
     // `ack_wait` is in nanoseconds.
     const ackWaitMs = (actual.ack_wait ?? 0) / 1e6;
     this.checkBatchWait(ackWaitMs);
-    // Just enough pulled messages to keep every slot busy, or to fill a batch: they wait
-    // for a slot meanwhile. The heartbeat covers every message the client has handed over;
-    // while every slot is busy, up to `max_messages - 1` more can still sit in the client's
-    // own buffer, out of its reach.
-    const messages = await consumer.consume({
-      max_messages: this.batch ? Math.max(this.batch.maxSize, this.concurrency) : this.concurrency,
-    });
+    const messages = await intake.consume();
     if (this.stopping) {
       // stop() ran while start() was awaiting: nothing will ever read these messages.
       await messages.close();
@@ -149,6 +159,96 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     return { nakked, cancelledRetries: this.dispatcher.cancelRetries() };
   }
 
+  private async openPull(): Promise<Intake> {
+    const { stream, durable, config } = this.def.options;
+    if (config) await this.streams.ensureConsumer(stream, { ...config, durable_name: durable });
+    const consumer = await this.lookup(
+      () => this.entry.js().consumers.get(stream, durable),
+      config !== undefined,
+    );
+    const { config: actual } = await consumer.info(true);
+    return {
+      config: actual,
+      // Just enough pulled messages to keep every slot busy, or to fill a batch: they wait
+      // for a slot meanwhile. The heartbeat covers every message the client has handed
+      // over; while every slot is busy, up to `max_messages - 1` more can still sit in the
+      // client's own buffer, out of its reach.
+      consume: () => consumer.consume({ max_messages: this.capacity }),
+    };
+  }
+
+  /**
+   * The server delivers up to `max_ack_pending` unacked messages, all read at once and
+   * heartbeated while they wait for a slot; a consumer the library creates allows just
+   * as many as the handler can hold.
+   */
+  private async openPush(): Promise<Intake> {
+    const { stream, durable, config } = this.def.options;
+    // Validated at bootstrap: the option and `config.deliver_group` never disagree.
+    const deliverGroup =
+      (this.def.options as ConsumePushOptions).deliverGroup ?? config?.deliver_group;
+    if (config) {
+      await this.streams.ensureConsumer(
+        stream,
+        { ...config, durable_name: durable },
+        undefined,
+        pushConsumerDefaults({
+          stream,
+          durable,
+          ...(deliverGroup !== undefined ? { deliverGroup } : {}),
+          maxAckPending: this.capacity,
+        }),
+      );
+    }
+    const consumer = await this.lookup(async () => {
+      try {
+        return await this.entry.js().consumers.getPushConsumer(stream, durable);
+      } catch (err) {
+        // nats.js refuses to bind a consumer without a `deliver_subject` this way.
+        if (err instanceof Error && err.message === 'not a push consumer') {
+          throw this.notPushConsumer(err);
+        }
+        throw err;
+      }
+    }, config !== undefined);
+    const { config: actual } = await consumer.info(true);
+    this.checkPushConsumer(actual, deliverGroup);
+    return { config: actual, consume: () => consumer.consume() };
+  }
+
+  private notPushConsumer(cause?: unknown): NatsConfigError {
+    return new NatsConfigError(
+      `Consumer "${this.consumerName}" for ${this.handlerName} is not a push consumer (it has no deliver_subject); use @Consume for a pull consumer`,
+      cause === undefined ? undefined : { cause },
+    );
+  }
+
+  /** A push consumer must deliver to this handler's group, and not without limit. */
+  private checkPushConsumer(actual: ConsumerConfig, group: string | undefined): void {
+    const name = `Consumer "${this.consumerName}" for ${this.handlerName}`;
+    if (!actual.deliver_subject) throw this.notPushConsumer();
+    const actualGroup = actual.deliver_group || undefined;
+    if (actualGroup !== group) {
+      const has = actualGroup === undefined ? 'no deliver_group' : `deliver_group "${actualGroup}"`;
+      const declared = group === undefined ? 'none' : `deliverGroup "${group}"`;
+      throw new NatsConfigError(`${name} has ${has}, but the handler declares ${declared}`);
+    }
+    const maxAckPending = actual.max_ack_pending ?? 0;
+    if (maxAckPending <= 0) {
+      throw new NatsConfigError(
+        `${name} has an unlimited max_ack_pending (${maxAckPending}); a push consumer needs a limit, as every pending message is delivered at once`,
+      );
+    }
+  }
+
+  private get consumerName(): string {
+    return `${this.def.options.stream}/${this.def.options.durable}`;
+  }
+
+  private get handlerName(): string {
+    return `${this.def.className}.${this.def.methodName}`;
+  }
+
   /** The server stops redelivering after `max_deliver`: warn when that is before the DLQ. */
   private checkMaxDeliver(maxDeliver: number | undefined): void {
     if (!this.retry || maxDeliver === undefined || maxDeliver <= 0) return;
@@ -201,9 +301,11 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     if (this.stopping && this.unsettled.size === 0) this.stopHeartbeat();
   }
 
-  private async getConsumer(stream: string, durable: string, configDeclared: boolean) {
+  /** Binds the consumer, a missing one (or stream) being a configuration error. */
+  private async lookup<T>(get: () => Promise<T>, configDeclared: boolean): Promise<T> {
+    const { stream, durable } = this.def.options;
     try {
-      return await this.entry.js().consumers.get(stream, durable);
+      return await get();
     } catch (err) {
       if (
         err instanceof JetStreamApiError &&
@@ -226,7 +328,20 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
       for await (const msg of messages) {
         // Heartbeated from now on, while it waits for a slot or a batch.
         this.unsettled.set(msg, undefined);
-        await this.dispatcher.push(msg, msg.info.deliveryCount);
+        if (!this.push) {
+          await this.dispatcher.push(msg, msg.info.deliveryCount);
+          continue;
+        }
+        // Push: keep reading (nats.js answers flow control only as the iterator yields);
+        // the dispatcher queues it in FIFO order, and `max_ack_pending` bounds the queue.
+        void this.dispatcher
+          .push(msg, msg.info.deliveryCount)
+          .catch((err: unknown) =>
+            this.entry.logger.error(
+              `Failed to dispatch message for ${this.label}`,
+              errorTrace(err),
+            ),
+          );
       }
     } catch (err) {
       if (!this.stopping) {
@@ -260,6 +375,10 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
               const attempt = 'count' in n ? ` (attempt ${n.count})` : '';
               this.entry.logger.warn(`Consumer of ${this.label} reported ${n.type}${attempt}`);
             }
+            break;
+          case 'flow_control':
+          case 'heartbeat':
+            // Push consumers: nats.js answers / tracks these itself.
             break;
           default:
             break;
