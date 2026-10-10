@@ -547,6 +547,13 @@ describe('cloudEventKey', () => {
   it('builds the idempotency key', () => {
     expect(cloudEventKey(binaryMsg({ id: '7', source: 'svc' }))).toBe('svc|7');
   });
+  it('percent-encodes the source so a "|" in it cannot collide with another event', () => {
+    const a = cloudEventKey(binaryMsg({ id: 'c', source: 'a|b' }));
+    const b = cloudEventKey(binaryMsg({ id: 'b|c', source: 'a' }));
+    expect(a).toBe('a%7Cb|c');
+    expect(b).toBe('a|b|c');
+    expect(a).not.toBe(b);
+  });
   it('returns undefined for non-CloudEvents', () => {
     expect(cloudEventKey({ data: new Uint8Array(0), headers: headers() })).toBeUndefined();
   });

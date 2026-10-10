@@ -306,7 +306,16 @@ export function writeCloudEvent(
   return textEncoder.encode(JSON.stringify(env));
 }
 
+/**
+ * The idempotency key of a CloudEvent: `<source>|<id>`, with `source` percent-encoded
+ * (`encodeURIComponent`) so a `|` in it cannot shift the separator: (`a|b`, `c`) and
+ * (`a`, `b|c`) give different keys. Keys persist in external stores: keep the format.
+ */
+export function cloudEventKeyOf(meta: { source: string; id: string }): string {
+  return `${encodeURIComponent(meta.source)}|${meta.id}`;
+}
+
 export function cloudEventKey(msg: CeMessage): string | undefined {
   const meta = readCloudEventMeta(msg);
-  return meta ? `${meta.source}|${meta.id}` : undefined;
+  return meta ? cloudEventKeyOf(meta) : undefined;
 }
