@@ -100,13 +100,14 @@ jobs:
       - run: npm run example:check
 
   # Single required status check for branch protection: fails unless every job above succeeded.
-  # Without an `if`, a failed need would make this job *skipped*, and branch protection counts a
-  # skipped required check as passing; `!cancelled()` makes it run (and fail) whenever a need
-  # failed, was skipped or timed out. Only when the whole run is cancelled (a superseded pull
-  # request run) is it skipped instead of reported as a failure; the newer run reports for the
-  # new head commit.
+  # Branch protection counts a skipped required check as passing, so this job must never be
+  # skipped: without an `if` a failed need would skip it, and with `!cancelled()` a cancelled run
+  # would. `always()` makes it run (and fail) whenever a need failed, was skipped, timed out or
+  # was cancelled. A pull request run superseded by a newer push therefore shows a red `ci-ok` on
+  # its old commit; that is harmless, because branch protection checks the head commit, whose own
+  # run reports `ci-ok`. `npm run check:workflows` guards the `if` and the `needs` list.
   ci-ok:
-    if: ${{ !cancelled() }}
+    if: always()
     needs: [checks, test, smoke, example]
     runs-on: ubuntu-latest
     timeout-minutes: 5

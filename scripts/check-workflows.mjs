@@ -1,7 +1,7 @@
 // Guards the security-relevant shape of the workflow files by matching strings in their text.
 // Fails (exit 1) on any violation. Cheap and dependency-free; actionlint covers the syntax.
 // Rules: release.yml is the only workflow allowed to publish; every other workflow is read-only;
-// every action is pinned by commit SHA.
+// every action is pinned by commit SHA; ci.yml's `ci-ok` gate always runs and needs every job.
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
@@ -38,6 +38,26 @@ function onBlock(text) {
   return triggers;
 }
 
+// The jobs of the top-level `jobs:` block as { name: [lines of the job] }, from comment-free text.
+function jobsBlock(text) {
+  const lines = text.split('\n');
+  const start = lines.findIndex((l) => /^jobs:\s*$/.test(l));
+  if (start === -1) return null;
+  const jobs = {};
+  let current = null;
+  for (const line of lines.slice(start + 1)) {
+    if (/^\S/.test(line)) break;
+    const name = /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(line);
+    if (name) {
+      current = name[1];
+      jobs[current] = [];
+    } else if (current && line.trim() !== '') {
+      jobs[current].push(line);
+    }
+  }
+  return jobs;
+}
+
 const violations = [];
 const files = readdirSync(dir)
   .filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'))
@@ -63,6 +83,36 @@ for (const file of files) {
 
   if (/NPM_TOKEN/.test(body)) {
     violations.push(`${file}: must not reference NPM_TOKEN (use trusted publishing)`);
+  }
+
+  if (file === 'ci.yml') {
+    // `ci-ok` is the single required check. It must never be skipped (a skipped required check
+    // counts as passing), so `if: always()`, and it must need every other job.
+    const jobs = jobsBlock(body) ?? {};
+    const gate = jobs['ci-ok'];
+    if (!gate) {
+      violations.push('ci.yml: missing the `ci-ok` job');
+    } else {
+      if (!gate.some((l) => /^ {4}if:\s*(?:always\(\)|\$\{\{\s*always\(\)\s*\}\})\s*$/.test(l))) {
+        violations.push('ci.yml: `ci-ok` must have `if: always()`');
+      }
+      const needsLine = gate.map((l) => /^ {4}needs:\s*\[(.*)\]\s*$/.exec(l)).find(Boolean);
+      const others = Object.keys(jobs).filter((j) => j !== 'ci-ok');
+      if (!needsLine) {
+        violations.push('ci.yml: `ci-ok` must list its needs inline, as `needs: [job, ...]`');
+      } else {
+        const needs = needsLine[1]
+          .split(',')
+          .map((n) => n.trim())
+          .filter(Boolean);
+        const missing = others.filter((j) => !needs.includes(j));
+        if (missing.length > 0) {
+          violations.push(
+            `ci.yml: \`ci-ok\` must need every other job, missing: ${missing.join(', ')}`,
+          );
+        }
+      }
+    }
   }
 
   if (file === 'release.yml') {
@@ -139,5 +189,5 @@ if (violations.length > 0) {
   process.exit(1);
 }
 console.log(
-  `check-workflows: ok (${files.join(', ')}; actions pinned by SHA; release.yml push-to-main (+ workflow_dispatch) only, id-token: write, --ignore-scripts, no NPM_TOKEN; others read-only)`,
+  `check-workflows: ok (${files.join(', ')}; actions pinned by SHA; ci.yml ci-ok always runs and needs every job; release.yml push-to-main (+ workflow_dispatch) only, id-token: write, --ignore-scripts, no NPM_TOKEN; others read-only)`,
 );
