@@ -98,7 +98,13 @@ function jsPart(opts: { headers?: MsgHdrs; deliveryCount?: number } = {}): Part 
 }
 
 const base = { connection: 'default', className: 'H', methodName: 'on' };
-const consumeHandler: HandlerInfo = { kind: 'consume', ...base, stream: 'ORD', durable: 'billing' };
+const consumeHandler: HandlerInfo = {
+  kind: 'consume',
+  ...base,
+  stream: 'ORD',
+  durable: 'billing',
+  delivery: 'pull',
+};
 const subscribeHandler: HandlerInfo = {
   kind: 'subscribe',
   ...base,

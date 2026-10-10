@@ -273,6 +273,7 @@ describe('@CloudEventRouter discovery', () => {
     });
     expect(def).toMatchObject({
       kind: 'consume',
+      delivery: 'pull',
       connection: 'c',
       methodName: '@CloudEventRouter',
       options: { stream: 'S', durable: 'd', config: { ack_wait: 1 }, concurrency: 2 },

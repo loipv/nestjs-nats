@@ -9,6 +9,8 @@ import type { CloudEventRouterOptions } from '../decorators/cloudevent.decorator
 import {
   NATS_CLOUD_EVENT_ROUTER_METADATA,
   NATS_CONSUME_METADATA,
+  NATS_CONSUME_ORDERED_METADATA,
+  NATS_CONSUME_PUSH_METADATA,
   NATS_ENDPOINT_METADATA,
   NATS_ON_CLOUD_EVENT_METADATA,
   NATS_SERVICE_METADATA,
@@ -16,6 +18,8 @@ import {
 } from '../decorators/constants.js';
 import type {
   ConsumeOptions,
+  ConsumeOrderedOptions,
+  ConsumePushOptions,
   NatsServiceOptions,
   ServiceEndpointOptions,
   SubscribeOptions,
@@ -24,7 +28,7 @@ import { NatsConfigError, NatsModuleError } from '../errors/errors.js';
 import { DEFAULT_CONNECTION } from '../module/tokens.js';
 import { NatsParamsFactory } from './nats-params-factory.js';
 
-export type HandlerKind = 'subscribe' | 'consume' | 'service-endpoint';
+export type HandlerKind = 'subscribe' | 'consume' | 'ordered' | 'service-endpoint';
 
 type Invoke = (payload: unknown, ctx: NatsContext | NatsBatchContext) => Promise<unknown>;
 
@@ -53,7 +57,8 @@ interface HandlerBase {
 
 type HandlerSpec =
   | { kind: 'subscribe'; subject: string; options: SubscribeOptions }
-  | { kind: 'consume'; options: ConsumeOptions }
+  | { kind: 'consume'; options: ConsumeOptions | ConsumePushOptions; delivery: 'pull' | 'push' }
+  | { kind: 'ordered'; options: ConsumeOrderedOptions }
   | {
       kind: 'service-endpoint';
       endpoint: string;
@@ -69,7 +74,7 @@ export const ROUTER_METHOD_NAME = '@CloudEventRouter';
 const UNMATCHED_POLICIES: ReadonlyArray<CloudEventRouting['unmatched']> = ['ack', 'term', 'dlq'];
 
 /**
- * Finds `@Subscribe`, `@Consume`, `@NatsService`/`@ServiceEndpoint` handlers and
+ * Finds `@Subscribe`, `@Consume`, `@ConsumePush`, `@ConsumeOrdered`, `@NatsService`/`@ServiceEndpoint` handlers and
  * `@CloudEventRouter` classes (one subscribe/consume definition per class).
  */
 @Injectable()
@@ -120,7 +125,7 @@ export class HandlerExplorer {
           }
           if (specs.length > 0) {
             throw new NatsConfigError(
-              `@OnCloudEvent ${label} cannot also be a @Subscribe/@Consume/@ServiceEndpoint handler`,
+              `@OnCloudEvent ${label} cannot also be a @Subscribe/@Consume/@ConsumePush/@ConsumeOrdered/@ServiceEndpoint handler`,
             );
           }
           for (const pattern of patterns) routes.push({ pattern, methodName });
@@ -185,6 +190,7 @@ export class HandlerExplorer {
       const { consume } = options as Extract<CloudEventRouterOptions, { consume: unknown }>;
       spec = {
         kind: 'consume',
+        delivery: 'pull',
         options: {
           ...common,
           stream: consume.stream,
@@ -240,7 +246,17 @@ export class HandlerExplorer {
       NATS_CONSUME_METADATA,
       method,
     );
-    if (consume) specs.push({ kind: 'consume', options: consume.options });
+    if (consume) specs.push({ kind: 'consume', delivery: 'pull', options: consume.options });
+    const push: { options: ConsumePushOptions } | undefined = Reflect.getMetadata(
+      NATS_CONSUME_PUSH_METADATA,
+      method,
+    );
+    if (push) specs.push({ kind: 'consume', delivery: 'push', options: push.options });
+    const ordered: { options: ConsumeOrderedOptions } | undefined = Reflect.getMetadata(
+      NATS_CONSUME_ORDERED_METADATA,
+      method,
+    );
+    if (ordered) specs.push({ kind: 'ordered', options: ordered.options });
     const endpoint: { name: string; options?: ServiceEndpointOptions } | undefined =
       Reflect.getMetadata(NATS_ENDPOINT_METADATA, method);
     if (endpoint) {

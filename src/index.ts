@@ -13,12 +13,17 @@ export type { CloudEventRouterOptions } from './decorators/cloudevent.decorators
 export { CloudEventRouter, OnCloudEvent } from './decorators/cloudevent.decorators.js';
 export type {
   ConsumeOptions,
+  ConsumeOrderedOptions,
+  ConsumePushOptions,
   NatsServiceOptions,
+  OrderedDeliverPolicy,
   ServiceEndpointOptions,
   SubscribeOptions,
 } from './decorators/handler.decorators.js';
 export {
   Consume,
+  ConsumeOrdered,
+  ConsumePush,
   NatsService,
   ServiceEndpoint,
   Subscribe,

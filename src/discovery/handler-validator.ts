@@ -1,5 +1,6 @@
 import { MAX_TIMER_DELAY } from '../batch/collector.js';
 import type { ConnectionRegistry } from '../connection/connection-registry.js';
+import type { ConsumePushOptions } from '../decorators/handler.decorators.js';
 import { NatsConfigError } from '../errors/errors.js';
 import { DEFAULT_IDEMPOTENCY_TTL } from '../idempotency/idempotency.js';
 import type { DlqOptions } from '../settlement/dlq.js';
@@ -30,10 +31,13 @@ export function validateHandlers(defs: HandlerDefinition[], mgr: ConnectionRegis
         `NATS handler ${label(def)} references unknown NATS connection "${def.connection}"`,
       );
     }
-    if (def.kind === 'subscribe' || def.kind === 'consume') {
+    if (def.kind === 'ordered') validateOrdered(def);
+    if (def.kind !== 'service-endpoint') {
       validateRetry(def, mgr);
       validateDlq(def, mgr);
       validateIdempotency(def, mgr);
+    }
+    if (def.kind === 'subscribe' || def.kind === 'consume') {
       validateBatch(def);
       const { concurrency } = def.options;
       if (concurrency !== undefined && (!Number.isInteger(concurrency) || concurrency < 1)) {
@@ -43,6 +47,7 @@ export function validateHandlers(defs: HandlerDefinition[], mgr: ConnectionRegis
       }
     }
     if (def.kind === 'consume') {
+      validateDeliverGroup(def);
       const { stream, durable } = def.options;
       const key = JSON.stringify([def.connection, stream, durable]);
       const other = durables.get(key);
@@ -53,6 +58,67 @@ export function validateHandlers(defs: HandlerDefinition[], mgr: ConnectionRegis
       }
       durables.set(key, def);
     }
+  }
+}
+
+/** `@ConsumePush`: `deliverGroup` must agree with `config.deliver_group`. */
+function validateDeliverGroup(def: HandlerDefinition & { kind: 'consume' }): void {
+  if (def.delivery !== 'push') return;
+  const { deliverGroup, config } = def.options as ConsumePushOptions;
+  const configured = config?.deliver_group;
+  if (deliverGroup !== undefined && configured !== undefined && deliverGroup !== configured) {
+    throw new NatsConfigError(
+      `NATS handler ${label(def)} has invalid options: deliverGroup "${deliverGroup}" conflicts with config.deliver_group "${configured}"`,
+    );
+  }
+}
+
+const DELIVER_POLICIES: readonly string[] = ['all', 'last', 'new', 'last_per_subject'];
+const UNSUPPORTED_ORDERED_OPTIONS = ['concurrency', 'durable', 'batch', 'ack', 'config'] as const;
+
+/** `@ConsumeOrdered` has no durable, acks, batches or concurrency: reject what it would ignore. */
+function validateOrdered(def: HandlerDefinition & { kind: 'ordered' }): void {
+  const options = def.options as unknown as Record<string, unknown>;
+  for (const key of UNSUPPORTED_ORDERED_OPTIONS) {
+    if (options[key] !== undefined) {
+      throw new NatsConfigError(
+        `NATS handler ${label(def)}: @ConsumeOrdered does not support ${key}`,
+      );
+    }
+  }
+  const { deliverPolicy } = def.options;
+  if (deliverPolicy === undefined) return;
+  const invalid = (what: string, expected?: string) =>
+    new NatsConfigError(
+      `NATS handler ${label(def)} has invalid deliverPolicy${what}${expected ? `; expected ${expected}` : ''}`,
+    );
+  if (typeof deliverPolicy === 'string') {
+    if (!DELIVER_POLICIES.includes(deliverPolicy)) {
+      throw invalid(
+        ` ${JSON.stringify(deliverPolicy)}`,
+        "'all', 'last', 'new' or 'last_per_subject'",
+      );
+    }
+    return;
+  }
+  if (typeof deliverPolicy !== 'object' || deliverPolicy === null) {
+    throw invalid(` ${String(deliverPolicy)}`);
+  }
+  if ('startSeq' in deliverPolicy) {
+    const { startSeq } = deliverPolicy;
+    if (!Number.isInteger(startSeq) || startSeq < 1) {
+      throw invalid(`.startSeq ${String(startSeq)}`, 'an integer >= 1');
+    }
+  } else if ('startTime' in deliverPolicy) {
+    const { startTime } = deliverPolicy;
+    const valid =
+      (typeof startTime === 'string' || startTime instanceof Date) &&
+      !Number.isNaN(new Date(startTime).getTime());
+    if (!valid) {
+      throw invalid(`.startTime ${String(startTime)}`, 'a valid Date or date string');
+    }
+  } else {
+    throw invalid('', 'startSeq or startTime');
   }
 }
 
@@ -127,7 +193,7 @@ function validateIdempotency(def: HandlerDefinition, mgr: ConnectionRegistry): v
 
 /** Validates the batch options of a handler; a batch cannot be acked manually. */
 function validateBatch(def: HandlerDefinition): void {
-  if (def.kind === 'service-endpoint') return;
+  if (def.kind === 'service-endpoint' || def.kind === 'ordered') return;
   const { batch } = def.options;
   if (batch === undefined) return;
   if (def.kind === 'consume' && def.options.ack === 'manual') {

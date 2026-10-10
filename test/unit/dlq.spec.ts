@@ -36,6 +36,16 @@ function jsMsg(o: {
 
 describe('resolveDlqPolicy', () => {
   it('is off by default', () => expect(resolveDlqPolicy('consume')).toBe(false));
+  it('defaults an ordered consumer to a jetstream dead letter under its class and method', () => {
+    const o = resolveDlqPolicy('ordered', true) as DlqPolicy;
+    expect(o.mode).toBe('jetstream');
+    expect(
+      o.subject(
+        { kind: 'ordered', stream: 'ORD', className: 'Audit', methodName: 'on' } as HandlerInfo,
+        msg('ord.x'),
+      ),
+    ).toBe('dlq.ORD.ordered.Audit.on');
+  });
   it('defaults subject and mode per kind', () => {
     const c = resolveDlqPolicy('consume', true) as DlqPolicy;
     expect(c.mode).toBe('jetstream');

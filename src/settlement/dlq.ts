@@ -41,7 +41,14 @@ function isNatsHeader(key: string): boolean {
 }
 
 function defaultSubject(info: HandlerInfo, msg: InboundMessage): string {
-  return info.kind === 'consume' ? `dlq.${info.stream}.${info.durable}` : `dlq.${msg.subject}`;
+  switch (info.kind) {
+    case 'consume':
+      return `dlq.${info.stream}.${info.durable}`;
+    case 'ordered':
+      return `dlq.${info.stream}.ordered.${info.className}.${info.methodName}`;
+    default:
+      return `dlq.${msg.subject}`;
+  }
 }
 
 /**
@@ -49,7 +56,7 @@ function defaultSubject(info: HandlerInfo, msg: InboundMessage): string {
  * `false` on the handler always wins; a handler object overrides a module object.
  */
 export function resolveDlqPolicy(
-  kind: 'subscribe' | 'consume',
+  kind: 'subscribe' | 'consume' | 'ordered',
   module?: DlqOptions | boolean,
   handler?: DlqOptions | boolean,
 ): DlqPolicy | false {
@@ -68,7 +75,7 @@ export function resolveDlqPolicy(
         : subject !== undefined
           ? () => subject
           : defaultSubject,
-    mode: opts.mode ?? (kind === 'consume' ? 'jetstream' : 'core'),
+    mode: opts.mode ?? (kind === 'subscribe' ? 'core' : 'jetstream'),
   };
 }
 
