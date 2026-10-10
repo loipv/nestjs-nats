@@ -38,6 +38,8 @@ export class Dispatcher<M> {
   private draining: Promise<void> = Promise.resolve();
   /** Flushed batches waiting for a slot. */
   private readonly waiting = new Set<DispatchItem<M>[]>();
+  /** Pushed messages waiting for a slot (without `batch`). */
+  private readonly queued = new Set<DispatchItem<M>>();
   private stopped = false;
   private abandoned = false;
 
@@ -79,14 +81,21 @@ export class Dispatcher<M> {
       if (this.stopped && this.collector.size > 0) await this.drain();
       return;
     }
+    const item = { msg, attempt };
+    this.queued.add(item);
     await this.limiter.acquire();
+    if (!this.queued.delete(item)) {
+      // Abandoned while waiting: `abandon()` handed it back.
+      this.limiter.release();
+      return;
+    }
     if (this.stopped) {
       // Stopped while waiting for a slot: it was received but never started.
       this.limiter.release();
       this.reject(msg);
       return;
     }
-    this.start([{ msg, attempt }]);
+    this.start([item]);
   }
 
   /**
@@ -126,14 +135,15 @@ export class Dispatcher<M> {
   }
 
   /**
-   * Gives up on every message received but not started: the ones being collected and
-   * the batches waiting for a slot, which will never be processed. Also stops the
-   * dispatcher. Returns those messages so the caller can hand them back.
+   * Gives up on every message received but not started: the ones waiting for a slot,
+   * being collected, and the batches waiting for a slot, which will never be processed.
+   * Also stops the dispatcher. Returns those messages so the caller can hand them back.
    */
   abandon(): M[] {
     this.stopped = true;
     this.abandoned = true;
-    const items = [...(this.collector?.take() ?? [])];
+    const items = [...this.queued, ...(this.collector?.take() ?? [])];
+    this.queued.clear();
     for (const batch of this.waiting) items.push(...batch);
     this.waiting.clear();
     return items.map((item) => item.msg);

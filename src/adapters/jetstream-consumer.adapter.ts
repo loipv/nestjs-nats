@@ -204,38 +204,66 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
       try {
         return await this.entry.js().consumers.getPushConsumer(stream, durable);
       } catch (err) {
-        // nats.js refuses to bind a consumer without a `deliver_subject` this way.
-        if (err instanceof Error && err.message === 'not a push consumer') {
-          throw this.notPushConsumer(err);
-        }
+        // Missing consumer or stream: mapped by `lookup()`.
+        if (err instanceof JetStreamApiError) throw err;
+        // nats.js refuses a consumer it cannot bind as a push consumer (e.g. a pull one,
+        // without `deliver_subject`): tell why from its info when the checks can.
+        const { config: actual } = await (await this.streams.jsm()).consumers.info(stream, durable);
+        this.checkPushConsumer(actual, deliverGroup, err);
         throw err;
       }
     }, config !== undefined);
     const { config: actual } = await consumer.info(true);
     this.checkPushConsumer(actual, deliverGroup);
-    return { config: actual, consume: () => consumer.consume() };
+    return {
+      config: actual,
+      consume: async () => {
+        try {
+          return await consumer.consume();
+        } catch (err) {
+          // Without a deliver group, nats.js binds one subscriber only.
+          if (err instanceof Error && err.name === 'InvalidOperationError' && !deliverGroup) {
+            throw new NatsConfigError(
+              `${this.pushConsumerName} is already bound to another subscriber (${err.message}); give every instance the same deliverGroup to share its messages`,
+              { cause: err },
+            );
+          }
+          throw err;
+        }
+      },
+    };
   }
 
-  private notPushConsumer(cause?: unknown): NatsConfigError {
-    return new NatsConfigError(
-      `Consumer "${this.consumerName}" for ${this.handlerName} is not a push consumer (it has no deliver_subject); use @Consume for a pull consumer`,
-      cause === undefined ? undefined : { cause },
-    );
+  private get pushConsumerName(): string {
+    return `Consumer "${this.consumerName}" for ${this.handlerName}`;
   }
 
-  /** A push consumer must deliver to this handler's group, and not without limit. */
-  private checkPushConsumer(actual: ConsumerConfig, group: string | undefined): void {
-    const name = `Consumer "${this.consumerName}" for ${this.handlerName}`;
-    if (!actual.deliver_subject) throw this.notPushConsumer();
+  /**
+   * A push consumer must deliver to this handler's group, and not without limit;
+   * `cause` is the error that led to the check, if any.
+   */
+  private checkPushConsumer(
+    actual: ConsumerConfig,
+    group: string | undefined,
+    cause?: unknown,
+  ): void {
+    const name = this.pushConsumerName;
+    const fail = (message: string) =>
+      new NatsConfigError(message, cause === undefined ? undefined : { cause });
+    if (!actual.deliver_subject) {
+      throw fail(
+        `${name} is not a push consumer (it has no deliver_subject); use @Consume for a pull consumer`,
+      );
+    }
     const actualGroup = actual.deliver_group || undefined;
     if (actualGroup !== group) {
       const has = actualGroup === undefined ? 'no deliver_group' : `deliver_group "${actualGroup}"`;
       const declared = group === undefined ? 'none' : `deliverGroup "${group}"`;
-      throw new NatsConfigError(`${name} has ${has}, but the handler declares ${declared}`);
+      throw fail(`${name} has ${has}, but the handler declares ${declared}`);
     }
     const maxAckPending = actual.max_ack_pending ?? 0;
     if (maxAckPending <= 0) {
-      throw new NatsConfigError(
+      throw fail(
         `${name} has an unlimited max_ack_pending (${maxAckPending}); a push consumer needs a limit, as every pending message is delivered at once`,
       );
     }

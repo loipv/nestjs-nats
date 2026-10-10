@@ -161,10 +161,10 @@ describe('stream-sync', () => {
     expect(
       pushConsumerDefaults({ stream: 'S', durable: 'D', deliverGroup: 'g', maxAckPending: 2 }),
     ).toStrictEqual({
-      // nats.js and the server reject flow control and idle heartbeats with a deliver group.
+      // nats.js and the server reject flow control and idle heartbeats with a deliver group;
+      // its max_ack_pending is shared by every instance, so the server default applies.
       deliver_subject: '_nats.push.S.D',
       deliver_group: 'g',
-      max_ack_pending: 2,
     });
     expect(pushConsumerDefaults({ stream: 'S', durable: 'D', maxAckPending: 1 })).toStrictEqual({
       deliver_subject: '_nats.push.S.D',
