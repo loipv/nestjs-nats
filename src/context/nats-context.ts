@@ -45,7 +45,10 @@ export class NatsContext<R extends NatsMsg | JsMsg = NatsMsg | JsMsg> {
     return this.#headers;
   }
 
-  /** The subject to reply to, if the sender expects a reply (never for JetStream messages). */
+  /**
+   * The subject to reply to, if the sender expects a reply (never for JetStream messages,
+   * ordered ones included).
+   */
   get replyTo(): string | undefined {
     // A JetStream message's reply subject is its `$JS.ACK...` subject, not a reply target.
     if (this.#kind === 'jetstream' || this.#kind === 'ordered') return undefined;
