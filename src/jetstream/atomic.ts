@@ -105,7 +105,17 @@ export async function publishAtomic(
 
   const [first] = outgoing;
   if (count === 1 && first) {
-    const ack = await publishOutgoing(entry, first, { ...opts, timeout }, failed);
+    const ack = await publishOutgoing(
+      entry,
+      first,
+      { ...opts, timeout },
+      {
+        wrap: failed,
+        expired: (ms) =>
+          abortError(`the outbound plugins did not pass the message on within ${ms} ms`),
+        skipped: () => abortError('an outbound plugin did not pass message 0 on'),
+      },
+    );
     return toAck(ack, 1);
   }
 

@@ -237,8 +237,21 @@ describe('single-message publishAtomic outbound bound', () => {
       result.catch((e: unknown) => e),
       400,
     );
-    expect(err).toBeInstanceOf(NatsModuleError);
-    expect((err as Error).message).toContain('did not pass the message on within 400 ms');
+    expect(err).toBeInstanceOf(NatsAtomicPublishError);
+    expect(err).toMatchObject({ subject: 'o', count: 1 });
+    expect((err as Error).message).toBe(
+      'Atomic publish of 1 message to "o" aborted: the outbound plugins did not pass the message on within 400 ms',
+    );
+    expect(fake.jsPublished).toEqual([]);
+  });
+
+  it('rejects with NatsAtomicPublishError when a plugin does not pass the message on', async () => {
+    const { js, fake } = setup([plugin(async () => {})]);
+    const err = await js.publishAtomic([{ subject: 'o', data: 1 }]).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(NatsAtomicPublishError);
+    expect((err as Error).message).toBe(
+      'Atomic publish of 1 message to "o" aborted: an outbound plugin did not pass message 0 on',
+    );
     expect(fake.jsPublished).toEqual([]);
   });
 
