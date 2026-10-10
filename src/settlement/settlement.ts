@@ -280,6 +280,13 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
     const signal = (d as Partial<InternalDelivery>)[ABORT_SIGNAL];
     if (!signal) return deadLetterSubscribe(d, msg, err, consumer);
     const policy = retry || DEFAULT_RETRY;
+    /** Drops the message at shutdown; `error` is a DLQ publish failure not logged yet. */
+    const abandon = (subject: string, error?: unknown) => {
+      d.logger.warn(
+        `${label(d, msg)} not sent to DLQ ${subject}: retry abandoned at shutdown (stream sequence ${streamSeq(msg)})${error === undefined ? '' : `: ${errorMessage(error)}`}`,
+      );
+      recordOutcome(d, msg, { action: 'drop', error: err });
+    };
     for (let n = 1; ; n++) {
       const { subject, error } = await deadLetter(d, msg, err, consumer);
       if (error === undefined) {
@@ -287,18 +294,14 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
         recordOutcome(d, msg, { action: 'dlq', subject, error: err });
         return;
       }
+      // Already shutting down: there is no retry to announce.
+      if (signal.aborted) return abandon(subject, error);
       const delayMs = Math.min(policy.maxDelay, backoffDelay(policy, n, random));
       d.logger.error(
         `${label(d, msg)} failed and could not be sent to DLQ ${subject}, retrying in ${delayMs}ms: ${errorMessage(error)}`,
         errorTrace(error),
       );
-      if (!(await sleep(delayMs, signal))) {
-        d.logger.warn(
-          `${label(d, msg)} not sent to DLQ ${subject}: retry abandoned at shutdown (stream sequence ${streamSeq(msg)})`,
-        );
-        recordOutcome(d, msg, { action: 'drop', error: err });
-        return;
-      }
+      if (!(await sleep(delayMs, signal))) return abandon(subject);
     }
   }
 

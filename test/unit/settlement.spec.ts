@@ -681,6 +681,24 @@ describe('createSettlement — ordered', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('abandons at once, without a retry line, when the signal has already aborted', async () => {
+    const { entry, jsPublish } = fakeEntry({
+      jsPublish: () => Promise.reject(new Error('no stream')),
+    });
+    const { d, msg, log, controller } = orderedDelivery({ attempt: 3 });
+    controller.abort();
+    const err = new Error('x');
+    await createSettlement({ entry, retry: twoRetries, dlq: orderedDlq }).handle(d, nextWith(err));
+    expect(jsPublish).toHaveBeenCalledTimes(1);
+    expect(d.outcomes.get(msg)).toEqual({ action: 'drop', error: err });
+    expect(log.error).not.toHaveBeenCalled();
+    expect(log.warn).toHaveBeenCalledExactlyOnceWith(
+      expect.stringMatching(
+        /not sent to DLQ .*: retry abandoned at shutdown \(stream sequence 42\): no stream$/,
+      ),
+    );
+  });
+
   it('drops like a core message when the DLQ publish fails without a signal', async () => {
     const { entry, jsPublish } = fakeEntry({
       jsPublish: () => Promise.reject(new Error('no stream')),
