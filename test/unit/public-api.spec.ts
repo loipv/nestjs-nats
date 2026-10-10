@@ -19,6 +19,7 @@ import type {
   MessageOutcome,
   NatsBatchContext,
   NatsContext,
+  NatsHeadersInit,
   PublishManyResult,
   RetryOptions,
 } from '../../src/index.js';
@@ -164,6 +165,12 @@ it('exports the reliability types', () => {
   expectTypeOf<Batcher>().toHaveProperty('flush');
   expectTypeOf<Batcher>().toHaveProperty('close');
   expectTypeOf<CloudEventRouterOptions>().toHaveProperty('unmatched');
+});
+
+it('exports NatsHeadersInit, not a HeadersInit shadowing the global one', () => {
+  expectTypeOf<NatsHeadersInit>().toEqualTypeOf<Record<string, string | string[]>>();
+  // @ts-expect-error renamed to NatsHeadersInit before 0.1.0
+  type _Old = import('../../src/index.js').HeadersInit;
 });
 
 it('exports the CloudEvents types', () => {

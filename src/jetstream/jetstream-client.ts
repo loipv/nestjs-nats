@@ -11,7 +11,7 @@ import {
 } from '../batch/batcher.js';
 import type { CloudEventInit } from '../cloudevents/types.js';
 import type { Codec } from '../codec/codec.js';
-import type { HeadersInit } from '../codec/headers.js';
+import type { NatsHeadersInit } from '../codec/headers.js';
 import type { ConnectionEntry } from '../connection/connection-manager.js';
 import { NatsConfigError, NatsModuleError } from '../errors/errors.js';
 import { compose } from '../pipeline/compose.js';
@@ -30,7 +30,7 @@ const DEFAULT_PUBLISH_WINDOW = 256;
 export type JetStreamPublishOptions = {
   msgId?: string;
   expect?: Partial<StreamExpectations>;
-  headers?: HeadersInit;
+  headers?: NatsHeadersInit;
   codec?: Codec;
   timeout?: number;
   /**

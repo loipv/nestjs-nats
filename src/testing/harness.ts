@@ -9,7 +9,7 @@ import {
 import { resolveCloudEvent, writeCloudEvent } from '../cloudevents/codec.js';
 import type { CloudEventInit } from '../cloudevents/types.js';
 import { type Codec, encodePayload } from '../codec/codec.js';
-import { type HeadersInit, toMsgHdrs } from '../codec/headers.js';
+import { type NatsHeadersInit, toMsgHdrs } from '../codec/headers.js';
 import { type ConnectionEntry, NatsConnectionManager } from '../connection/connection-manager.js';
 import { NatsContext, NatsJetStreamContext } from '../context/nats-context.js';
 import { type HandlerDefinition, HandlerExplorer } from '../discovery/handler-explorer.js';
@@ -31,7 +31,7 @@ import { subjectMatches } from './subject.js';
 export type DispatchTarget = { handler: string } | { subject: string };
 
 export interface DispatchOptions {
-  headers?: HeadersInit;
+  headers?: NatsHeadersInit;
   /** JetStream delivery count (default 1); `> 1` marks the message redelivered. */
   deliveryCount?: number;
   /** Core delivery attempt (default 1), as after in-process retries. */

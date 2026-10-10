@@ -1,7 +1,7 @@
 import { resolveCloudEvent, writeCloudEvent } from '../cloudevents/codec.js';
 import type { CloudEventInit } from '../cloudevents/types.js';
 import { type Codec, encodePayload, jsonCodec } from '../codec/codec.js';
-import { type HeadersInit, toMsgHdrs } from '../codec/headers.js';
+import { type NatsHeadersInit, toMsgHdrs } from '../codec/headers.js';
 import type { ConnectionEntry } from '../connection/connection-manager.js';
 import type { Next, OutgoingMessage } from './types.js';
 
@@ -26,7 +26,7 @@ export function createOutgoingMessage(
   kind: OutgoingMessage['kind'],
   subject: string,
   data: unknown,
-  opts: { headers?: HeadersInit; codec?: Codec; cloudEvent?: CloudEventInit },
+  opts: { headers?: NatsHeadersInit; codec?: Codec; cloudEvent?: CloudEventInit },
 ): OutgoingMessage {
   const codec = opts.codec ?? entry.options.codec ?? jsonCodec();
   const message: OutgoingMessage = {
