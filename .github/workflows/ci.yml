@@ -33,7 +33,8 @@ jobs:
       - run: npm run build
       - run: npm run check:pkg
       - run: npm run check:pack
-      - run: npm run docs:check
+      # The build above is reused: docs:check:only skips docs:check's own build.
+      - run: npm run docs:check:only
       - run: npm run check:workflows
 
   test:
