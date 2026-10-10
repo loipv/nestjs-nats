@@ -6,6 +6,7 @@ import { TerminusModule } from '@nestjs/terminus';
 import { EventsRouter } from './events.router.js';
 import { HealthController } from './health.controller.js';
 import { OrdersHandlers } from './orders.handlers.js';
+import { OrdersProjection } from './orders.projection.js';
 
 @Module({
   imports: [
@@ -13,7 +14,8 @@ import { OrdersHandlers } from './orders.handlers.js';
       connection: { servers: process.env.NATS_URL ?? 'nats://localhost:4222' },
       // Created (or updated) while the application starts, before any handler runs.
       streams: [
-        { name: 'ORDERS', subjects: ['orders.>'] },
+        // `allow_atomic` lets `publishAtomic()` store an order and its stock reservation as one unit.
+        { name: 'ORDERS', subjects: ['orders.>', 'stock.>'], allow_atomic: true },
         { name: 'DLQ', subjects: ['dlq.>'] },
       ],
       cloudEvents: { source: 'urn:example:orders' },
@@ -23,6 +25,6 @@ import { OrdersHandlers } from './orders.handlers.js';
     NatsHealthModule,
   ],
   controllers: [HealthController],
-  providers: [OrdersHandlers, EventsRouter],
+  providers: [OrdersHandlers, OrdersProjection, EventsRouter],
 })
 export class AppModule {}

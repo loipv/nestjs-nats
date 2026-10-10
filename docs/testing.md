@@ -39,11 +39,11 @@ assert.equal(js.published.length, 2);
 
 | Member | Description |
 |---|---|
-| `published` | The recorded messages, in order. Each has `subject`, `data` (decoded with the codec, the event's data for a CloudEvent), `raw` (the bytes), `headers`, `cloudEvent` (when the message is one) and `reply` (for a request). On the core client, requests are included |
+| `published` | The recorded messages, in order. Each has `subject`, `data` (decoded with the codec, the event's data for a CloudEvent), `raw` (the bytes), `headers`, `cloudEvent` (when the message is one), `reply` (for a request) and `atomic` (see below). On the core client, requests are included |
 | `whenRequest(subject).reply(value)` | Answers requests to `subject` (a NATS subject pattern) with `value`. The latest matching stub wins |
 | `whenRequest(subject).fail({ code, description })` | Answers with a service error |
 
-Options: `codec`, `plugins` and `cloudEvents` (`{ source? }`). The JetStream mock acks with `{ stream: 'mock', seq, duplicate }`, where `duplicate` is `true` for a repeated `Nats-Msg-Id`. A standalone mock is never closed, so a `batcher()` of a mock is not flushed for you: call its `flush()` yourself.
+Options: `codec`, `plugins` and `cloudEvents` (`{ source? }`). The JetStream mock acks with `{ stream: 'mock', seq, duplicate }`, where `duplicate` is `true` for a repeated `Nats-Msg-Id`. `publishAtomic()` of the JetStream mock runs the same checks and outbound plugins as the real one and records the messages of a batch of more than one message when it commits, each with `atomic: { batch, index, count }`. Its ack has `count` and a fake `batch` id (unset for a single message, which is published as usual). It does not check that a stream has `allow_atomic`. A standalone mock is never closed, so a `batcher()` of a mock is not flushed for you: call its `flush()` yourself.
 
 ## `NatsTestingModule` and `NatsTestHarness`
 
@@ -95,7 +95,7 @@ assert.equal(bad.dlq[0]?.subject, 'dlq.ORDERS.billing');
 | Target | Selects |
 |---|---|
 | `{ handler: 'Class.method' }` | A handler by class and method name. For a CloudEvent router it is `'Class.@CloudEventRouter'` |
-| `{ subject: '...' }` | The one handler that receives from that subject. For `@Consume` the subject is matched against the consumer's `filter_subject`(s) |
+| `{ subject: '...' }` | The one handler that receives from that subject. For `@Consume` and `@ConsumePush` the subject is matched against the consumer's `filter_subject`(s), for `@ConsumeOrdered` against its `filterSubjects` |
 
 It rejects with a `NatsConfigError` when the handlers are misconfigured (as bootstrap would report), or when the target matches no handler or several. For a batch handler, `payload` is a non-empty array with one message per entry.
 
@@ -103,22 +103,25 @@ It rejects with a `NatsConfigError` when the handlers are misconfigured (as boot
 |---|---|
 | `headers` | Message headers |
 | `subject` | The message's actual subject. Defaults to the target's subject, else to the handler's own: its subject pattern (which can be a wildcard), its first `filter_subject`, or the stream name for a `@Consume` without a filter. Pass it for realistic values in `@Subject()` and `ctx.subject` |
-| `deliveryCount` | JetStream delivery count (default `1`); above `1` the message counts as redelivered. Ignored for core handlers |
-| `attempt` | Core delivery attempt (default `1`), as after in-process retries. Ignored for `@Consume` handlers |
-| `request` | Core subscriptions: the message is a request, with a reply subject. Ignored for `@Consume` handlers |
+| `deliveryCount` | JetStream delivery count (default `1`); above `1` the message counts as redelivered. Ignored for core handlers and `@ConsumeOrdered` |
+| `attempt` | Core and ordered delivery attempt (default `1`), as after in-process retries (`ctx.attempt` of an ordered handler). Ignored for `@Consume` and `@ConsumePush` handlers |
+| `streamSequence` | Stream sequence of a JetStream message (default `1`): `ctx.seq` of `@Consume` and `@ConsumePush`, `ctx.streamSequence` of `@ConsumeOrdered`, and the `Nats-DLQ-Seq` of its dead letters. It no longer increases by itself from one dispatch to the next, so pass it when a test needs distinct sequences |
+| `request` | Core subscriptions: the message is a request, with a reply subject. Ignored for JetStream handlers |
 | `cloudEvent` | Sends the payload as a [CloudEvent](./cloudevents.md), with the same options as publishing |
 
 | `DispatchResult` field | Description |
 |---|---|
 | `result` | What the handler returned (never set for a batch) |
-| `settlement` | What became of the first message: `'ack'`, `'nak'` (a JetStream retry), `'retry'` (a core retry), `'term'`, `'dlq'`, `'drop'`, `'skipped'`, `'replied'` or `'none'` |
+| `settlement` | What became of the first message: `'ack'`, `'nak'` (a JetStream retry), `'retry'` (a core retry, or an in-place retry of `@ConsumeOrdered`), `'term'`, `'dlq'`, `'drop'`, `'skipped'`, `'replied'` or `'none'` |
 | `outcomes` | The [`MessageOutcome`](./plugins.md#observing-outcomes) of every message, aligned with the payloads |
 | `nakDelay` | The redelivery delay in ms when `settlement` is `'nak'` |
+| `retryDelay` | The delay in ms before the next attempt when `settlement` is `'retry'`, for a core or an ordered handler |
 | `reply` | For a request or service endpoint: `{ data }`, or `{ error: { code, description } }` |
 | `dlq` | The dead letters published while the messages were processed |
 
 Notes:
 
+- `@ConsumePush` handlers settle like `@Consume` handlers (`'ack'`, `'nak'`, `'term'`, `'dlq'`, `'skipped'`). A `@ConsumeOrdered` handler settles like a core one, and nothing is acknowledged: `'none'` for a success, `'retry'` with `retryDelay` for a retryable error (the harness does not wait or run it again; dispatch again with a higher `attempt` to see the next one), `'dlq'` when retries are exhausted or the error is not retryable and a DLQ is on, `'drop'` without a DLQ, and `'skipped'` for an idempotency duplicate. The fake context is a `NatsOrderedContext`.
 - Idempotency stores keep their state across the dispatches of one application, so dispatching the same message twice shows a duplicate.
 - Dead-letter publishes, and requests sent by your handlers, also appear in the `published` of the mock clients of the testing module.
 - A dispatched message is a fake message, so `ctx.raw` is a stand-in that records what you call on it. It is not a real `Msg` or `JsMsg`.

@@ -4,12 +4,13 @@ A small NestJS application that uses [`@loipv/nestjs-nats`](../../README.md) end
 
 | File | Shows |
 |---|---|
-| `src/app.module.ts` | `NatsModule.forRoot()` with the `ORDERS` (`orders.>`) and `DLQ` (`dlq.>`) streams, CloudEvents defaults and the `tracing()` plugin |
+| `src/app.module.ts` | `NatsModule.forRoot()` with the `ORDERS` (`orders.>` and `stock.>`, `allow_atomic`) and `DLQ` (`dlq.>`) streams, CloudEvents defaults and the `tracing()` plugin |
 | `src/orders.handlers.ts` | `@Subscribe` request/reply, and a `@Consume` consumer (`billing`) with retry and a dead-letter queue |
+| `src/orders.projection.ts` | `@ConsumeOrdered` projection: an in-memory count of orders per status, read in stream order (every instance builds its own copy) |
 | `src/events.router.ts` | `@CloudEventRouter` on `events.>` with two `@OnCloudEvent` methods |
 | `src/health.controller.ts` | `GET /health` with the Terminus `NatsHealthIndicator` |
 | `src/tracing.ts` | OpenTelemetry set up with `BasicTracerProvider` and a `ConsoleSpanExporter` |
-| `src/main.ts` | Graceful shutdown (`enableShutdownHooks()`) and sample messages published at startup |
+| `src/main.ts` | Graceful shutdown (`enableShutdownHooks()`), and sample messages published at startup, one order with `publishAtomic()` |
 | `test/orders.handlers.spec.ts` | Tests with `NatsTestingModule` and `NatsTestHarness`, which need no NATS server |
 
 ## Run it
@@ -34,8 +35,9 @@ curl localhost:3000/health
 
 - `order o-1-<timestamp>` billed by `OrdersHandlers.bill`,
 - `order o-2-<timestamp>` failing on purpose: three retries with backoff (about 0.5 s, 1 s and 2 s), then `sent to DLQ dlq.ORDERS.billing after 4 attempts`,
+- `order o-3-<timestamp>` placed with `publishAtomic()`: `orders.created` and `stock.reserved` stored in one batch, then billed like the first order,
 - two CloudEvents routed by `EventsRouter` on their `type`,
-- a `query.orders.get` request answered with the billed order,
+- a `query.orders.get` request answered with the billed order, and a `query.orders.stats` request answered with the counts of `OrdersProjection`,
 - OpenTelemetry spans (`publish ...`, `process ...`) printed to the console.
 
 The order ids and their `msgId`s carry a timestamp, so you can run `npm start` again at once: fixed ids would be de-duplicated by the `ORDERS` stream within its duplicate window (2 minutes by default), and the second run would show no billing or dead letter.
@@ -59,7 +61,7 @@ To look at the dead letter, open `http://localhost:8222/jsz?streams=true`: the `
 npm test
 ```
 
-The tests run messages through the real handlers with `NatsTestHarness`, without a NATS server: a good order is acked, a failing order is retried and, at its fourth attempt, dead-lettered, and a CloudEvent reaches the method that matches its type.
+The tests run messages through the real handlers with `NatsTestHarness`, without a NATS server: a good order is acked, a failing order is retried and, at its fourth attempt, dead-lettered, the ordered projection counts orders and settles nothing (`'none'`), and a CloudEvent reaches the method that matches its type.
 
 ## After changing the library
 

@@ -4,7 +4,7 @@
 
 ## Batch processing
 
-With `batch`, a handler receives messages in groups instead of one at a time. It works for `@Subscribe` and `@Consume`. A batch is handed to the handler when `maxSize` messages are collected, or `maxWait` ms after the first message of the batch, whichever comes first.
+With `batch`, a handler receives messages in groups instead of one at a time. It works for `@Subscribe`, `@Consume` and `@ConsumePush`, not for `@ConsumeOrdered`. A batch is handed to the handler when `maxSize` messages are collected, or `maxWait` ms after the first message of the batch, whichever comes first.
 
 | Option | Default | Description |
 |---|---|---|

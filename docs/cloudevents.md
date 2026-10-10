@@ -68,7 +68,7 @@ class OrderEvents {
 
 ## Receiving CloudEvents
 
-A `@CloudEventRouter()` class receives CloudEvents on one core subscription (`subscribe`) or one JetStream consumer (`consume`), and hands each event to the `@OnCloudEvent(typePattern)` method whose pattern matches the event's `type` best. In those methods `@Payload()` is the event's `data` and `@CloudEvent()` is its attributes, a `CloudEventMeta`. Pipes, guards, interceptors and exception filters work as for any handler.
+A `@CloudEventRouter()` class receives CloudEvents on one core subscription (`subscribe`) or one JetStream pull consumer (`consume`; push and ordered consumers are not supported), and hands each event to the `@OnCloudEvent(typePattern)` method whose pattern matches the event's `type` best. In those methods `@Payload()` is the event's `data` and `@CloudEvent()` is its attributes, a `CloudEventMeta`. Pipes, guards, interceptors and exception filters work as for any handler.
 
 ```ts
 import { Injectable } from '@nestjs/common';

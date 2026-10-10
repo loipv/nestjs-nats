@@ -33,4 +33,13 @@ NatsModule.forFeature({ connection: 'default', streams: [{ name: 'PAYMENTS', sub
 
 **Stream subjects and request/reply.** A stream captures every message published on its subjects, core NATS requests included, and answers a message that has a reply subject with a PubAck. A request sent with `NatsClient.request()` to a subject a stream captures therefore usually gets the stream's PubAck, not the `@Subscribe` handler's reply: both answer, and the first reply to arrive wins, normally the PubAck. Keep request/reply subjects outside every stream's subjects, as the [orders example](../examples/orders) does (`query.orders.get` next to the `orders.>` stream).
 
+**Atomic batch publish.** A stream must declare `allow_atomic: true` for [`JetStreamClient.publishAtomic()`](./publishing.md#atomic-batches) to store a batch of more than one message. It needs NATS server 2.12 or later.
+
+```ts
+NatsModule.forRoot({
+  connection: { servers: 'nats://localhost:4222' },
+  streams: [{ name: 'ORDERS', subjects: ['orders.>', 'stock.>'], allow_atomic: true }],
+});
+```
+
 `NatsStreamManager` (inject it by class, or with `@InjectStreamManager(name?)` for a named connection) is available for runtime work: `ensureStream()`, `ensureConsumer()`, `info()`, `purge()`, `delete()`, and `jsm()` for the raw `JetStreamManager`.

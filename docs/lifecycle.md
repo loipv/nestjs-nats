@@ -19,11 +19,13 @@ NatsModule.forRoot({
 });
 ```
 
-1. **Stop intake.** Subscriptions and consumers stop receiving messages. A batch that is being collected is handed to its handler.
+1. **Stop intake.** Subscriptions and consumers stop receiving messages. An ordered consumer also abandons a retry wait in progress (logged as a warning). A batch that is being collected is handed to its handler.
 2. **Wait for in-flight handlers.** Phases 1 and 2 together wait for up to `drainTimeout`.
-3. **Force stop.** JetStream messages that are being processed, collected into a batch, or waiting for a batch slot are `nak`'d so the server redelivers them. Pending in-process retries are cancelled, and collected core messages that never started are dropped. When something was forced, a warning per connection summarises the `nak`'d messages and cancelled retries, and a core handler may log a further warning about the dropped messages.
+3. **Force stop.** JetStream messages that are being processed, collected into a batch, waiting for a batch slot, or queued for a free handler slot (as many as a push consumer has received) are `nak`'d so the server redelivers them. Pending in-process retries are cancelled, and collected core messages that never started are dropped. When something was forced, a warning per connection summarises the `nak`'d messages and cancelled retries, and a core handler may log a further warning about the dropped messages.
 4. **Close connections.** Each connection runs its close hooks (open `batcher()`s flush here), then drains. If this takes longer than `drainTimeout`, the connection is closed without draining and a warning is logged. This also happens when the server is unreachable. A forced close that does not finish within 1 second is abandoned with a warning.
 5. **Close idempotency stores.** The `close()` of each store is called, within what is left of the bound of phase 4, but never less than 1 second (or `drainTimeout`, if that is shorter). A store that has not closed by then is abandoned with a warning.
+
+**Ordered consumers** acknowledge nothing, so there is nothing to `nak`. The message being handled gets the wait for in-flight handlers like any other. A message still unfinished at the force stop, one waiting for its retry, and the messages the client had read ahead are not redelivered. They come back only if the next start replays them: with `deliverPolicy: 'all'`, or a `startSeq` or `startTime` that covers them. With `'new'` or `'last'` they are skipped. See [Pull, push and ordered consumers](./consumers.md#ordered-consumeordered).
 
 In the worst case, shutdown takes about `2 × drainTimeout + 2` seconds: up to `drainTimeout` for phases 1 and 2, up to `drainTimeout` plus 1 second for a forced close in phase 4, and up to 1 second more for phase 5. No step waits forever.
 

@@ -32,7 +32,9 @@ const timing: NatsPlugin = {
 NatsModule.forRoot({ connection: { servers: 'nats://localhost:4222' }, plugins: [timing] });
 ```
 
-The inbound order is: `outer` plugins, then acknowledgement handling, then `inner` plugins, then decoding and the handler. `delivery.handler` is a read-only `HandlerInfo` that describes the handler (`kind`, `connection`, `className`, `methodName`, plus `subject`/`queue`, `stream`/`durable` or `service`/`endpoint`, depending on `kind`). Per-handler logic is better written as a regular Nest interceptor.
+The inbound order is: `outer` plugins, then acknowledgement handling, then `inner` plugins, then decoding and the handler. `delivery.handler` is a read-only `HandlerInfo` that describes the handler (`kind`, `connection`, `className`, `methodName`, plus `subject`/`queue`, `stream`/`durable` (and `delivery`, `'pull'` or `'push'`), `stream`/`filterSubjects` for an ordered consumer, or `service`/`endpoint`, depending on `kind`). Per-handler logic is better written as a regular Nest interceptor.
+
+Outbound plugins also see the messages of [`publishAtomic()`](./publishing.md#atomic-batches): `message.atomic` is `{ index, count }` there (and `undefined` otherwise), and `next()` settles when the whole batch is committed.
 
 ## Observing outcomes
 
