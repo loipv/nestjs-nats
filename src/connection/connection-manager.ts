@@ -14,7 +14,7 @@ import type { NatsModuleOptions } from '../module/options.js';
 import { DEFAULT_CONNECTION } from '../module/tokens.js';
 import { errorMessage } from '../util/errors.js';
 import { settlesWithin } from '../util/timeout.js';
-import { redactServers, redactText } from './redact.js';
+import { redactError, redactServers, redactText, serverSecrets } from './redact.js';
 
 export type NatsConnectionState = 'connected' | 'reconnecting' | 'draining' | 'closed';
 
@@ -146,12 +146,15 @@ export class NatsConnectionManager {
     try {
       return await connect(options.connection);
     } catch (err) {
-      const servers = redactServers(options.connection.servers);
       const { pass, token } = options.connection;
-      const reason = redactText(err instanceof Error ? err.message : String(err), [pass, token]);
+      const secrets = [pass, token, ...serverSecrets(options.connection.servers)];
+      const servers = redactServers(options.connection.servers).map((s) => redactText(s, secrets));
+      // The raw error may carry credentials outside its message (e.g. the `input` URL of
+      // ERR_INVALID_URL), so only a sanitized copy is exposed as the cause.
+      const cause = redactError(err, secrets);
       throw new NatsConnectionError(
-        `NATS connection "${name}" failed to connect to ${servers.join(', ')}: ${reason}`,
-        { connection: name, servers, cause: err },
+        `NATS connection "${name}" failed to connect to ${servers.join(', ')}: ${cause.message}`,
+        { connection: name, servers, cause },
       );
     }
   }
