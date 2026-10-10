@@ -14,6 +14,7 @@ import {
   trace,
 } from '@opentelemetry/api';
 import { NatsJetStreamContext } from '../context/nats-context.js';
+import { NatsOrderedContext } from '../context/nats-ordered-context.js';
 import { type Delivery, messageContexts } from '../pipeline/delivery.js';
 import { isReplyDelivery } from '../pipeline/reply.js';
 import type { NatsPlugin, Next, OutgoingMessage } from '../pipeline/types.js';
@@ -142,6 +143,10 @@ export function tracing(options: TracingOptions = {}): NatsPlugin {
               attributes['messaging.nats.stream'] = ctx.stream;
               attributes['messaging.nats.seq'] = ctx.seq;
               attributes['messaging.nats.delivery_count'] = ctx.deliveryCount;
+            } else if (ctx instanceof NatsOrderedContext) {
+              // Retried in place, never redelivered: no delivery count.
+              attributes['messaging.nats.stream'] = ctx.stream;
+              attributes['messaging.nats.seq'] = ctx.streamSequence;
             }
             captureHeaders(attributes, message.headers, captured);
           }
