@@ -32,6 +32,7 @@ export {
 export { CloudEvent, Ctx, Headers, Msg, Payload, Subject } from './decorators/param.decorators.js';
 export type { NatsRequestErrorCode } from './errors/errors.js';
 export {
+  NatsAtomicPublishError,
   NatsConfigError,
   NatsConnectionError,
   NatsDecodeError,
@@ -47,6 +48,11 @@ export type {
   InMemoryIdempotencyStoreOptions,
 } from './idempotency/store.js';
 export { InMemoryIdempotencyStore } from './idempotency/store.js';
+export type {
+  AtomicMessage,
+  AtomicPublishAck,
+  AtomicPublishOptions,
+} from './jetstream/atomic.js';
 export type {
   JetStreamPublishOptions,
   PublishManyResult,

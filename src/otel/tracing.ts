@@ -179,6 +179,7 @@ export function tracing(options: TracingOptions = {}): NatsPlugin {
         };
         const id = headerValues(m.headers, MSG_ID_HEADER)[0] ?? m.cloudEvent?.meta.id;
         if (id) attributes['messaging.message.id'] = id;
+        if (m.atomic) attributes['messaging.batch.message_count'] = m.atomic.count;
         captureHeaders(attributes, m.headers, captured);
 
         const span = tracer().startSpan(`${request ? 'send' : 'publish'} ${m.subject}`, {

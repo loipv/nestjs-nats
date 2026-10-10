@@ -1,4 +1,4 @@
-import type { JetStreamPublishOptions, PubAck } from '@nats-io/jetstream';
+import type { BatchAck, JetStreamPublishOptions, PubAck } from '@nats-io/jetstream';
 import {
   headers as createHeaders,
   type Msg,
@@ -30,6 +30,8 @@ export interface PublishedMessage {
   cloudEvent?: CloudEventMeta;
   /** The reply subject (a request's inbox). */
   reply?: string;
+  /** Set on the messages of an atomic batch: its id, the message's position and the batch size. */
+  atomic?: { batch: string; index: number; count: number };
 }
 
 /** Stubs the answer to the requests sent to a subject (see `whenRequest`). */
@@ -44,6 +46,9 @@ type StubbedAnswer = { data: Uint8Array } | { error: { code: number; description
 
 const EMPTY = new Uint8Array(0);
 const MSG_ID_HEADER = 'Nats-Msg-Id';
+const BATCH_ID_HEADER = 'Nats-Batch-Id';
+const BATCH_SEQUENCE_HEADER = 'Nats-Batch-Sequence';
+const BATCH_COMMIT_HEADER = 'Nats-Batch-Commit';
 const SERVICE_ERROR_CODE_HEADER = 'Nats-Service-Error-Code';
 const SERVICE_ERROR_HEADER = 'Nats-Service-Error';
 
@@ -91,6 +96,17 @@ function replyMsg(subject: string, data: Uint8Array, headers?: MsgHdrs): Msg {
   } as Msg;
 }
 
+/** An atomic batch started on a fake JetStream client: nothing is recorded until its commit. */
+export interface FakeBatch {
+  readonly id: string;
+  add(subject: string, payload?: Payload, opts?: { headers?: MsgHdrs }): void;
+  commit(
+    subject: string,
+    payload?: Payload,
+    opts?: { headers?: MsgHdrs; timeout?: number },
+  ): Promise<BatchAck>;
+}
+
 /** The subset of the NATS JetStream client the library uses, recording publishes. */
 export interface FakeJetStream {
   publish(
@@ -98,6 +114,11 @@ export interface FakeJetStream {
     payload?: Payload,
     opts?: Partial<JetStreamPublishOptions>,
   ): Promise<PubAck>;
+  startBatch(
+    subject: string,
+    payload?: Payload,
+    opts?: Partial<JetStreamPublishOptions>,
+  ): Promise<FakeBatch>;
 }
 
 /**
@@ -116,6 +137,7 @@ export class FakeNatsConnection {
   private readonly closedPromise: Promise<void>;
   private resolveClosed!: () => void;
   private jsSeq = 0;
+  private batches = 0;
   private inboxes = 0;
   private state: 'open' | 'draining' | 'closed' = 'open';
   private js?: FakeJetStream;
@@ -233,8 +255,58 @@ export class FakeNatsConnection {
         this.record(this.jsPublished, subject, toBytes(payload), headers);
         return Promise.resolve({ stream: 'mock', seq: ++this.jsSeq, duplicate });
       },
+      startBatch: (subject, payload, opts) => {
+        const batch = this.openBatch();
+        batch.add(subject, payload, opts);
+        return Promise.resolve(batch);
+      },
     };
     return this.js;
+  }
+
+  /**
+   * An atomic batch that buffers its messages, setting the `Nats-Batch-*` headers on the
+   * options it is given (as nats.js does), and records them all at its commit.
+   */
+  private openBatch(): FakeBatch {
+    const id = `mock-batch-${++this.batches}`;
+    const staged: Array<{ subject: string; raw: Uint8Array; headers: MsgHdrs }> = [];
+    let done = false;
+    const stage = (subject: string, payload?: Payload, opts: { headers?: MsgHdrs } = {}) => {
+      if (done) throw new Error('batch publisher is done');
+      const headers = opts.headers ?? createHeaders();
+      opts.headers = headers;
+      headers.set(BATCH_ID_HEADER, id);
+      headers.set(BATCH_SEQUENCE_HEADER, String(staged.length + 1));
+      staged.push({ subject, raw: toBytes(payload), headers });
+      return headers;
+    };
+    return {
+      id,
+      add: (subject, payload, opts) => {
+        stage(subject, payload, opts);
+      },
+      commit: (subject, payload, opts) => {
+        stage(subject, payload, opts).set(BATCH_COMMIT_HEADER, '1');
+        done = true;
+        const count = staged.length;
+        staged.forEach((m, index) => {
+          this.jsSeq++;
+          this.record(this.jsPublished, m.subject, m.raw, m.headers, undefined, {
+            batch: id,
+            index,
+            count,
+          });
+        });
+        return Promise.resolve({
+          stream: 'mock',
+          seq: this.jsSeq,
+          count,
+          batch: id,
+          duplicate: false,
+        });
+      },
+    };
   }
 
   private record(
@@ -243,8 +315,10 @@ export class FakeNatsConnection {
     raw: Uint8Array,
     headers?: MsgHdrs,
     reply?: string,
+    atomic?: PublishedMessage['atomic'],
   ): void {
     const message = toPublishedMessage(this.codec, subject, raw, headers, reply);
+    if (atomic) message.atomic = atomic;
     into.push(message);
     for (const listener of this.listeners) listener(message);
   }

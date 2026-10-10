@@ -21,6 +21,20 @@ export class NatsConnectionError extends NatsModuleError {
   }
 }
 
+/** An atomic batch publish (`publishAtomic`) failed: none of its messages were stored. */
+export class NatsAtomicPublishError extends NatsModuleError {
+  /** The subject of the first message of the batch. */
+  readonly subject: string;
+  /** The number of messages in the batch. */
+  readonly count: number;
+
+  constructor(message: string, details: { subject: string; count: number; cause?: unknown }) {
+    super(message, { cause: details.cause });
+    this.subject = details.subject;
+    this.count = details.count;
+  }
+}
+
 export class StreamConfigConflictError extends NatsModuleError {
   readonly stream: string;
   readonly consumer?: string;

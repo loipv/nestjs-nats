@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  NatsAtomicPublishError,
   NatsConfigError,
   NatsConnectionError,
   NatsDecodeError,
@@ -34,6 +35,15 @@ describe('errors', () => {
     expect(e.name).toBe('NatsConnectionError');
     expect(e.connection).toBe('default');
     expect(e.servers).toEqual(['nats://h:4222']);
+  });
+
+  it('carries atomic publish details', () => {
+    const e = new NatsAtomicPublishError('failed', { subject: 'o.a', count: 3, cause: 'c' });
+    expect(e).toBeInstanceOf(NatsModuleError);
+    expect(e.name).toBe('NatsAtomicPublishError');
+    expect(e.subject).toBe('o.a');
+    expect(e.count).toBe(3);
+    expect(e.cause).toBe('c');
   });
 
   it('carries stream config conflict details', () => {
