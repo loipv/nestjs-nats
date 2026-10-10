@@ -194,7 +194,10 @@ describe('@ConsumePush', () => {
   });
 
   it('retries then dead-letters', async () => {
-    const app = await createTestApp({ imports: [nats()], providers: [FailingHandlers] });
+    const app = await createTestApp(
+      { imports: [nats()], providers: [FailingHandlers] },
+      { silent: true },
+    );
     try {
       const failing = app.get(FailingHandlers);
       await js.publish('pr.x', json({ id: 1 }));
