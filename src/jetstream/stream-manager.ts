@@ -100,6 +100,8 @@ export class NatsStreamManager {
     stream: string,
     cfg: ConsumerDeclaration['config'],
     mode: StreamSyncMode = this.defaultMode,
+    /** Merged under `cfg` only when the consumer is created; never compared for drift. */
+    createDefaults?: Partial<ConsumerConfig>,
   ): Promise<ConsumerInfo | undefined> {
     if (mode === 'none') return undefined;
     const jsm = await this.jsm();
@@ -120,7 +122,10 @@ export class NatsStreamManager {
         throw new NatsConfigError(`JetStream consumer "${label}" does not exist`, { cause: err });
       }
       // Defaults apply only to consumers the library creates (spec §7).
-      return jsm.consumers.add(stream, withConsumerDefaults(cfg) as ConsumerConfig);
+      return jsm.consumers.add(stream, {
+        ...createDefaults,
+        ...withConsumerDefaults(cfg),
+      } as ConsumerConfig);
     }
     this.warnOnNonExplicitAck(label, current);
     if (mode === 'create-only') return current;

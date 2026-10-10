@@ -1,7 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { AckPolicy, JetStreamApiCodes, JetStreamApiError } from '@nats-io/jetstream';
+import { describe, expect, it, vi } from 'vitest';
+import type { ConnectionEntry } from '../../src/connection/connection-registry.js';
+import { NatsStreamManager } from '../../src/jetstream/stream-manager.js';
 import {
   CONSUMER_IMMUTABLE_FIELDS,
   diffConfig,
+  pushConsumerDefaults,
   STREAM_IMMUTABLE_FIELDS,
   withConsumerDefaults,
 } from '../../src/jetstream/stream-sync.js';
@@ -152,4 +156,76 @@ describe('stream-sync', () => {
         STREAM_IMMUTABLE_FIELDS,
       ),
     ).toEqual([]));
+
+  it('builds the push consumer defaults', () => {
+    expect(
+      pushConsumerDefaults({ stream: 'S', durable: 'D', deliverGroup: 'g', maxAckPending: 2 }),
+    ).toStrictEqual({
+      // nats.js and the server reject flow control and idle heartbeats with a deliver group.
+      deliver_subject: '_nats.push.S.D',
+      deliver_group: 'g',
+      max_ack_pending: 2,
+    });
+    expect(pushConsumerDefaults({ stream: 'S', durable: 'D', maxAckPending: 1 })).toStrictEqual({
+      deliver_subject: '_nats.push.S.D',
+      flow_control: true,
+      idle_heartbeat: 5_000_000_000,
+      max_ack_pending: 1,
+    });
+  });
+});
+
+describe('NatsStreamManager.ensureConsumer create defaults', () => {
+  const push = pushConsumerDefaults({
+    stream: 'S',
+    durable: 'D',
+    deliverGroup: 'g',
+    maxAckPending: 2,
+  });
+
+  function manager(current?: { config: Record<string, unknown> }) {
+    const consumers = {
+      info: vi.fn(() =>
+        current
+          ? Promise.resolve(current)
+          : Promise.reject(
+              new JetStreamApiError({
+                code: 404,
+                err_code: JetStreamApiCodes.ConsumerNotFound,
+                description: 'consumer not found',
+              }),
+            ),
+      ),
+      add: vi.fn((_stream: string, cfg: unknown) => Promise.resolve({ config: cfg })),
+      update: vi.fn(() => Promise.resolve({})),
+    };
+    const entry = {
+      options: {},
+      logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      jsm: () => Promise.resolve({ consumers }),
+    } as unknown as ConnectionEntry;
+    return { sm: new NatsStreamManager(entry), consumers };
+  }
+
+  it('merges them into a created consumer, the declaration winning', async () => {
+    const { sm, consumers } = manager();
+    await sm.ensureConsumer('S', { durable_name: 'D', max_ack_pending: 7 }, undefined, push);
+    expect(consumers.add).toHaveBeenCalledExactlyOnceWith('S', {
+      deliver_subject: '_nats.push.S.D',
+      deliver_group: 'g',
+      max_ack_pending: 7,
+      durable_name: 'D',
+      ack_policy: AckPolicy.Explicit,
+      max_deliver: -1,
+    });
+  });
+
+  it('ignores them for an existing consumer', async () => {
+    const { sm, consumers } = manager({
+      config: { durable_name: 'D', ack_policy: AckPolicy.Explicit, deliver_subject: 'other' },
+    });
+    await sm.ensureConsumer('S', { durable_name: 'D' }, undefined, push);
+    expect(consumers.add).not.toHaveBeenCalled();
+    expect(consumers.update).not.toHaveBeenCalled();
+  });
 });
