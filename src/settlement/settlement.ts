@@ -3,6 +3,7 @@ import type { ConnectionEntry } from '../connection/connection-registry.js';
 import { NatsJetStreamContext, SETTLED_BY } from '../context/nats-context.js';
 import { IdempotencyStoreError } from '../idempotency/idempotency.js';
 import {
+  ABORT_SIGNAL,
   type Delivery,
   definitionOf,
   FAILURES,
@@ -17,6 +18,7 @@ import {
 import { isReplyDelivery } from '../pipeline/reply.js';
 import type { InboundMiddleware, Next } from '../pipeline/types.js';
 import { errorMessage, errorTrace } from '../util/errors.js';
+import { sleep } from '../util/sleep.js';
 import { decide } from './decide.js';
 import { type DlqPolicy, sendToDlq } from './dlq.js';
 import { backoffDelay, DEFAULT_RETRY, type RetryPolicy } from './retry.js';
@@ -53,6 +55,10 @@ const termReason = (err: unknown): string =>
     .slice(0, MAX_TERM_REASON_LENGTH);
 
 const attempts = (n: number) => `${n} attempt${n === 1 ? '' : 's'}`;
+
+/** The stream sequence of a JetStream message, for logs. */
+const streamSeq = (msg: InboundMessage): number | undefined =>
+  'info' in msg.raw ? msg.raw.info?.streamSequence : undefined;
 
 function jsTargets(d: Delivery): JsTarget[] {
   const contexts = messageContexts(d);
@@ -97,9 +103,11 @@ function settle(d: Delivery, msg: InboundMessage, op: SettleOp, fn: () => void):
  * each with its own attempt: the messages recorded in `FAILURES` fail with their own
  * error; when the handler throws, every other message fails with its error. Messages left out of the delivery
  * (`SKIPPED`) are not settled here. An `UnmatchedCloudEventError` (CloudEvent router) is
- * not retried: its policy terms/drops or dead-letters it. (The JetStream adapter heartbeats its messages until
- * this completes.) Handler errors are already logged by Nest: this logs one line per settlement
- * decision, without the stack.
+ * not retried: its policy terms/drops or dead-letters it. An ordered consumer's message is
+ * retried like a core one; its failing dead letter is retried in place until the delivery's
+ * abort signal fires. (The JetStream adapter heartbeats its messages until this completes.)
+ * Handler errors are already logged by Nest: this logs one line per settlement decision,
+ * without the stack.
  */
 export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
   const { entry, retry, dlq, random } = cfg;
@@ -125,18 +133,22 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
   const retryLine = (d: Delivery, msg: InboundMessage, delayMs: number, err: unknown): string =>
     `${label(d, msg)} failed (attempt ${msg.attempt}/${retry ? retry.maxRetries + 1 : 1}), retrying in ${delayMs}ms: ${errorMessage(err)}`;
 
-  /** Publishes `msg` to its DLQ; reports the subject and the error, if any (never throws). */
+  /**
+   * Publishes `msg` to its DLQ (`consumer` overrides the consumer name of the headers);
+   * reports the subject and the error, if any (never throws).
+   */
   async function deadLetter(
     d: Delivery,
     msg: InboundMessage,
     err: unknown,
+    consumer?: string,
   ): Promise<{ subject: string; error?: unknown }> {
     let subject = '(unresolved subject)';
     try {
       // `decide` only returns 'dlq' when a DLQ policy is set.
       if (!dlq) throw new Error('no DLQ configured');
       subject = dlq.subject(d.handler, msg);
-      await sendToDlq(entry, subject, dlq.mode, msg, err, msg.attempt);
+      await sendToDlq(entry, subject, dlq.mode, msg, err, msg.attempt, consumer);
       return { subject };
     } catch (error) {
       return { subject, error: error ?? new Error(String(error)) };
@@ -234,8 +246,13 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
   }
 
   /** Dead-letters a core message; it is dropped when the DLQ publish fails. */
-  async function deadLetterSubscribe(d: Delivery, msg: InboundMessage, err: unknown) {
-    const { subject, error } = await deadLetter(d, msg, err);
+  async function deadLetterSubscribe(
+    d: Delivery,
+    msg: InboundMessage,
+    err: unknown,
+    consumer?: string,
+  ) {
+    const { subject, error } = await deadLetter(d, msg, err, consumer);
     if (error === undefined) {
       logDeadLettered(d, msg, subject, err);
     } else {
@@ -251,7 +268,46 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
     );
   }
 
-  async function failSubscribe(d: Delivery, msg: InboundMessage, err: unknown): Promise<void> {
+  /**
+   * Dead-letters a message of an ordered consumer, which waits (the next message must not
+   * overtake it): a failing DLQ publish is retried with the retry backoff (the default one
+   * when retries are off), capped at `maxDelay`, with no attempt limit, until the signal of
+   * the delivery aborts (shutdown); the message is then dropped. Without a signal, it is
+   * dropped at the first failure, like a core message.
+   */
+  async function deadLetterOrdered(d: Delivery, msg: InboundMessage, err: unknown) {
+    const consumer = `ordered:${d.handler.className}.${d.handler.methodName}`;
+    const signal = (d as Partial<InternalDelivery>)[ABORT_SIGNAL];
+    if (!signal) return deadLetterSubscribe(d, msg, err, consumer);
+    const policy = retry || DEFAULT_RETRY;
+    for (let n = 1; ; n++) {
+      const { subject, error } = await deadLetter(d, msg, err, consumer);
+      if (error === undefined) {
+        logDeadLettered(d, msg, subject, err);
+        recordOutcome(d, msg, { action: 'dlq', subject, error: err });
+        return;
+      }
+      const delayMs = Math.min(policy.maxDelay, backoffDelay(policy, n, random));
+      d.logger.error(
+        `${label(d, msg)} failed and could not be sent to DLQ ${subject}, retrying in ${delayMs}ms: ${errorMessage(error)}`,
+        errorTrace(error),
+      );
+      if (!(await sleep(delayMs, signal))) {
+        d.logger.warn(
+          `${label(d, msg)} not sent to DLQ ${subject}: retry abandoned at shutdown (stream sequence ${streamSeq(msg)})`,
+        );
+        recordOutcome(d, msg, { action: 'drop', error: err });
+        return;
+      }
+    }
+  }
+
+  async function failSubscribe(
+    d: Delivery,
+    msg: InboundMessage,
+    err: unknown,
+    deadLetterFn: (d: Delivery, msg: InboundMessage, err: unknown) => Promise<void>,
+  ): Promise<void> {
     const schedule = (d as Partial<InternalDelivery>)[RETRY_SCHEDULER];
     if (err instanceof IdempotencyStoreError && schedule) {
       const delayMs = storeRetryDelay(msg.attempt);
@@ -262,7 +318,7 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
     }
     // Not retried: the policy of the router decides ('term' means drop on core).
     if (err instanceof UnmatchedCloudEventError) {
-      if (unmatchedToDlq(d, msg, err)) await deadLetterSubscribe(d, msg, err);
+      if (unmatchedToDlq(d, msg, err)) await deadLetterFn(d, msg, err);
       else recordOutcome(d, msg, { action: 'drop', error: err });
       return;
     }
@@ -274,7 +330,7 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
         recordOutcome(d, msg, { action: 'retry', delayMs: decision.delayMs, error: err });
         return;
       case 'dlq':
-        await deadLetterSubscribe(d, msg, err);
+        await deadLetterFn(d, msg, err);
         return;
       case 'drop':
         d.logger.error(
@@ -320,12 +376,17 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
     }
   }
 
+  /**
+   * Settles a core subscription delivery, or one of an ordered consumer (retried through
+   * the scheduler like a core message; only its dead-lettering differs).
+   */
   async function settleSubscribe(d: Delivery, failure: Outcome): Promise<void> {
     const skipped = (d as Partial<InternalDelivery>)[SKIPPED];
+    const deadLetterFn = d.handler.kind === 'ordered' ? deadLetterOrdered : deadLetterSubscribe;
     for (const msg of d.messages) {
       if (skipped?.has(msg)) continue;
       const outcome = outcomeOf(d, msg, failure);
-      if (outcome) await failSubscribe(d, msg, outcome.err);
+      if (outcome) await failSubscribe(d, msg, outcome.err, deadLetterFn);
       else recordOutcome(d, msg, { action: 'none' });
     }
   }

@@ -168,6 +168,20 @@ describe('buildDlqHeaders', () => {
     expect(DLQ_HEADERS.msgId).toBe('Nats-DLQ-Msg-Id');
   });
 
+  it('uses the given consumer name instead of the delivery info one', () => {
+    const h = buildDlqHeaders(
+      jsMsg({ stream: 'ORDERS', consumer: 'ordered_abc123', streamSequence: 42 }),
+      new Error('x'),
+      2,
+      new Date(),
+      'ordered:Proj.on',
+    );
+    expect(h.get('Nats-DLQ-Consumer')).toBe('ordered:Proj.on');
+    expect(h.get('Nats-Msg-Id')).toBe('dlq:ORDERS:ordered:Proj.on:42');
+    expect(h.get('Nats-DLQ-Seq')).toBe('42');
+    expect(h.get('Nats-DLQ-Deliveries')).toBe('2');
+  });
+
   it('sets no Nats-DLQ-Msg-Id when the original has no Nats-Msg-Id', () => {
     const h = buildDlqHeaders(
       jsMsg({ stream: 'ORD', consumer: 'bill', streamSequence: 7 }),

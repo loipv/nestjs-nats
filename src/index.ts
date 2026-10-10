@@ -9,6 +9,7 @@ export type { NatsConnectionState, NatsStatusEvent } from './connection/connecti
 export { NatsConnectionManager } from './connection/connection-manager.js';
 export { NatsBatchContext } from './context/nats-batch-context.js';
 export { NatsContext, NatsJetStreamContext } from './context/nats-context.js';
+export { NatsOrderedContext } from './context/nats-ordered-context.js';
 export type { CloudEventRouterOptions } from './decorators/cloudevent.decorators.js';
 export { CloudEventRouter, OnCloudEvent } from './decorators/cloudevent.decorators.js';
 export type {
