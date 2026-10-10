@@ -3,6 +3,7 @@ import {
   type INestApplicationContext,
   Inject,
   Injectable,
+  type LoggerService,
   ValidationPipe,
 } from '@nestjs/common';
 import { Test, type TestingModule } from '@nestjs/testing';
@@ -134,6 +135,12 @@ class Events {
   }
 }
 
+/**
+ * The Nest logger of a testing module whose failing handlers are expected: the library and
+ * Nest's exception handler would log them.
+ */
+const silentLogger: LoggerService = { log() {}, error() {}, warn() {} };
+
 describe('NatsTestHarness', () => {
   let moduleRef: TestingModule;
   let h: NatsTestHarness;
@@ -142,7 +149,9 @@ describe('NatsTestHarness', () => {
     moduleRef = await Test.createTestingModule({
       imports: [NatsTestingModule.forRoot({ retry: { initialDelay: 10, jitter: 0 } })],
       providers: [Handlers, Service, Events],
-    }).compile();
+    })
+      .setLogger(silentLogger)
+      .compile();
     h = NatsTestHarness.create(moduleRef);
   });
 
@@ -498,6 +507,11 @@ describe('NatsTestHarness push and ordered consumers', () => {
       throw new Error('boom');
     }
 
+    @ConsumePush({ stream: 'S', durable: 'dead', dlq: true })
+    pushDead() {
+      throw new Error('dead');
+    }
+
     @ConsumeOrdered({ stream: 'S', filterSubjects: 'o.*', dlq: true })
     onOrdered(@Payload() p: unknown, @Ctx() ctx: NatsOrderedContext) {
       seen.ctx = ctx;
@@ -518,7 +532,9 @@ describe('NatsTestHarness push and ordered consumers', () => {
     moduleRef = await Test.createTestingModule({
       imports: [NatsTestingModule.forRoot({ retry: { initialDelay: 10, jitter: 0 } })],
       providers: [Svc],
-    }).compile();
+    })
+      .setLogger(silentLogger)
+      .compile();
     h = NatsTestHarness.create(moduleRef);
   });
 
@@ -537,6 +553,14 @@ describe('NatsTestHarness push and ordered consumers', () => {
       settlement: 'nak',
       nakDelay: 10,
     }));
+
+  it('dead-letters an exhausted @ConsumePush message', async () => {
+    const r = await h.dispatch({ handler: 'Svc.pushDead' }, { id: 3 }, { deliveryCount: 6 });
+    expect(r.settlement).toBe('dlq');
+    expect(r.dlq).toHaveLength(1);
+    expect(r.dlq[0]).toMatchObject({ subject: 'dlq.S.dead', data: { id: 3 } });
+    expect(r.dlq[0]?.headers['Nats-DLQ-Deliveries']).toBe('6');
+  });
 
   it('names push and ordered handlers in its errors', async () => {
     const err = await h.dispatch({ handler: 'Nope.x' }, 1).catch((e: unknown) => e);
