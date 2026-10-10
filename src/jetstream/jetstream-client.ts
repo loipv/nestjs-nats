@@ -68,7 +68,8 @@ export class JetStreamClient {
    * Publishes `messages` (1 to 1000) as one atomic batch: the stream stores all of them or
    * none (NATS server >= 2.12, stream with `allow_atomic`). Each message runs through the
    * outbound plugins, whose `next()` settles with the commit; once the batch is sent, the
-   * result is the commit's (a plugin failing after that is logged). A single message is
+   * result is the commit's, without waiting for the plugins (a plugin failing after that is
+   * logged). A single message is
    * published as usual. A `Nats-Msg-Id` header is refused, and a CloudEvent's id is not used
    * as one.
    */
