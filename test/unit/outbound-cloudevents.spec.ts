@@ -187,6 +187,19 @@ describe('JetStreamClient.publish with cloudEvent', () => {
     expect(ids(3)).toEqual(['plain']);
   });
 
+  it('publishes a Nats-Msg-Id header of any case under the exact name', async () => {
+    const { entry, jsPublished } = fakeEntry();
+    const js = new JetStreamClient(entry);
+    await js.publish('o.c', 1, { headers: { 'nats-msg-id': 'lower' } });
+    await js.publish('o.c', 1, { headers: { 'NATS-MSG-ID': 'upper', 'x-a': 'b' } });
+    for (const [i, id] of ['lower', 'upper'].entries()) {
+      const h = jsPublished[i]?.opts.headers;
+      expect(h?.keys().filter((k) => k.toLowerCase() === 'nats-msg-id')).toEqual(['Nats-Msg-Id']);
+      expect(h?.values('Nats-Msg-Id')).toEqual([id]);
+    }
+    expect(jsPublished[1]?.opts.headers?.get('x-a')).toBe('b');
+  });
+
   it('rejects without a source', async () => {
     const { entry } = fakeEntry();
     const js = new JetStreamClient(entry);
