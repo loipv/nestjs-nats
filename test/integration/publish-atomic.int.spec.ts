@@ -4,7 +4,8 @@ import { Injectable } from '@nestjs/common';
 import type { TestingModule } from '@nestjs/testing';
 import { SpanKind } from '@opentelemetry/api';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { ConnectionRegistry } from '../../src/connection/connection-registry.js';
 import { Consume } from '../../src/decorators/handler.decorators.js';
 import { Payload } from '../../src/decorators/param.decorators.js';
 import { NatsAtomicPublishError, NatsConfigError } from '../../src/errors/errors.js';
@@ -172,6 +173,49 @@ describe('JetStreamClient.publishAtomic', () => {
       await own.close();
     }
     expect(await stored('AT_CLOSE')).toBe(0);
+  });
+
+  it('rejects in time and stores nothing when the connection closes after startBatch, before the commit', async () => {
+    const own = await createTestApp({
+      imports: [
+        NatsModule.forRoot({ connection: { servers: srv.url }, logger: false }),
+        NatsModule.forFeature({
+          streams: [{ name: 'AT_SPLIT', subjects: ['at.split.>'], allow_atomic: true }],
+        }),
+      ],
+    });
+    const ownNc = own.get<NatsConnection>(getConnectionToken());
+    // The batch nats.js starts closes the connection once its first message and the adds
+    // were sent, before the commit: the server holds a partial batch never committed. (A
+    // close right after an add() is no good: nats.js flushes what is buffered, the commit
+    // included, so the batch is stored and only its ack is lost.)
+    const natsJs = own.get(ConnectionRegistry).get().js();
+    const startBatch = natsJs.startBatch.bind(natsJs);
+    let closed = false;
+    vi.spyOn(natsJs, 'startBatch').mockImplementation(async (...args) => {
+      const batch = await startBatch(...args);
+      const commit = batch.commit.bind(batch);
+      batch.commit = async (...commitArgs) => {
+        await ownNc.close();
+        closed = true;
+        return commit(...commitArgs);
+      };
+      return batch;
+    });
+    const timeout = 2000;
+    try {
+      const started = Date.now();
+      const err = await own
+        .get<JetStreamClient>(getJetStreamClientToken())
+        .publishAtomic(messages('at.split.x', 10), { timeout })
+        .catch((e: unknown) => e);
+      expect(Date.now() - started).toBeLessThanOrEqual(timeout + 1000);
+      expect(err).toBeInstanceOf(NatsAtomicPublishError);
+      expect(closed).toBe(true);
+    } finally {
+      await own.close();
+    }
+    expect(await stored('AT_SPLIT')).toBe(0);
   });
 
   it('traces produce → consume', async () => {
