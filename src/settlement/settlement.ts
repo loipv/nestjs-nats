@@ -1,5 +1,5 @@
 import { UnmatchedCloudEventError } from '../cloudevents/errors.js';
-import type { ConnectionEntry } from '../connection/connection-manager.js';
+import type { ConnectionEntry } from '../connection/connection-registry.js';
 import { NatsJetStreamContext, SETTLED_BY } from '../context/nats-context.js';
 import { IdempotencyStoreError } from '../idempotency/idempotency.js';
 import {

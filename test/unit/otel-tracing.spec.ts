@@ -13,7 +13,7 @@ import { W3CTraceContextPropagator } from '@opentelemetry/core';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { afterAll, afterEach, beforeAll, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { jsonCodec } from '../../src/codec/codec.js';
-import type { ConnectionEntry } from '../../src/connection/connection-manager.js';
+import type { ConnectionEntry } from '../../src/connection/connection-registry.js';
 import { NatsBatchContext } from '../../src/context/nats-batch-context.js';
 import { NatsContext, NatsJetStreamContext } from '../../src/context/nats-context.js';
 import { JetStreamClient } from '../../src/jetstream/jetstream-client.js';

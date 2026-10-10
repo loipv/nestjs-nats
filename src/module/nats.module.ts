@@ -9,7 +9,7 @@ import {
   type Type,
 } from '@nestjs/common';
 import { NatsClient } from '../client/nats-client.js';
-import { NatsConnectionManager } from '../connection/connection-manager.js';
+import { ConnectionRegistry } from '../connection/connection-registry.js';
 import { NatsConfigError } from '../errors/errors.js';
 import { JetStreamClient } from '../jetstream/jetstream-client.js';
 import { NatsStreamManager } from '../jetstream/stream-manager.js';
@@ -63,21 +63,21 @@ export class NatsModule {
         provide: optionsToken,
         // The manager is injected last, after the user's dependencies.
         useFactory: async (...args: unknown[]) => {
-          const manager = args.pop() as NatsConnectionManager;
+          const manager = args.pop() as ConnectionRegistry;
           return { ...(await abortOnFailure(manager, () => useFactory(...args))), name };
         },
-        inject: [...(options.inject ?? []), NatsConnectionManager],
+        inject: [...(options.inject ?? []), ConnectionRegistry],
       });
     } else if (options.useClass || options.useExisting) {
       const factoryType = (options.useClass ?? options.useExisting) as Type<NatsOptionsFactory>;
       if (options.useClass) providers.push({ provide: factoryType, useClass: factoryType });
       providers.push({
         provide: optionsToken,
-        useFactory: async (factory: NatsOptionsFactory, manager: NatsConnectionManager) => ({
+        useFactory: async (factory: NatsOptionsFactory, manager: ConnectionRegistry) => ({
           ...(await abortOnFailure(manager, () => factory.createNatsOptions())),
           name,
         }),
-        inject: [factoryType, NatsConnectionManager],
+        inject: [factoryType, ConnectionRegistry],
       });
     } else {
       throw new NatsConfigError(
@@ -114,27 +114,27 @@ export class NatsModule {
       {
         provide: connectionToken,
         useFactory: async (
-          manager: NatsConnectionManager,
+          manager: ConnectionRegistry,
           opts: NatsModuleOptions,
         ): Promise<NatsConnection> =>
           (await abortOnFailure(manager, () => manager.connect(name, opts))).nc,
-        inject: [NatsConnectionManager, optionsToken],
+        inject: [ConnectionRegistry, optionsToken],
       },
       {
         provide: clientToken,
         // Injecting the connection token guarantees the connection exists first.
-        useFactory: (manager: NatsConnectionManager) => new NatsClient(manager.get(name)),
-        inject: [NatsConnectionManager, connectionToken],
+        useFactory: (manager: ConnectionRegistry) => new NatsClient(manager.get(name)),
+        inject: [ConnectionRegistry, connectionToken],
       },
       {
         provide: jetStreamToken,
-        useFactory: (manager: NatsConnectionManager) => new JetStreamClient(manager.get(name)),
-        inject: [NatsConnectionManager, connectionToken],
+        useFactory: (manager: ConnectionRegistry) => new JetStreamClient(manager.get(name)),
+        inject: [ConnectionRegistry, connectionToken],
       },
       {
         provide: streamManagerToken,
-        useFactory: (manager: NatsConnectionManager) => new NatsStreamManager(manager.get(name)),
-        inject: [NatsConnectionManager, connectionToken],
+        useFactory: (manager: ConnectionRegistry) => new NatsStreamManager(manager.get(name)),
+        inject: [ConnectionRegistry, connectionToken],
       },
     ];
     const exports: NonNullable<ModuleMetadata['exports']> = [
@@ -170,7 +170,7 @@ export class NatsModule {
  * else would close them.
  */
 async function abortOnFailure<T>(
-  manager: NatsConnectionManager,
+  manager: ConnectionRegistry,
   factory: () => T | Promise<T>,
 ): Promise<T> {
   try {

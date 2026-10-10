@@ -1,16 +1,16 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { NatsConnectionManager } from '../../src/connection/connection-manager.js';
+import { ConnectionRegistry } from '../../src/connection/connection-registry.js';
 import { NatsConfigError, NatsConnectionError } from '../../src/errors/errors.js';
 import { type NatsTestServer, startNats } from './support/nats-server.js';
 
-describe('NatsConnectionManager', () => {
+describe('ConnectionRegistry', () => {
   let srv: NatsTestServer;
-  let mgr: NatsConnectionManager;
+  let mgr: ConnectionRegistry;
   const extra: NatsTestServer[] = [];
 
   beforeAll(async () => {
     srv = await startNats();
-    mgr = new NatsConnectionManager();
+    mgr = new ConnectionRegistry();
   });
 
   afterAll(async () => {
@@ -67,7 +67,7 @@ describe('NatsConnectionManager', () => {
   });
 
   it('closeAll closes multiple live connections and tolerates concurrent calls', async () => {
-    const m = new NatsConnectionManager();
+    const m = new ConnectionRegistry();
     const a = await m.connect('a', { connection: { servers: srv.url }, logger: false });
     const b = await m.connect('b', { connection: { servers: srv.url }, logger: false });
     await expect(Promise.all([m.closeAll(), m.closeAll()])).resolves.toBeDefined();
@@ -79,7 +79,7 @@ describe('NatsConnectionManager', () => {
   });
 
   it('status$ emits events and status() follows the lifecycle', async () => {
-    const m = new NatsConnectionManager();
+    const m = new ConnectionRegistry();
     const e = await m.connect('s', { connection: { servers: srv.url }, logger: false });
     const events: string[] = [];
     const sub = m.status$('s').subscribe((ev) => events.push(`${ev.connection}:${ev.type}`));
@@ -100,7 +100,7 @@ describe('NatsConnectionManager', () => {
 
   it('logs disconnects without leaking credentials and reports reconnecting', async () => {
     const auth = await startNats(['--user', 'app', '--pass', 'pw-s3cr3t']);
-    const m = new NatsConnectionManager();
+    const m = new ConnectionRegistry();
     const lines: string[] = [];
     const record = (msg: unknown) => lines.push(String(msg));
     const e = await m.connect('r', {
@@ -125,7 +125,7 @@ describe('NatsConnectionManager', () => {
   });
 });
 
-describe('NatsConnectionManager close hooks', () => {
+describe('ConnectionRegistry close hooks', () => {
   let srv: NatsTestServer;
 
   beforeAll(async () => {
@@ -145,7 +145,7 @@ describe('NatsConnectionManager close hooks', () => {
       verbose() {},
       error: (m: string) => lines.push(m),
     };
-    const m = new NatsConnectionManager();
+    const m = new ConnectionRegistry();
     const e = await m.connect('h', { connection: { servers: srv.url }, logger });
     const seen: string[] = [];
     e.onClose(async () => {
@@ -178,7 +178,7 @@ describe('NatsConnectionManager close hooks', () => {
       verbose() {},
       warn: (m: string) => warnings.push(m),
     };
-    const m = new NatsConnectionManager();
+    const m = new ConnectionRegistry();
     const e = await m.connect('stuck', { connection: { servers: srv.url }, logger });
     e.onClose(() => new Promise<void>(() => {}));
     const t0 = Date.now();
@@ -202,7 +202,7 @@ describe('NatsConnectionManager close hooks', () => {
       error: (m: string) => errors.push(m),
       warn: (m: string) => warnings.push(m),
     };
-    const m = new NatsConnectionManager();
+    const m = new ConnectionRegistry();
     const e = await m.connect('gone', { connection: { servers: gone.url }, logger });
     const sub = e.nc.subscribe('gone.>');
     const loop = (async () => {

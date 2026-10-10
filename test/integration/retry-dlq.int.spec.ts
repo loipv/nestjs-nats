@@ -10,7 +10,7 @@ import { BadRequestException, Injectable, type LoggerService } from '@nestjs/com
 import type { TestingModule } from '@nestjs/testing';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { NatsClient } from '../../src/client/nats-client.js';
-import { NatsConnectionManager } from '../../src/connection/connection-manager.js';
+import { ConnectionRegistry } from '../../src/connection/connection-registry.js';
 import type { NatsContext, NatsJetStreamContext } from '../../src/context/nats-context.js';
 import { Consume, Subscribe } from '../../src/decorators/handler.decorators.js';
 import { Ctx } from '../../src/decorators/param.decorators.js';
@@ -305,7 +305,7 @@ describe('retry, backoff and DLQ', () => {
       expect(await counts()).toMatchObject({ 'dlq.ORD.billing': 1, 'dlq.ORD.shipping': 1 });
 
       // The same dead letter sent again (same stream sequence and consumer) is deduplicated.
-      const entry = sharedApp.get(NatsConnectionManager).get();
+      const entry = sharedApp.get(ConnectionRegistry).get();
       const again: InboundMessage = {
         subject: 'ord.poison',
         data: json({ id: 9 }),

@@ -8,7 +8,7 @@ import { connect, headers, type NatsConnection } from '@nats-io/transport-node';
 import { Injectable } from '@nestjs/common';
 import type { TestingModule } from '@nestjs/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { NatsConnectionManager } from '../../src/connection/connection-manager.js';
+import { ConnectionRegistry } from '../../src/connection/connection-registry.js';
 import { Consume, Subscribe } from '../../src/decorators/handler.decorators.js';
 import { Msg } from '../../src/decorators/param.decorators.js';
 import {
@@ -216,7 +216,7 @@ describe('idempotency', () => {
   });
 
   it('shares one default in-memory store per connection and reports it', () => {
-    const manager = app.get(NatsConnectionManager);
+    const manager = app.get(ConnectionRegistry);
     const used = manager.idempotencyStores();
     expect(used).toHaveLength(1);
     expect(used[0]).toMatchObject({ connection: 'default', owned: true });
@@ -244,7 +244,7 @@ describe('idempotency', () => {
       await sleep(300);
       expect(h.runs).toBe(1);
       expect(store.claims).toBeGreaterThanOrEqual(2);
-      const used = flaky.get(NatsConnectionManager).idempotencyStores();
+      const used = flaky.get(ConnectionRegistry).idempotencyStores();
       expect(used).toEqual([{ connection: 'default', store, owned: false }]);
     } finally {
       await flaky.close();

@@ -1,5 +1,5 @@
 import { MAX_TIMER_DELAY } from '../batch/collector.js';
-import type { NatsConnectionManager } from '../connection/connection-manager.js';
+import type { ConnectionRegistry } from '../connection/connection-registry.js';
 import { NatsConfigError } from '../errors/errors.js';
 import { DEFAULT_IDEMPOTENCY_TTL } from '../idempotency/idempotency.js';
 import type { DlqOptions } from '../settlement/dlq.js';
@@ -12,7 +12,7 @@ const label = (def: HandlerDefinition) => `${def.className}.${def.methodName}`;
  * Rejects handler configurations that cannot work at runtime. Throws a
  * `NatsConfigError` naming the offending `Class.method` for the first problem found.
  */
-export function validateHandlers(defs: HandlerDefinition[], mgr: NatsConnectionManager): void {
+export function validateHandlers(defs: HandlerDefinition[], mgr: ConnectionRegistry): void {
   const durables = new Map<string, HandlerDefinition>();
   for (const def of defs) {
     if (!def.wrapper.isDependencyTreeStatic() || def.wrapper.isTransient) {
@@ -63,7 +63,7 @@ function invalidRetry(def: HandlerDefinition, field: string, value: unknown, exp
 }
 
 /** Validates the retry policy a handler resolves to (module options merged with its own). */
-function validateRetry(def: HandlerDefinition, mgr: NatsConnectionManager): void {
+function validateRetry(def: HandlerDefinition, mgr: ConnectionRegistry): void {
   if (def.kind === 'service-endpoint') return;
   const policy = resolveRetryPolicy(mgr.get(def.connection).options.retry, def.options.retry);
   if (!policy) return;
@@ -91,7 +91,7 @@ function validateRetry(def: HandlerDefinition, mgr: NatsConnectionManager): void
  * Validates the DLQ subject a handler resolves to (its own options over the module's,
  * as `resolveDlqPolicy` merges them): a non-empty string or a function.
  */
-function validateDlq(def: HandlerDefinition, mgr: NatsConnectionManager): void {
+function validateDlq(def: HandlerDefinition, mgr: ConnectionRegistry): void {
   if (def.kind === 'service-endpoint') return;
   const handler = def.options.dlq;
   const module = mgr.get(def.connection).options.dlq;
@@ -111,7 +111,7 @@ function validateDlq(def: HandlerDefinition, mgr: NatsConnectionManager): void {
 }
 
 /** Validates the TTL an idempotent handler resolves to (its own, else the module's). */
-function validateIdempotency(def: HandlerDefinition, mgr: NatsConnectionManager): void {
+function validateIdempotency(def: HandlerDefinition, mgr: ConnectionRegistry): void {
   if (def.kind === 'service-endpoint') return;
   const option = def.options.idempotency;
   if (!option) return;

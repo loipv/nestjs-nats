@@ -1,7 +1,7 @@
 import type { ConsumerMessages, JsMsg } from '@nats-io/jetstream';
 import { describe, expect, it, vi } from 'vitest';
 import { JetStreamConsumerAdapter } from '../../src/adapters/jetstream-consumer.adapter.js';
-import type { ConnectionEntry } from '../../src/connection/connection-manager.js';
+import type { ConnectionEntry } from '../../src/connection/connection-registry.js';
 import type { NatsJetStreamContext } from '../../src/context/nats-context.js';
 import type { HandlerDefinition } from '../../src/discovery/handler-explorer.js';
 import type { NatsStreamManager } from '../../src/jetstream/stream-manager.js';

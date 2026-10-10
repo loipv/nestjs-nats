@@ -11,6 +11,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { NatsClient } from '../../src/client/nats-client.js';
 import type { CloudEventMeta } from '../../src/cloudevents/types.js';
 import { NatsConnectionManager } from '../../src/connection/connection-manager.js';
+import { ConnectionRegistry } from '../../src/connection/connection-registry.js';
 import type { NatsBatchContext } from '../../src/context/nats-batch-context.js';
 import type { NatsContext, NatsJetStreamContext } from '../../src/context/nats-context.js';
 import { CloudEventRouter, OnCloudEvent } from '../../src/decorators/cloudevent.decorators.js';
@@ -314,12 +315,17 @@ describe('NatsTestHarness', () => {
   });
 
   it('has no JetStream management', async () => {
-    const manager = moduleRef.get(NatsConnectionManager);
+    const manager = moduleRef.get(ConnectionRegistry);
     await expect(manager.get().jsm()).rejects.toThrow(
       new NatsConfigError('JetStream management is not available in NatsTestingModule'),
     );
     await expect(moduleRef.get(NatsStreamManager).info('ORDERS')).rejects.toThrow(NatsConfigError);
     expect(manager.status()).toMatchObject({ name: 'default', state: 'connected' });
+    // The public facade answers from the same (fake) connections.
+    const facade = moduleRef.get(NatsConnectionManager);
+    expect(facade.names()).toEqual(['default']);
+    expect(facade.has('default')).toBe(true);
+    expect(facade.status()).toEqual(manager.status());
   });
 });
 

@@ -2,9 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ForceStopResult, HandlerAdapter } from '../../src/adapters/adapter.js';
 import type {
   ConnectionEntry,
-  NatsConnectionManager,
+  ConnectionRegistry,
   UsedIdempotencyStore,
-} from '../../src/connection/connection-manager.js';
+} from '../../src/connection/connection-registry.js';
 import type { IdempotencyStore } from '../../src/idempotency/store.js';
 import { NatsLifecycle } from '../../src/module/nats-lifecycle.js';
 import type { NatsModuleOptions } from '../../src/module/options.js';
@@ -68,7 +68,7 @@ async function startLifecycle(
 ): Promise<NatsLifecycle> {
   const explorer = { explore: () => [] };
   const lifecycle = new NatsLifecycle(
-    manager as unknown as NatsConnectionManager,
+    manager as unknown as ConnectionRegistry,
     {} as never,
     explorer as never,
   );

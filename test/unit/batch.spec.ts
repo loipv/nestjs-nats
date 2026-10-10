@@ -3,8 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { jsonCodec } from '../../src/codec/codec.js';
 import type {
   ConnectionEntry,
-  NatsConnectionManager,
-} from '../../src/connection/connection-manager.js';
+  ConnectionRegistry,
+} from '../../src/connection/connection-registry.js';
 import { NatsBatchContext } from '../../src/context/nats-batch-context.js';
 import { NatsContext, NatsJetStreamContext } from '../../src/context/nats-context.js';
 import { NatsParamType } from '../../src/decorators/param.decorators.js';
@@ -409,7 +409,7 @@ describe('batch validation', () => {
   const mgr = {
     has: (name: string) => name === 'default',
     get: () => ({ options: {} }),
-  } as unknown as NatsConnectionManager;
+  } as unknown as ConnectionRegistry;
 
   function consumeDef(options: Record<string, unknown>): HandlerDefinition {
     return {

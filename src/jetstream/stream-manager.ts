@@ -11,7 +11,7 @@ import {
   type StreamInfo,
   type StreamUpdateConfig,
 } from '@nats-io/jetstream';
-import type { ConnectionEntry } from '../connection/connection-manager.js';
+import type { ConnectionEntry } from '../connection/connection-registry.js';
 import { NatsConfigError, StreamConfigConflictError } from '../errors/errors.js';
 import type { ConsumerDeclaration, StreamDeclaration, StreamSyncMode } from '../module/options.js';
 import {
