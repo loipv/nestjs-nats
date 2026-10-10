@@ -303,6 +303,18 @@ describe('createSettlement — consume', () => {
     expect(log.error).not.toHaveBeenCalled();
   });
 
+  it('keeps the error of a handler that acked and then threw', async () => {
+    const { entry } = fakeEntry();
+    const { d, raw, context, msg } = consumeDelivery(1);
+    const err = new Error('after ack');
+    await createSettlement({ entry, retry, dlq: false }).handle(d, async () => {
+      context.ack();
+      throw err;
+    });
+    expect(settled(raw)).toEqual({ ack: 1 });
+    expect(d.outcomes.get(msg)).toEqual({ action: 'ack', error: err });
+  });
+
   it('does not ack again when the handler settled on success', async () => {
     const { entry } = fakeEntry();
     const { d, raw, context } = consumeDelivery(1);

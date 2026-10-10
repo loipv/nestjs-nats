@@ -76,7 +76,7 @@ function manualOutcome(ctx: NatsJetStreamContext, error?: unknown): MessageOutco
     case 'term':
       return { action: 'term', ...(error !== undefined ? { error } : {}) };
     default:
-      return { action: 'ack' };
+      return { action: 'ack', ...(error !== undefined ? { error } : {}) };
   }
 }
 

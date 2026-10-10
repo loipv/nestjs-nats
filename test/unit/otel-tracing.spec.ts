@@ -374,6 +374,7 @@ describe('tracing()', () => {
   });
 
   it.each<[string, MessageOutcome]>([
+    ['ack', { action: 'ack', error: new Error('x') }],
     ['term', { action: 'term', error: new Error('x') }],
     ['drop', { action: 'drop', error: new Error('x') }],
     ['replied', { action: 'replied', error: new Error('x') }],

@@ -60,7 +60,7 @@ With `ack: 'auto'` the outcome of each message is decided as follows:
 
 The full rules, including `@Subscribe`, are in [Retry and dead-letter queue](./retry-and-dlq.md).
 
-With `ack: 'manual'` you settle the message yourself with `ctx.ack()`, `ctx.nak(delayMs?)` or `ctx.term(reason?)`. If the handler throws before settling, the library handles the failure like in `'auto'` mode (retry, then DLQ). If the handler returns without settling, the message stays unacknowledged until the consumer's `ack_wait` runs out. Only the first settle call takes effect. Long-running work needs no `ctx.working()` call: the library [extends the ack deadline for you](./retry-and-dlq.md).
+With `ack: 'manual'` you settle the message yourself with `ctx.ack()`, `ctx.nak(delayMs?)` or `ctx.term(reason?)`. If the handler throws before settling, the library handles the failure like in `'auto'` mode (retry, then DLQ). If it throws after settling, the message stays as you settled it, and the error is kept on the [message outcome](./plugins.md#observing-outcomes) (so a [tracing](./tracing.md) span is marked as failed). If the handler returns without settling, the message stays unacknowledged until the consumer's `ack_wait` runs out. Only the first settle call takes effect. Long-running work needs no `ctx.working()` call: the library [extends the ack deadline for you](./retry-and-dlq.md).
 
 ## `@NatsService()` and `@ServiceEndpoint()`: NATS services
 
