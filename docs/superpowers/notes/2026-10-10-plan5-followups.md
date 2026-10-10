@@ -45,8 +45,15 @@ All parked and deferred items above were fixed in 9303422..bad4855 (re-reviewed 
 - publishAtomic timeout must be in (0, 2^31-1] ms (setTimeout overflow).
 - Finding: closing a connection after `add()` flushes the buffered adds and the commit, so the batch can be stored although the call rejects with a timeout — documented in docs/publishing.md and docs/errors.md.
 
+## Remaining-items sweep (2026-10-10)
+Fixed in 913141d..7355776 (re-reviewed clean):
+- Ruling: one outbound rule (shared `sendOutbound`) for JetStreamClient.publish / publishMany / batcher, single-message publishAtomic and NatsClient.request: the plugin chain must reach the send within the call's timeout (else reject, nothing sent); once the send has an outcome the caller settles with it without waiting for the chain; later plugin errors are logged; a plugin throwing before the send still rejects with its own error; a late next() after the caller was rejected sends nothing — cost if wrong: a plugin error after the server answered no longer rejects publish()/request() (only logged).
+- NatsClient.publish: plugins that don't pass the message on within 5 s → error log, dropped; a close hook waits for publishes still in the plugins before the connection drains.
+- No outbound plugins → direct send (no timer on the hot path).
+- Single-message publishAtomic failures are NatsAtomicPublishError (count 1); fallback client timeouts clamped to 2^31-1 ms.
+- Integration tests with deliberately failing handlers run with a silent Nest logger (createTestApp `{ silent }`).
+
 ## Remaining (not fixed)
-- Single-message publishAtomic (and publish()) has no bound around plugins: a plugin that never settles hangs the call.
-- The fallback JetStream client timeout used by publishAtomic is not range-checked (a client timeout > 2^31-1 would overflow).
-- consume-ordered / consume-push integration tests print Nest error stack traces for their deliberately failing handlers (pre-existing pattern).
+- The NatsClient close hook shares the close budget with the drain: with `shutdown.drainTimeout` <= 5 s (or during abortStartup, 1 s), one publish stuck in a plugin before next() can turn the graceful drain into a forced close. Shutdown stays bounded.
+- An outer OTel publish/send span never ends if an inner plugin never passes the message on (documented in docs/tracing.md).
 - Test gaps from the triage stay as listed above where not explicitly fixed.
