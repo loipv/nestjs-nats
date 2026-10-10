@@ -93,13 +93,15 @@ export class NatsClient {
       }
       const serviceCode = reply.headers?.get(SERVICE_ERROR_CODE_HEADER);
       if (serviceCode) {
+        // A non-integer header leaves `serviceCode` unset; its raw text is in the message.
+        const numeric = Number(serviceCode);
         const description = reply.headers?.get(SERVICE_ERROR_HEADER) || undefined;
         throw new NatsRequestError(
           `Service error ${serviceCode} from "${m.subject}"${description ? `: ${description}` : ''}`,
           {
             code: 'service_error',
             subject: m.subject,
-            serviceCode: Number(serviceCode),
+            serviceCode: Number.isInteger(numeric) ? numeric : undefined,
             description,
           },
         );

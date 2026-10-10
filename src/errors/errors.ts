@@ -55,6 +55,7 @@ export type NatsRequestErrorCode = 'timeout' | 'no_responders' | 'service_error'
 export class NatsRequestError extends NatsModuleError {
   readonly code: NatsRequestErrorCode;
   readonly subject: string;
+  /** The `Nats-Service-Error-Code` header; unset when it is not an integer. */
   readonly serviceCode?: number;
   readonly description?: string;
 

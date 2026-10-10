@@ -2,6 +2,7 @@ import { connect, headers, type NatsConnection, type Subscription } from '@nats-
 import type { TestingModule } from '@nestjs/testing';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { NatsClient } from '../../src/client/nats-client.js';
+import { NatsRequestError } from '../../src/errors/errors.js';
 import { NatsModule } from '../../src/module/nats.module.js';
 import { getNatsClientToken } from '../../src/module/tokens.js';
 import type { NatsPlugin } from '../../src/pipeline/types.js';
@@ -119,6 +120,27 @@ describe('NatsClient', () => {
       description: 'not found',
     });
   });
+
+  it.each(['oops', '12.5'])(
+    'leaves serviceCode undefined for a non-integer error code header (%s)',
+    async (code) => {
+      const subject = `t.err.badcode.${code.replace('.', '_')}`;
+      const sub = rawNc.subscribe(subject, { max: 1 });
+      await rawNc.flush();
+      void (async () => {
+        for await (const m of sub) {
+          const h = headers();
+          h.set('Nats-Service-Error-Code', code);
+          m.respond(new Uint8Array(0), { headers: h });
+        }
+      })();
+      const err = await client.request(subject, {}).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(NatsRequestError);
+      expect(err).toMatchObject({ code: 'service_error', serviceCode: undefined });
+      // The raw header text stays visible in the message.
+      expect((err as Error).message).toBe(`Service error ${code} from "${subject}"`);
+    },
+  );
 
   it('logs pipeline errors on publish instead of throwing', async () => {
     const errors: string[] = [];
