@@ -32,6 +32,7 @@ async function main() {
   assert.equal(typeof NatsHealthIndicator, 'function');
 
   const app = await NestFactory.createApplicationContext(AppModule, { logger: false });
+  let failure;
   try {
     const result = await NatsTestHarness.create(app).dispatch(
       { handler: 'Handlers.onOrder' },
@@ -39,9 +40,17 @@ async function main() {
     );
     assert.equal(result.settlement, 'none');
     assert.deepEqual(received, [{ id: 1 }]);
-  } finally {
-    await app.close();
+  } catch (err) {
+    failure = err;
   }
+  // Close in every case, but a close error must not hide the assertion error.
+  try {
+    await app.close();
+  } catch (closeErr) {
+    if (failure === undefined) throw closeErr;
+    console.error('app.close() failed as well:', closeErr);
+  }
+  if (failure !== undefined) throw failure;
   console.log('SMOKE OK');
 }
 
