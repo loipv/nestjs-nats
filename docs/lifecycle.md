@@ -8,6 +8,8 @@
 
 Call `app.enableShutdownHooks()` so this runs on `SIGTERM` and `SIGINT`.
 
+**Startup failures outside the library.** Connections are opened while Nest creates the providers. If the library's own providers fail there (a connection fails, its name is already taken, or a `forRootAsync` factory throws), the connections already open are closed before the error is rethrown. When one of your providers throws during that phase, Nest runs no hook, so the connections opened before it stay open. With `NestFactory.create()`'s default `abortOnError: true` the process exits anyway. With `abortOnError: false`, or with `Test.createTestingModule().compile()`, there is no application to close, and the open connections keep the process from exiting on its own. If another provider's `onModuleInit` or `onApplicationBootstrap` throws, call `app.close()` (or `moduleRef.close()`) after the failed `init()`: that runs the shutdown below and closes the connections.
+
 Shutdown has bounded phases. `shutdown.drainTimeout` (default `10000` ms) is the longest any phase waits. If connections have different values, the largest one is used.
 
 ```ts

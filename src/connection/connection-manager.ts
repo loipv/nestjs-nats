@@ -80,14 +80,34 @@ export class NatsConnectionManager {
   private readonly entries = new Map<string, InternalEntry>();
   private readonly pending = new Set<string>();
   private readonly events$ = new Subject<NatsStatusEvent>();
+  /** The connection attempts in progress. */
+  private readonly opening = new Set<Promise<unknown>>();
+  private startupAborted = false;
 
+  /**
+   * Opens and registers the connection `name`. After `abortStartup()`, the returned promise
+   * never settles (and a connection that opens is closed again): startup has failed already,
+   * and settling would race the original error.
+   */
   async connect(name: string, options: NatsModuleOptions): Promise<ConnectionEntry> {
+    if (this.startupAborted) return new Promise<never>(() => {});
     if (this.entries.has(name) || this.pending.has(name)) {
       throw new NatsConfigError(`NATS connection "${name}" is already registered`);
     }
     this.pending.add(name);
     try {
-      const nc = await this.openConnection(name, options);
+      const opening = this.openConnection(name, options);
+      this.opening.add(opening);
+      let nc: NatsConnection;
+      try {
+        nc = await opening;
+      } finally {
+        this.opening.delete(opening);
+      }
+      if (this.startupAborted) {
+        await settlesWithin(nc.close(), FORCED_CLOSE_TIMEOUT);
+        return new Promise<never>(() => {});
+      }
       const logger = createNatsLogger(options.logger, `NatsConnection:${name}`);
       let js: JetStreamClient | undefined;
       let jsm: Promise<JetStreamManager> | undefined;
@@ -138,6 +158,19 @@ export class NatsConnectionManager {
     } finally {
       this.pending.delete(name);
     }
+  }
+
+  /**
+   * Internal: called by the module's providers when startup fails during dependency
+   * injection, where Nest runs no lifecycle hook and nothing else would close the
+   * connections. Closes every connection opened so far, and each one still connecting once
+   * it is open. Never rejects.
+   */
+  async abortStartup(): Promise<void> {
+    this.startupAborted = true;
+    // Bounded: `connect()` gives up on its own after `connection.timeout`.
+    await Promise.allSettled([...this.opening]);
+    await this.closeAll();
   }
 
   /** Opens the NATS connection of `name`. Internal: the testing module overrides it. */

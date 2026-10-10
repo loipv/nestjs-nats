@@ -61,19 +61,23 @@ export class NatsModule {
       const { useFactory } = options;
       providers.push({
         provide: optionsToken,
-        useFactory: async (...args: unknown[]) => ({ ...(await useFactory(...args)), name }),
-        inject: options.inject ?? [],
+        // The manager is injected last, after the user's dependencies.
+        useFactory: async (...args: unknown[]) => {
+          const manager = args.pop() as NatsConnectionManager;
+          return { ...(await abortOnFailure(manager, () => useFactory(...args))), name };
+        },
+        inject: [...(options.inject ?? []), NatsConnectionManager],
       });
     } else if (options.useClass || options.useExisting) {
       const factoryType = (options.useClass ?? options.useExisting) as Type<NatsOptionsFactory>;
       if (options.useClass) providers.push({ provide: factoryType, useClass: factoryType });
       providers.push({
         provide: optionsToken,
-        useFactory: async (factory: NatsOptionsFactory) => ({
-          ...(await factory.createNatsOptions()),
+        useFactory: async (factory: NatsOptionsFactory, manager: NatsConnectionManager) => ({
+          ...(await abortOnFailure(manager, () => factory.createNatsOptions())),
           name,
         }),
-        inject: [factoryType],
+        inject: [factoryType, NatsConnectionManager],
       });
     } else {
       throw new NatsConfigError(
@@ -112,7 +116,8 @@ export class NatsModule {
         useFactory: async (
           manager: NatsConnectionManager,
           opts: NatsModuleOptions,
-        ): Promise<NatsConnection> => (await manager.connect(name, opts)).nc,
+        ): Promise<NatsConnection> =>
+          (await abortOnFailure(manager, () => manager.connect(name, opts))).nc,
         inject: [NatsConnectionManager, optionsToken],
       },
       {
@@ -156,5 +161,22 @@ export class NatsModule {
       providers,
       exports,
     };
+  }
+}
+
+/**
+ * Runs a provider factory; when it fails, closes the connections already open before
+ * rethrowing. A failure during dependency injection runs no lifecycle hook, so nothing
+ * else would close them.
+ */
+async function abortOnFailure<T>(
+  manager: NatsConnectionManager,
+  factory: () => T | Promise<T>,
+): Promise<T> {
+  try {
+    return await factory();
+  } catch (err) {
+    await manager.abortStartup();
+    throw err;
   }
 }
