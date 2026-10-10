@@ -32,11 +32,13 @@ curl localhost:3000/health
 
 `npm start` publishes sample messages as it starts, so the log shows:
 
-- `order o-1` billed by `OrdersHandlers.bill`,
-- `order o-2` failing on purpose: three retries with backoff (about 0.5 s, 1 s and 2 s), then `sent to DLQ dlq.ORDERS.billing after 4 attempts`,
+- `order o-1-<timestamp>` billed by `OrdersHandlers.bill`,
+- `order o-2-<timestamp>` failing on purpose: three retries with backoff (about 0.5 s, 1 s and 2 s), then `sent to DLQ dlq.ORDERS.billing after 4 attempts`,
 - two CloudEvents routed by `EventsRouter` on their `type`,
 - a `query.orders.get` request answered with the billed order,
 - OpenTelemetry spans (`publish ...`, `process ...`) printed to the console.
+
+The order ids and their `msgId`s carry a timestamp, so you can run `npm start` again at once: fixed ids would be de-duplicated by the `ORDERS` stream within its duplicate window (2 minutes by default), and the second run would show no billing or dead letter.
 
 `/health` answers `{"status":"ok", ...}` while the connection and JetStream are up. Stop the app with `Ctrl+C`: it stops intake, finishes in-flight messages and drains the connection. Stop NATS with `docker compose down`.
 
@@ -49,7 +51,7 @@ Environment variables:
 
 If `4222`, `8222` or `3000` are taken on your machine, change the left side of the port mappings in `docker-compose.yml` and set `NATS_URL` and `PORT` to match, for example `NATS_URL=nats://localhost:4223 PORT=3001 npm start`.
 
-To look at the dead letter, open `http://localhost:8222/jsz?streams=true`: the `DLQ` stream holds one message.
+To look at the dead letter, open `http://localhost:8222/jsz?streams=true`: the `DLQ` stream holds one dead letter per run of `npm start`.
 
 ## Test it
 
