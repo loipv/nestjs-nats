@@ -45,6 +45,23 @@ function consumeDef(stream: string, durable: string, o: Opts = {}): HandlerDefin
   } as never;
 }
 
+function pushDef(stream: string, durable: string, o: Opts = {}): HandlerDefinition {
+  return {
+    ...base(o),
+    kind: 'consume',
+    delivery: 'push',
+    options: { stream, durable, ...o.options },
+  } as never;
+}
+
+function orderedDef(o: Opts = {}): HandlerDefinition {
+  return {
+    ...base(o),
+    kind: 'ordered',
+    options: { stream: 'S', ...o.options },
+  } as never;
+}
+
 function endpointDef(service: unknown, o: Opts = {}): HandlerDefinition {
   return {
     ...base(o),
@@ -256,4 +273,115 @@ describe('validateHandlers', () => {
         mgr,
       ),
     ).toThrow(/A\.one.*B\.two|B\.two.*A\.one/));
+
+  describe('push consumers', () => {
+    it('rejects a pull and a push consumer of the same durable', () =>
+      expect(() => validateHandlers([consumeDef('S', 'D'), pushDef('S', 'D')], mgr)).toThrow(
+        /both consume durable "D"/,
+      ));
+
+    it('rejects a deliverGroup conflicting with config.deliver_group', () => {
+      const run = () =>
+        validateHandlers(
+          [
+            pushDef('S', 'D', {
+              options: { deliverGroup: 'a', config: { deliver_group: 'b' } },
+            }),
+          ],
+          mgr,
+        );
+      expect(run).toThrow(NatsConfigError);
+      expect(run).toThrow('deliverGroup "a" conflicts with config.deliver_group "b"');
+    });
+
+    it('accepts a matching deliverGroup and config.deliver_group', () =>
+      expect(() =>
+        validateHandlers(
+          [pushDef('S', 'D', { options: { deliverGroup: 'a', config: { deliver_group: 'a' } } })],
+          mgr,
+        ),
+      ).not.toThrow());
+
+    it('rejects manual ack with batch', () => {
+      const run = () =>
+        validateHandlers([pushDef('S', 'D', { options: { ack: 'manual', batch: {} } })], mgr);
+      expect(run).toThrow(NatsConfigError);
+      expect(run).toThrow("combines batch with ack: 'manual'");
+    });
+
+    it('validates retry and concurrency like a pull consumer', () => {
+      expect(() =>
+        validateHandlers([pushDef('S', 'D', { options: { retry: { maxRetries: -1 } } })], mgr),
+      ).toThrow(NatsConfigError);
+      expect(() =>
+        validateHandlers([pushDef('S', 'D', { options: { concurrency: 0 } })], mgr),
+      ).toThrow(NatsConfigError);
+    });
+  });
+
+  describe('ordered consumers', () => {
+    it('accepts a minimal ordered consumer', () =>
+      expect(() => validateHandlers([orderedDef()], mgr)).not.toThrow());
+
+    it('does not treat two ordered consumers of a stream as a duplicate durable', () =>
+      expect(() =>
+        validateHandlers([orderedDef(), orderedDef({ methodName: 'other' })], mgr),
+      ).not.toThrow());
+
+    it.each([
+      ['all', 'all'],
+      ['last', 'last'],
+      ['new', 'new'],
+      ['last_per_subject', 'last_per_subject'],
+      ['startSeq', { startSeq: 5 }],
+      ['startTime string', { startTime: '2026-01-01T00:00:00Z' }],
+      ['startTime Date', { startTime: new Date() }],
+    ])('accepts deliverPolicy %s', (_, deliverPolicy) =>
+      expect(() =>
+        validateHandlers([orderedDef({ options: { deliverPolicy } })], mgr),
+      ).not.toThrow(),
+    );
+
+    it.each([
+      ['startSeq 0', { startSeq: 0 }, 'invalid deliverPolicy.startSeq 0; expected an integer >= 1'],
+      ['fractional startSeq', { startSeq: 1.5 }, 'invalid deliverPolicy.startSeq 1.5'],
+      ['bad startTime', { startTime: 'nope' }, 'invalid deliverPolicy.startTime'],
+      ['invalid Date', { startTime: new Date('nope') }, 'invalid deliverPolicy.startTime'],
+      ['unknown policy', 'sometimes', 'invalid deliverPolicy "sometimes"'],
+    ])('rejects deliverPolicy with %s', (_, deliverPolicy, message) => {
+      const run = () => validateHandlers([orderedDef({ options: { deliverPolicy } })], mgr);
+      expect(run).toThrow(NatsConfigError);
+      expect(run).toThrow(message);
+    });
+
+    it.each([
+      ['concurrency', 2],
+      ['durable', 'D'],
+      ['batch', {}],
+      ['ack', 'manual'],
+      ['config', {}],
+    ])('rejects %s', (field, value) => {
+      const run = () =>
+        validateHandlers([orderedDef({ options: { [field]: value as never } })], mgr);
+      expect(run).toThrow(NatsConfigError);
+      expect(run).toThrow(`@ConsumeOrdered does not support ${field}`);
+    });
+
+    it('validates retry, dlq and idempotency', () => {
+      expect(() =>
+        validateHandlers([orderedDef({ options: { retry: { maxRetries: -1 } } })], mgr),
+      ).toThrow(/invalid retry\.maxRetries/);
+      expect(() =>
+        validateHandlers([orderedDef({ options: { dlq: { subject: '' } } })], mgr),
+      ).toThrow(/dlq\.subject/);
+      expect(() =>
+        validateHandlers([orderedDef({ options: { idempotency: { ttl: 0 } } })], mgr),
+      ).toThrow(/idempotency\.ttl/);
+    });
+
+    it('still checks the connection', () =>
+      expect(() => validateHandlers([orderedDef({ connection: 'x' })], mgr)).toThrow(
+        /unknown NATS connection "x"/,
+      ));
+  });
 });

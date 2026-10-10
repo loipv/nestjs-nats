@@ -170,14 +170,15 @@ interface Intake {
 
 ## 4. Discovery & validation
 
-- `HandlerDefinition` thêm `{ kind: 'consume-push'; options: ConsumePushOptions }` và `{ kind: 'consume-ordered'; options: ConsumeOrderedOptions }`. Metadata keys mới trong `decorators/constants.ts`.
+- `HandlerDefinition`: push **không** có kind riêng — vẫn `{ kind: 'consume'; options: ConsumeOptions | ConsumePushOptions; delivery: 'pull' | 'push' }` (`@Consume` → `'pull'`, `@ConsumePush` → `'push'`; `HandlerInfo` consume cũng có `delivery`), nên settlement, DLQ mặc định `dlq.<stream>.<durable>`, idempotency scope và kiểm tra trùng durable dùng lại nguyên vẹn. Ordered có kind `'ordered'`: `{ kind: 'ordered'; options: ConsumeOrderedOptions }` (`HandlerInfo`: `{ kind: 'ordered'; stream; filterSubjects: readonly string[] }`; DLQ mặc định `dlq.<stream>.ordered.<Class>.<method>`, mode `'jetstream'`; scope idempotency mặc định `ordered:<Class>.<method>`). Metadata keys mới (`'nats:consume-push'`, `'nats:consume-ordered'`) trong `decorators/constants.ts`.
 - Validator (`NatsConfigError` khi bootstrap):
   - một `connection + stream + durable` dùng bởi hai handler bất kỳ trong `@Consume`/`@ConsumePush`;
   - `@ConsumePush` với `ack: 'manual'` + `batch` (như `@Consume`);
+  - `@ConsumePush`: `deliverGroup` xung đột với `config.deliver_group`;
   - `deliverPolicy.startSeq` không phải số nguyên ≥ 1, `startTime` không parse được;
   - option không thuộc `ConsumeOrderedOptions` trên `@ConsumeOrdered` (`durable`, `concurrency`, `batch`, `ack`, `config`) — chặn cho JS thuần;
   - quy tắc retry/dlq/idempotency hiện có áp cho cả hai loại mới.
-- Một method chỉ được mang một handler decorator (quy tắc hiện có, mở rộng cho hai decorator mới).
+- `@CloudEventRouter` không hỗ trợ push/ordered: chỉ `subscribe`/`consume` pull như hiện tại.
 
 ## 5. Testing (`/testing`)
 

@@ -8,6 +8,8 @@ import type {
   CloudEventInit,
   CloudEventMeta,
   CloudEventRouterOptions,
+  ConsumeOrderedOptions,
+  ConsumePushOptions,
   Delivery,
   DlqOptions,
   HandlerInfo,
@@ -21,6 +23,7 @@ import type {
   NatsConnectionManager,
   NatsContext,
   NatsHeadersInit,
+  OrderedDeliverPolicy,
   PublishManyResult,
   RetryOptions,
 } from '../../src/index.js';
@@ -34,6 +37,8 @@ it('exports the runtime API', () =>
       'CloudEvent',
       'CloudEventRouter',
       'Consume',
+      'ConsumeOrdered',
+      'ConsumePush',
       'Ctx',
       'DEFAULT_CONNECTION',
       'Headers',
@@ -135,7 +140,19 @@ it('exposes a narrow handler description on Delivery', () => {
     Common & { readonly kind: 'subscribe'; readonly subject: string; readonly queue?: string }
   >();
   expectTypeOf<Extract<HandlerInfo, { kind: 'consume' }>>().toEqualTypeOf<
-    Common & { readonly kind: 'consume'; readonly stream: string; readonly durable: string }
+    Common & {
+      readonly kind: 'consume';
+      readonly stream: string;
+      readonly durable: string;
+      readonly delivery: 'pull' | 'push';
+    }
+  >();
+  expectTypeOf<Extract<HandlerInfo, { kind: 'ordered' }>>().toEqualTypeOf<
+    Common & {
+      readonly kind: 'ordered';
+      readonly stream: string;
+      readonly filterSubjects: readonly string[];
+    }
   >();
   expectTypeOf<Extract<HandlerInfo, { kind: 'service-endpoint' }>>().toEqualTypeOf<
     Common & {
@@ -166,6 +183,10 @@ it('exports the reliability types', () => {
   expectTypeOf<Batcher>().toHaveProperty('flush');
   expectTypeOf<Batcher>().toHaveProperty('close');
   expectTypeOf<CloudEventRouterOptions>().toHaveProperty('unmatched');
+  expectTypeOf<ConsumePushOptions>().toHaveProperty('deliverGroup');
+  expectTypeOf<ConsumePushOptions>().toHaveProperty('durable');
+  expectTypeOf<ConsumeOrderedOptions>().toHaveProperty('deliverPolicy');
+  expectTypeOf<OrderedDeliverPolicy>().not.toBeAny();
 });
 
 it('exposes only the query API on NatsConnectionManager', () => {

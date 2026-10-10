@@ -7,6 +7,8 @@ import type { DlqOptions } from '../settlement/dlq.js';
 import type { RetryOptions } from '../settlement/retry.js';
 import {
   NATS_CONSUME_METADATA,
+  NATS_CONSUME_ORDERED_METADATA,
+  NATS_CONSUME_PUSH_METADATA,
   NATS_ENDPOINT_METADATA,
   NATS_SERVICE_METADATA,
   NATS_SUBSCRIBE_METADATA,
@@ -45,6 +47,43 @@ export interface ConsumeOptions {
   batch?: BatchOptions;
 }
 
+/**
+ * Options of a durable push consumer: the same as a pull consumer's, plus a delivery
+ * group, so several instances share one durable and split its messages.
+ */
+export interface ConsumePushOptions extends ConsumeOptions {
+  /**
+   * The consumer's `deliver_group`: instances of one group share the durable's messages.
+   * Must agree with `config.deliver_group` when both are set.
+   */
+  deliverGroup?: string;
+}
+
+/** Where an ordered consumer starts reading the stream. */
+export type OrderedDeliverPolicy =
+  | 'all'
+  | 'last'
+  | 'new'
+  | 'last_per_subject'
+  | { startSeq: number }
+  | { startTime: Date | string };
+
+/**
+ * Options of an ordered consumer: an ephemeral, ack-less, in-order consumer that the
+ * client recreates on a gap. It has no durable, `ack`, `config`, `concurrency` or `batch`.
+ */
+export interface ConsumeOrderedOptions {
+  connection?: string;
+  stream: string;
+  filterSubjects?: string | string[];
+  deliverPolicy?: OrderedDeliverPolicy;
+  headersOnly?: boolean;
+  codec?: Codec;
+  retry?: RetryOptions | false;
+  dlq?: DlqOptions | boolean;
+  idempotency?: boolean | IdempotencyOptions;
+}
+
 export interface NatsServiceOptions {
   name: string;
   version: string;
@@ -67,6 +106,14 @@ export function Subscribe(subject: string, options?: SubscribeOptions): MethodDe
 
 export function Consume(options: ConsumeOptions): MethodDecorator {
   return SetMetadata(NATS_CONSUME_METADATA, { options }) as MethodDecorator;
+}
+
+export function ConsumePush(options: ConsumePushOptions): MethodDecorator {
+  return SetMetadata(NATS_CONSUME_PUSH_METADATA, { options }) as MethodDecorator;
+}
+
+export function ConsumeOrdered(options: ConsumeOrderedOptions): MethodDecorator {
+  return SetMetadata(NATS_CONSUME_ORDERED_METADATA, { options }) as MethodDecorator;
 }
 
 export function NatsService(options: NatsServiceOptions): ClassDecorator {

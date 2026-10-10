@@ -84,6 +84,10 @@ function subjectsOf(def: HandlerDefinition): string[] {
       const { filter_subject: one, filter_subjects: many } = def.options.config ?? {};
       return one ? [one] : (many ?? []);
     }
+    case 'ordered': {
+      const { filterSubjects } = def.options;
+      return filterSubjects === undefined ? [] : [filterSubjects].flat();
+    }
     case 'service-endpoint':
       return [def.options.subject ?? def.endpoint];
   }
@@ -94,7 +98,9 @@ function describeHandler(def: HandlerDefinition): string {
   const source =
     def.kind === 'consume'
       ? [`${def.options.stream}/${def.options.durable}`, ...subjects]
-      : subjects;
+      : def.kind === 'ordered'
+        ? [def.options.stream, ...subjects]
+        : subjects;
   return `${label(def)} (${def.kind}${source.length > 0 ? ` ${source.join(', ')}` : ''})`;
 }
 
@@ -152,7 +158,8 @@ export class NatsTestHarness {
     const def = this.resolve(target);
     const entry = this.registry.get(def.connection);
     const pipeline = this.pipelineOf(def, entry);
-    const batch = def.kind !== 'service-endpoint' && def.options.batch !== undefined;
+    const batch =
+      (def.kind === 'subscribe' || def.kind === 'consume') && def.options.batch !== undefined;
     if (batch && (!Array.isArray(payload) || payload.length === 0)) {
       throw new NatsConfigError(
         `${label(def)} is a batch handler: dispatch a non-empty array of payloads, one per message`,
@@ -274,7 +281,10 @@ export class NatsTestHarness {
 
   /** The subject of a dispatched message when neither the target nor the options give one. */
   private defaultSubject(def: HandlerDefinition): string {
-    return subjectsOf(def)[0] ?? (def.kind === 'consume' ? def.options.stream : label(def));
+    return (
+      subjectsOf(def)[0] ??
+      (def.kind === 'consume' || def.kind === 'ordered' ? def.options.stream : label(def))
+    );
   }
 
   /** One fake message (with its context) as the handler's adapter would receive it. */
@@ -309,12 +319,14 @@ export class NatsTestHarness {
       attempt,
     });
     switch (def.kind) {
-      case 'consume': {
+      case 'consume':
+      case 'ordered': {
         const deliveryCount = positiveInteger('deliveryCount', options.deliveryCount);
         const raw = fakeJsMsg(
           base,
           def.options.stream,
-          def.options.durable,
+          // An ordered consumer is ephemeral: it has no durable name.
+          def.kind === 'consume' ? def.options.durable : 'ordered',
           deliveryCount,
           ++this.sequence,
         );

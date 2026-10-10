@@ -105,6 +105,7 @@ function setup(
   } as unknown as ConnectionEntry;
   const def = {
     kind: 'consume',
+    delivery: 'pull',
     connection: 'default',
     className: 'C',
     methodName: 'm',
@@ -266,6 +267,7 @@ describe('JetStreamConsumerAdapter', () => {
         methodName: 'm',
         stream: 'ORD',
         durable: 'd',
+        delivery: 'pull',
       },
     ]);
     expect(invoke).toHaveBeenCalledTimes(1);

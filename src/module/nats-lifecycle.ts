@@ -146,6 +146,9 @@ export class NatsLifecycle
             entry,
           });
           break;
+        case 'ordered':
+          // Replaced by the ordered consumer adapter.
+          throw new NatsConfigError('@ConsumeOrdered is not wired yet');
         case 'service-endpoint': {
           // `validateHandlers` already rejected endpoints of classes without `@NatsService`.
           if (def.service === undefined) break;

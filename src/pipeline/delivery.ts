@@ -39,6 +39,14 @@ export type HandlerInfo =
       readonly kind: 'consume';
       readonly stream: string;
       readonly durable: string;
+      /** `'push'` for a `@ConsumePush` durable, `'pull'` for a `@Consume` one. */
+      readonly delivery: 'pull' | 'push';
+    })
+  | (HandlerInfoBase & {
+      readonly kind: 'ordered';
+      readonly stream: string;
+      /** The consumer's filter subjects; empty when it reads the whole stream. */
+      readonly filterSubjects: readonly string[];
     })
   | (HandlerInfoBase & {
       readonly kind: 'service-endpoint';
@@ -219,7 +227,23 @@ export function toHandlerInfo(def: HandlerDefinition, service?: NatsServiceOptio
         ...base,
         stream: def.options.stream,
         durable: def.options.durable,
+        delivery: def.delivery,
       });
+    case 'ordered': {
+      const { filterSubjects } = def.options;
+      return Object.freeze({
+        kind: def.kind,
+        ...base,
+        stream: def.options.stream,
+        filterSubjects: Object.freeze(
+          filterSubjects === undefined
+            ? []
+            : typeof filterSubjects === 'string'
+              ? [filterSubjects]
+              : [...filterSubjects],
+        ),
+      });
+    }
     case 'service-endpoint': {
       const svc = service ?? def.service;
       if (!svc) {
