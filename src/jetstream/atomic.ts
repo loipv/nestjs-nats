@@ -29,7 +29,10 @@ export interface AtomicMessage {
 }
 
 export interface AtomicPublishOptions {
-  /** Timeout (ms) of the commit's ack. Defaults to the JetStream client's timeout; never 0. */
+  /**
+   * Timeout (ms) of the commit's ack, and of staging the messages through the outbound plugins
+   * before the batch is sent. Defaults to the JetStream client's timeout; never 0.
+   */
   timeout?: number;
   /** Expectations checked on the first message (there is no `lastMsgID`). */
   expect?: Partial<Omit<StreamExpectations, 'lastMsgID'>>;
@@ -57,8 +60,9 @@ interface Staged {
  * Publishes `messages` as one atomic batch. Each message runs through the outbound plugins;
  * their terminal step only stages the encoded message and waits for the commit, sent once
  * every message is staged, so a plugin's `next()` settles with the commit. A plugin failing
- * before the batch is sent aborts it: nothing is sent. Once it is sent, the result is the
- * commit's, and a plugin failing after that is logged.
+ * before the batch is sent, or staging that outlasts the timeout, aborts it: nothing is sent.
+ * Once it is sent, the result is the commit's, without waiting for the plugins; a plugin
+ * failing after that is logged.
  */
 export async function publishAtomic(
   entry: ConnectionEntry,
@@ -108,8 +112,6 @@ export async function publishAtomic(
   let stagedCount = 0;
   let sending: Promise<AtomicPublishAck> | undefined;
   let aborted = false;
-  /** Plugin failures after the batch was sent, which do not change its result. */
-  const late: { index: number; err: unknown }[] = [];
   let resolveCommit!: () => void;
   let rejectCommit!: (err: unknown) => void;
   const committed = new Promise<void>((resolve, reject) => {
@@ -123,6 +125,22 @@ export async function publishAtomic(
     if (sending) return;
     aborted = true;
     rejectCommit(err);
+  };
+  /** Logs a plugin failure after the batch was sent, which does not change its result. */
+  const late = (sent: Promise<AtomicPublishAck>, index: number, err: unknown): void => {
+    void sent
+      .then(
+        () => undefined,
+        (commitError: unknown) => commitError,
+      )
+      .then((commitError) => {
+        // A plugin rethrowing the commit's failure is not a failure of its own.
+        if (err === commitError) return;
+        entry.logger.error(
+          `${what}: an outbound plugin failed on message ${index} after the batch was sent`,
+          errorTrace(err),
+        );
+      });
   };
 
   const send = async (): Promise<AtomicPublishAck> => {
@@ -149,49 +167,45 @@ export async function publishAtomic(
   };
 
   const middlewares = outboundMiddlewares(entry);
-  const chains = outgoing.map((message, index) =>
-    compose(middlewares, async (m) => {
-      staged[index] = { subject: m.subject, payload: encodeOutgoing(m), headers: m.headers };
-      // A chain may fail after staging its own message, before the last one is staged.
-      if (++stagedCount === count && !aborted) {
-        sending = send();
-        sending.then(resolveCommit, rejectCommit);
-      }
-      await committed;
-    })(message).then(
-      () => {
-        if (staged[index]) return;
-        const err = abortError(`an outbound plugin did not pass message ${index} on`);
-        abort(err);
-        throw err;
-      },
-      (err: unknown) => {
-        if (sending) {
-          // Sent: the commit decides the result, whatever the plugin did after next().
-          late.push({ index, err });
-          return;
+  // Settles with the commit once the batch is sent, without waiting for the plugins; before
+  // that, with the first failure, or when staging outlasts the timeout.
+  return new Promise<AtomicPublishAck>((resolve, reject) => {
+    const fail = (err: unknown): void => {
+      clearTimeout(staging);
+      reject(err);
+    };
+    const staging = setTimeout(() => {
+      const err = abortError(`not every message was staged within ${timeout} ms`);
+      abort(err);
+      fail(err);
+    }, timeout);
+    outgoing.forEach((message, index) => {
+      compose(middlewares, async (m) => {
+        staged[index] = { subject: m.subject, payload: encodeOutgoing(m), headers: m.headers };
+        // A chain may fail after staging its own message, before the last one is staged.
+        if (++stagedCount === count && !aborted) {
+          clearTimeout(staging);
+          sending = send();
+          sending.then(resolveCommit, rejectCommit);
+          sending.then(resolve, reject);
         }
-        abort(abortError(`message ${index} failed in an outbound plugin`, err));
-        throw err;
-      },
-    ),
-  );
-  await Promise.all(chains);
-  // Every message was staged, so the batch was sent (a plugin may have swallowed its error).
-  const sent = sending as Promise<AtomicPublishAck>;
-  const commitError = await sent.then(
-    () => undefined,
-    (err: unknown) => err,
-  );
-  for (const { index, err } of late) {
-    // A plugin rethrowing the commit's failure is not a failure of its own.
-    if (err === commitError) continue;
-    entry.logger.error(
-      `${what}: an outbound plugin failed on message ${index} after the batch was sent`,
-      errorTrace(err),
-    );
-  }
-  return sent;
+        await committed;
+      })(message).then(
+        () => {
+          if (staged[index]) return;
+          const err = abortError(`an outbound plugin did not pass message ${index} on`);
+          abort(err);
+          fail(err);
+        },
+        (err: unknown) => {
+          // Sent: the commit decides the result, whatever the plugin did after next().
+          if (sending) return late(sending, index, err);
+          abort(abortError(`message ${index} failed in an outbound plugin`, err));
+          fail(err);
+        },
+      );
+    });
+  });
 }
 
 function toAck(ack: PubAck | BatchAck, count: number, batch?: string): AtomicPublishAck {

@@ -265,6 +265,8 @@ describe('publishAtomic', () => {
     const ack = await client.publishAtomic(three);
     expect(ack).toMatchObject({ count: 3, duplicate: false });
     expect(fake.jsPublished.map((m) => m.subject)).toEqual(['o.a', 'o.b', 'o.c']);
+    // Logged when the plugin fails, which may be after publishAtomic settled.
+    await vi.waitFor(() => expect(error).toHaveBeenCalled());
     expect(error).toHaveBeenCalledExactlyOnceWith(
       'Atomic publish of 3 messages to "o.a": an outbound plugin failed on message 1 after the batch was sent',
       boom.stack,
@@ -300,10 +302,52 @@ describe('publishAtomic', () => {
       ]),
     ).resolves.toMatchObject({ count: 2 });
     expect(fake.jsPublished).toHaveLength(2);
+    await vi.waitFor(() => expect(error).toHaveBeenCalled());
     expect(error).toHaveBeenCalledExactlyOnceWith(
       expect.stringContaining('an outbound plugin failed on message 0 after the batch was sent'),
       expect.stringContaining('plugin timeout'),
     );
+  });
+
+  it('settles with the commit without waiting for a plugin that never settles after next()', async () => {
+    const hanging = plugin(async (m, next) => {
+      await next();
+      if (m.atomic?.index === 1) await new Promise<never>(() => {});
+    });
+    const { client, fake } = setup({ plugins: [hanging] });
+    await expect(client.publishAtomic(three)).resolves.toMatchObject({ count: 3 });
+    expect(fake.jsPublished).toHaveLength(3);
+  });
+
+  it('aborts when a message is not staged within the timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      // The plugin neither passes message 1 on nor settles.
+      const stuck = plugin(async (m, next) => {
+        if (m.atomic?.index === 1) return new Promise<never>(() => {});
+        await next();
+      });
+      const { client, fake, fakeJs } = setup({ plugins: [stuck] });
+      const startBatch = vi.spyOn(fakeJs, 'startBatch');
+      const result = client.publishAtomic(three, { timeout: 500 }).catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(499);
+      let settled = false;
+      void result.then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const err = await result;
+      expect(err).toBeInstanceOf(NatsAtomicPublishError);
+      expect((err as Error).message).toBe(
+        'Atomic publish of 3 messages to "o.a" aborted: not every message was staged within 500 ms',
+      );
+      expect(startBatch).not.toHaveBeenCalled();
+      expect(fake.jsPublished).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('rejects with the commit failure after sending, whatever the plugins throw', async () => {
@@ -321,6 +365,8 @@ describe('publishAtomic', () => {
     expect(err).toBeInstanceOf(NatsAtomicPublishError);
     expect((err as Error).message).toContain('commit refused');
     // The commit's own error, rethrown by plugins 0 and 1, is not logged as a plugin failure.
+    await vi.waitFor(() => expect(error).toHaveBeenCalled());
+    await delay(10);
     expect(error).toHaveBeenCalledExactlyOnceWith(
       expect.stringContaining('failed on message 2 after the batch was sent'),
       boom.stack,
