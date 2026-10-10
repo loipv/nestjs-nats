@@ -19,6 +19,7 @@ function setup(opts: { plugins?: NatsPlugin[]; servers?: string; jsTimeout?: num
   client: JetStreamClient;
   fake: FakeNatsConnection;
   fakeJs: FakeJs;
+  logger: ConnectionEntry['logger'];
 } {
   const fake = new FakeNatsConnection(jsonCodec());
   const fakeJs = fake.jetstream();
@@ -27,6 +28,7 @@ function setup(opts: { plugins?: NatsPlugin[]; servers?: string; jsTimeout?: num
     Object.assign(fakeJs, { getOptions: () => ({ timeout }) });
   }
   const store = new InMemoryIdempotencyStore();
+  const logger = createNatsLogger(false, 'test');
   const entry: ConnectionEntry = {
     name: 'default',
     options: {
@@ -35,13 +37,13 @@ function setup(opts: { plugins?: NatsPlugin[]; servers?: string; jsTimeout?: num
       ...(opts.plugins ? { plugins: opts.plugins } : {}),
     },
     nc: fake as unknown as NatsConnection,
-    logger: createNatsLogger(false, 'test'),
+    logger,
     js: () => fakeJs as unknown as NatsJetStreamClient,
     jsm: () => Promise.reject(new Error('no jsm')),
     idempotencyStore: () => store,
     onClose: () => () => {},
   };
-  return { client: new JetStreamClient(entry), fake, fakeJs };
+  return { client: new JetStreamClient(entry), fake, fakeJs, logger };
 }
 
 /**
@@ -250,6 +252,79 @@ describe('publishAtomic', () => {
     expect(cause).toBeInstanceOf(Error);
     expect(`${(err as Error).message} ${cause.message} ${cause.stack}`).not.toContain('s3cretpw');
     expect(fake.jsPublished).toEqual([]);
+  });
+
+  it('settles with the commit when a plugin fails after its message was sent', async () => {
+    const boom = new Error('audit failed');
+    const auditing = plugin(async (m, next) => {
+      await next();
+      if (m.atomic?.index === 1) throw boom;
+    });
+    const { client, fake, logger } = setup({ plugins: [auditing] });
+    const error = vi.spyOn(logger, 'error');
+    const ack = await client.publishAtomic(three);
+    expect(ack).toMatchObject({ count: 3, duplicate: false });
+    expect(fake.jsPublished.map((m) => m.subject)).toEqual(['o.a', 'o.b', 'o.c']);
+    expect(error).toHaveBeenCalledExactlyOnceWith(
+      'Atomic publish of 3 messages to "o.a": an outbound plugin failed on message 1 after the batch was sent',
+      boom.stack,
+    );
+  });
+
+  it('settles with the commit when a plugin gives up while the commit is in flight', async () => {
+    const racing = plugin(async (m, next) => {
+      if (m.atomic?.index !== 0) return next();
+      await Promise.race([
+        next(),
+        delay(10).then(() => {
+          throw new Error('plugin timeout');
+        }),
+      ]);
+    });
+    const { client, fake, fakeJs, logger } = setup({ plugins: [racing] });
+    const error = vi.spyOn(logger, 'error');
+    // The commit takes longer than the plugin is willing to wait.
+    const startBatch = fakeJs.startBatch.bind(fakeJs);
+    vi.spyOn(fakeJs, 'startBatch').mockImplementation(async (...args) => {
+      const batch = await startBatch(...args);
+      const commit: FakeBatch['commit'] = async (...commitArgs) => {
+        await delay(50);
+        return batch.commit(...commitArgs);
+      };
+      return { ...batch, commit };
+    });
+    await expect(
+      client.publishAtomic([
+        { subject: 'o', data: 0 },
+        { subject: 'o', data: 1 },
+      ]),
+    ).resolves.toMatchObject({ count: 2 });
+    expect(fake.jsPublished).toHaveLength(2);
+    expect(error).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining('an outbound plugin failed on message 0 after the batch was sent'),
+      expect.stringContaining('plugin timeout'),
+    );
+  });
+
+  it('rejects with the commit failure after sending, whatever the plugins throw', async () => {
+    const boom = new Error('audit failed');
+    // Plugins 0 and 1 rethrow the commit failure; plugin 2 swallows it and fails on its own.
+    const rethrowing = plugin(async (m, next) => {
+      if (m.atomic?.index !== 2) return next();
+      await next().catch(() => {});
+      throw boom;
+    });
+    const { client, fakeJs, logger } = setup({ plugins: [rethrowing] });
+    const error = vi.spyOn(logger, 'error');
+    spyBatch(fakeJs, () => Promise.reject(new Error('commit refused')));
+    const err = await client.publishAtomic(three).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(NatsAtomicPublishError);
+    expect((err as Error).message).toContain('commit refused');
+    // The commit's own error, rethrown by plugins 0 and 1, is not logged as a plugin failure.
+    expect(error).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining('failed on message 2 after the batch was sent'),
+      boom.stack,
+    );
   });
 
   it('publishes a single message without a batch', async () => {

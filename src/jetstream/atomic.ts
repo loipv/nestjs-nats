@@ -12,7 +12,7 @@ import {
   encodeOutgoing,
   outboundMiddlewares,
 } from '../pipeline/outbound.js';
-import { errorMessage } from '../util/errors.js';
+import { errorMessage, errorTrace } from '../util/errors.js';
 import { MSG_ID_HEADER, publishOutgoing } from './publish.js';
 
 /** The most messages the server accepts in one atomic batch. */
@@ -57,7 +57,8 @@ interface Staged {
  * Publishes `messages` as one atomic batch. Each message runs through the outbound plugins;
  * their terminal step only stages the encoded message and waits for the commit, sent once
  * every message is staged, so a plugin's `next()` settles with the commit. A plugin failing
- * before its message is staged aborts the batch: nothing is sent.
+ * before the batch is sent aborts it: nothing is sent. Once it is sent, the result is the
+ * commit's, and a plugin failing after that is logged.
  */
 export async function publishAtomic(
   entry: ConnectionEntry,
@@ -107,6 +108,8 @@ export async function publishAtomic(
   let stagedCount = 0;
   let sending: Promise<AtomicPublishAck> | undefined;
   let aborted = false;
+  /** Plugin failures after the batch was sent, which do not change its result. */
+  const late: { index: number; err: unknown }[] = [];
   let resolveCommit!: () => void;
   let rejectCommit!: (err: unknown) => void;
   const committed = new Promise<void>((resolve, reject) => {
@@ -163,6 +166,11 @@ export async function publishAtomic(
         throw err;
       },
       (err: unknown) => {
+        if (sending) {
+          // Sent: the commit decides the result, whatever the plugin did after next().
+          late.push({ index, err });
+          return;
+        }
         abort(abortError(`message ${index} failed in an outbound plugin`, err));
         throw err;
       },
@@ -170,7 +178,20 @@ export async function publishAtomic(
   );
   await Promise.all(chains);
   // Every message was staged, so the batch was sent (a plugin may have swallowed its error).
-  return sending as Promise<AtomicPublishAck>;
+  const sent = sending as Promise<AtomicPublishAck>;
+  const commitError = await sent.then(
+    () => undefined,
+    (err: unknown) => err,
+  );
+  for (const { index, err } of late) {
+    // A plugin rethrowing the commit's failure is not a failure of its own.
+    if (err === commitError) continue;
+    entry.logger.error(
+      `${what}: an outbound plugin failed on message ${index} after the batch was sent`,
+      errorTrace(err),
+    );
+  }
+  return sent;
 }
 
 function toAck(ack: PubAck | BatchAck, count: number, batch?: string): AtomicPublishAck {
