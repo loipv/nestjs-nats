@@ -5,7 +5,7 @@
 ## `NatsClient`: core NATS
 
 ```ts
-// Fire-and-forget. Errors are logged, never thrown.
+// Fire-and-forget. Delivery errors are logged, never thrown.
 client.publish('orders.created', { id: 42, total: 99.5 }, { headers: { 'x-tenant': 't1' } });
 
 // Request/reply. The default timeout is 5000 ms.
@@ -14,6 +14,8 @@ const found = await client.request<OrderDto>('orders.get', { id: 42 }, { timeout
 // Wait until pending publishes have been flushed to the server.
 await client.flush();
 ```
+
+Invalid arguments are the exception: a bad header name or value, or an invalid `cloudEvent`, makes `publish()` throw synchronously, before anything is sent.
 
 `request()` throws `NatsRequestError` with one of these `code` values:
 
@@ -42,7 +44,7 @@ class OrderPublisher {
 }
 ```
 
-`publish()` also accepts `expect` (optimistic concurrency, for example `{ lastSubjectSequence: 41 }`), `headers`, `codec` and `timeout`. `msgId` is sent as the `Nats-Msg-Id` header, so plugins can see it. To publish a [CloudEvent](./cloudevents.md), pass `cloudEvent` instead of building its headers. To publish many messages at once, see [Batch publishing](./batching.md#batch-publishing).
+`publish()` also accepts `expect` (optimistic concurrency, for example `{ lastSubjectSequence: 41 }`), `headers`, `codec` and `timeout`. `msgId` is sent as the `Nats-Msg-Id` header, so plugins can see it. Prefer `msgId` over passing the header yourself: a `Nats-Msg-Id` header in `headers` is still honoured (it also replaces the CloudEvent `id` default), and one with another case, such as `nats-msg-id`, is sent as `Nats-Msg-Id`, but `msgId` states the intent and wins if both are given. To publish a [CloudEvent](./cloudevents.md), pass `cloudEvent` instead of building its headers. To publish many messages at once, see [Batch publishing](./batching.md#batch-publishing).
 
 ## Codecs
 

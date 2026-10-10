@@ -52,3 +52,5 @@ When the connection is up, the result is `{ nats: { status: 'up', connection, se
 - `check failed: <error>`
 
 The indicator never throws for an unhealthy connection; only an invalid `rttTimeout` (a programming error) rejects, with a `NatsConfigError`. The result holds no credentials: the server URL is redacted and error text is scrubbed of the connection's password and token. The check can wait up to `rttTimeout` for the round trip plus up to `rttTimeout` for the JetStream check, so up to twice `rttTimeout` in the worst case. Set your probe's timeout above that.
+
+The indicator checks the connection (and JetStream), not individual handlers. If a consumer loop or a service endpoint ends unexpectedly, the library logs an error but does not restart it, and the indicator keeps reporting `up`: restart the process, for example from a liveness probe of your own.

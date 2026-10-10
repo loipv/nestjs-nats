@@ -125,7 +125,12 @@ These are tracked for upcoming releases:
 - **Messages at shutdown.** Messages the server delivers while shutdown is stopping a consumer, and messages queued behind a handler that never finishes, are redelivered only after the consumer's `ack_wait` (30 s by default).
 - **Duplicate error logs.** Handler errors that are not `HttpException`s are logged by Nest's `ExceptionsHandler` as well as by this library. `logger: false` silences only this library's logs.
 - **Publish order.** If an outbound plugin awaits something, consecutive `publish()` calls are not guaranteed to leave in call order.
-- **Undetected removals.** Stream and consumer sync compares only declared fields, so a field you remove from a declaration is not detected as drift.
+- **Undetected removals.** Stream and consumer sync compares only declared fields, so a field you remove from a declaration is not detected as drift. Declaring a field as `0` or `null` that the server stores differently (`duplicate_window: 0`, `max_deliver: 0`) is detected as drift on every boot: omit it instead. See [Streams](./docs/streams.md).
+- **Ended loops are not restarted.** If a consumer loop or a service endpoint ends unexpectedly, it is logged as an error but not restarted, and the health indicator keeps reporting up. Restart the process, for example from a liveness probe of your own. See [Health checks](./docs/health.md).
+- **Store errors fail a whole batch.** If the idempotency store cannot claim one key of a batch, every message of the batch is retried. See [Batching](./docs/batching.md).
+- **Unmatched requests get no reply.** A request that reaches a `@CloudEventRouter` with `unmatched: 'ack'` is acknowledged without a reply, so its requester times out. See [CloudEvents](./docs/cloudevents.md#receiving-cloudevents).
+- **Request subjects inside a stream.** A core request to a subject a stream captures usually gets the stream's PubAck, not the handler's reply. Keep request subjects outside every stream. See [Streams](./docs/streams.md).
+- **Test harness.** `dispatch()` ignores options that do not apply to the handler kind, the default subject can be a wildcard, and concurrent `dispatch()` calls can see each other's dead letters. See [Testing](./docs/testing.md).
 
 ## Changelog and releases
 
