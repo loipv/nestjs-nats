@@ -68,7 +68,7 @@ class OrderPlacer {
 }
 ```
 
-Each message is `{ subject, data?, headers?, codec?, cloudEvent? }`. The result is `{ stream, seq, count, batch, duplicate: false }`: `seq` is the sequence of the last message and `batch` is the batch id (unset for a single message). `opts` takes `timeout` (the wait for the commit's ack, and for the outbound plugins to pass every message on before the batch is sent, in ms, above `0`; default the JetStream client's) and `expect` (checked on the first message; there is no `lastMsgID`).
+Each message is `{ subject, data?, headers?, codec?, cloudEvent? }`. The result is `{ stream, seq, count, batch, duplicate: false }`: `seq` is the sequence of the last message and `batch` is the batch id (unset for a single message). `opts` takes `timeout` (the wait for the commit's ack, and for the outbound plugins to pass every message on before the batch is sent, in ms, above `0` and at most `2147483647`, which is 2^31-1: a larger or infinite value throws a `NatsConfigError`; default the JetStream client's) and `expect` (checked on the first message; there is no `lastMsgID`).
 
 - **Requirements.** NATS server 2.12 or later, and a stream declared with `allow_atomic: true` (see [Streams](./streams.md)). A stream without `allow_atomic` rejects the batch.
 - **Limits.** 1 to 1000 messages per batch. The server abandons a batch that is idle for 10 seconds, and allows 50 open batches per stream.

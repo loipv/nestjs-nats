@@ -105,6 +105,25 @@ describe('publishAtomic', () => {
     expect(js.published).toEqual([]);
   });
 
+  it.each([
+    ['2 ** 31', 2 ** 31],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['NaN', Number.NaN],
+  ])('rejects a timeout of %s, which overflows a timer', async (_label, timeout) => {
+    const js = createMockJetStreamClient();
+    const err = await js.publishAtomic(three, { timeout }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(NatsConfigError);
+    expect((err as Error).message).toContain(String(2 ** 31 - 1));
+    expect(js.published).toEqual([]);
+  });
+
+  it('accepts the largest timer delay as a timeout', async () => {
+    const js = createMockJetStreamClient();
+    await expect(js.publishAtomic(three, { timeout: 2 ** 31 - 1 })).resolves.toMatchObject({
+      count: 3,
+    });
+  });
+
   it('commits in array order', async () => {
     const js = createMockJetStreamClient();
     const ack = await js.publishAtomic(three);

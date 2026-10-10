@@ -1,5 +1,6 @@
 import type { BatchAck, PubAck, StreamExpectations } from '@nats-io/jetstream';
 import type { MsgHdrs } from '@nats-io/transport-node';
+import { MAX_TIMER_DELAY } from '../batch/collector.js';
 import type { CloudEventInit } from '../cloudevents/types.js';
 import type { Codec } from '../codec/codec.js';
 import type { NatsHeadersInit } from '../codec/headers.js';
@@ -31,7 +32,8 @@ export interface AtomicMessage {
 export interface AtomicPublishOptions {
   /**
    * Timeout (ms) of the commit's ack, and of staging the messages through the outbound plugins
-   * before the batch is sent. Defaults to the JetStream client's timeout; never 0.
+   * before the batch is sent. A number of ms in (0, 2^31-1] (a larger or infinite value would
+   * overflow the timers). Defaults to the JetStream client's timeout; never 0.
    */
   timeout?: number;
   /** Expectations checked on the first message (there is no `lastMsgID`). */
@@ -73,8 +75,9 @@ export async function publishAtomic(
   if (count < 1 || count > MAX_ATOMIC_MESSAGES) {
     throw new NatsConfigError(`publishAtomic needs 1 to ${MAX_ATOMIC_MESSAGES} messages`);
   }
-  if (opts.timeout !== undefined && !(opts.timeout > 0)) {
-    throw new NatsConfigError('publishAtomic timeout must be > 0');
+  // Node's setTimeout fires after ~1 ms above 2^31-1 (and for Infinity): staging would abort at once.
+  if (opts.timeout !== undefined && !(opts.timeout > 0 && opts.timeout <= MAX_TIMER_DELAY)) {
+    throw new NatsConfigError(`publishAtomic timeout must be in (0, ${MAX_TIMER_DELAY}] ms`);
   }
   const outgoing = messages.map((m, index) => {
     const message = createOutgoingMessage(entry, 'jetstream', m.subject, m.data, m);
