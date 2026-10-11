@@ -36,8 +36,9 @@ export type CloudEventRouterOptions = (
 ) & {
   /**
    * `'ack'` (default): acknowledge and skip (logged at debug level). `'term'`: terminate
-   * (JetStream) / drop (core). `'dlq'`: dead-letter; like `'term'`, with a warning, when
-   * no DLQ is configured. A request gets a 404 error reply unless this is `'ack'`.
+   * a JetStream message (pull or push), drop a core or ordered one. `'dlq'`: dead-letter;
+   * like `'term'`, with a warning, when no DLQ is configured. A request gets a 404 error
+   * reply whatever the policy.
    */
   unmatched?: 'ack' | 'term' | 'dlq';
   connection?: string;

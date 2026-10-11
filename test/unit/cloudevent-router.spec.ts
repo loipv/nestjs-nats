@@ -342,6 +342,32 @@ describe('@CloudEventRouter discovery', () => {
     );
   });
 
+  it('rejects queue unless the source is subscribe', async () => {
+    await expect(
+      routerDef({ consume: { stream: 'S', durable: 'd' }, queue: 'q' } as never),
+    ).rejects.toThrow(
+      new NatsConfigError('@CloudEventRouter R sets queue, which only applies to subscribe'),
+    );
+    const def = await routerDef({ subscribe: 'a.>', queue: 'q' });
+    expect(def).toMatchObject({ kind: 'subscribe', options: { queue: 'q' } });
+  });
+
+  it.each(['durable', 'config', 'ack', 'batch'])(
+    'rejects %s inside consumeOrdered',
+    async (key) => {
+      await expect(
+        routerDef({ consumeOrdered: { stream: 'S', [key]: {} } } as never),
+      ).rejects.toThrow(
+        new NatsConfigError(`@CloudEventRouter R: consumeOrdered does not support ${key}`),
+      );
+    },
+  );
+
+  it('ignores an undefined unsupported key inside consumeOrdered', async () => {
+    const def = await routerDef({ consumeOrdered: { stream: 'S', durable: undefined } } as never);
+    expect(def).toMatchObject({ kind: 'ordered' });
+  });
+
   it('rejects a deliverGroup that conflicts with config.deliver_group', async () => {
     const def = await routerDef({
       consumePush: { stream: 'S', durable: 'd', deliverGroup: 'g', config: { deliver_group: 'h' } },

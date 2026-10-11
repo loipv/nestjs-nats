@@ -106,7 +106,7 @@ An ephemeral consumer without acknowledgements: every instance receives every me
 
 There is no `durable`, `config`, `ack`, `concurrency` or `batch`, and an option that does not belong to `@ConsumeOrdered` fails startup with a `NatsConfigError`. `ctx.ack()`, `ctx.nak()`, `ctx.term()` and `ctx.working()` throw. A message the handler has not finished when the application shuts down is not redelivered unless the next start replays it: see [Pull, push and ordered consumers](./consumers.md#ordered-consumeordered).
 
-**`@CloudEventRouter` and the new consumers.** A [`@CloudEventRouter`](./cloudevents.md#receiving-cloudevents) supports `subscribe` and `consume` (pull) only. It cannot receive from a push or an ordered consumer.
+**`@CloudEventRouter` and the new consumers.** A [`@CloudEventRouter`](./cloudevents.md#receiving-cloudevents) can receive from `subscribe`, `consume`, `consumePush` or `consumeOrdered`.
 
 ## `@NatsService()` and `@ServiceEndpoint()`: NATS services
 

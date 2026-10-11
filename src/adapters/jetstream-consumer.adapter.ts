@@ -319,7 +319,7 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
       new NatsConfigError(message, cause === undefined ? undefined : { cause });
     if (!actual.deliver_subject) {
       throw fail(
-        `${name} is not a push consumer (it has no deliver_subject); use @Consume for a pull consumer`,
+        `${name} is not a push consumer (it has no deliver_subject); use a pull consumer (@Consume, or consume on a router)`,
       );
     }
     const actualGroup = actual.deliver_group || undefined;

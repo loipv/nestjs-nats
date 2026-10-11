@@ -178,7 +178,7 @@ export class OrderedConsumerAdapter implements HandlerAdapter {
     } catch (err) {
       if (err instanceof JetStreamApiError && err.code === JetStreamApiCodes.StreamNotFound) {
         throw new NatsConfigError(
-          `Stream "${stream}" not found for @ConsumeOrdered ${this.def.className}.${this.def.methodName}`,
+          `Stream "${stream}" not found for ${this.def.className}.${this.def.methodName}`,
           { cause: err },
         );
       }
