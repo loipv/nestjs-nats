@@ -1,3 +1,5 @@
+import type { RestartPolicy } from '../settlement/restart.js';
+
 /** Runtime binding between a discovered handler and its NATS message source. */
 export interface HandlerAdapter {
   /** Starts receiving messages; resolves once the subscription is registered with the server. */
@@ -19,3 +21,14 @@ export interface ForceStopResult {
   /** Pending in-process retries that were cancelled. */
   cancelledRetries: number;
 }
+
+export type HandlerState = 'running' | 'restarting' | 'failed';
+
+/** How an adapter restarts its intake; given by the lifecycle. */
+export interface RestartBinding {
+  policy: RestartPolicy | false;
+  /** Registers the adapter's handler under `label`; returns its state setter. */
+  track(label: string): (state: HandlerState) => void;
+}
+
+export const NO_RESTART: RestartBinding = { policy: false, track: () => () => {} };
