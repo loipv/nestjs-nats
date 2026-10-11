@@ -1,9 +1,11 @@
 import { AckPolicy, JetStreamApiCodes, JetStreamApiError } from '@nats-io/jetstream';
 import { describe, expect, it, vi } from 'vitest';
 import type { ConnectionEntry } from '../../src/connection/connection-registry.js';
+import { NatsConfigError } from '../../src/errors/errors.js';
 import { NatsStreamManager } from '../../src/jetstream/stream-manager.js';
 import {
   CONSUMER_IMMUTABLE_FIELDS,
+  CONSUMER_KEPT_FIELDS,
   declaredFields,
   diffConfig,
   parseSnapshot,
@@ -11,6 +13,7 @@ import {
   removedFields,
   SNAPSHOT_KEY,
   STREAM_IMMUTABLE_FIELDS,
+  STREAM_KEPT_FIELDS,
   snapshotOf,
   syncMetadata,
   withConsumerDefaults,
@@ -209,6 +212,7 @@ describe('NatsStreamManager.ensureConsumer create defaults', () => {
     };
     const entry = {
       name: 'default',
+      nc: { info: undefined },
       options: {},
       logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
       jsm: () => Promise.resolve({ consumers }),
@@ -226,7 +230,6 @@ describe('NatsStreamManager.ensureConsumer create defaults', () => {
       durable_name: 'D',
       ack_policy: AckPolicy.Explicit,
       max_deliver: -1,
-      metadata: { [SNAPSHOT_KEY]: 'max_ack_pending' },
     });
   });
 
@@ -236,7 +239,6 @@ describe('NatsStreamManager.ensureConsumer create defaults', () => {
         durable_name: 'D',
         ack_policy: AckPolicy.Explicit,
         deliver_subject: 'other',
-        metadata: { [SNAPSHOT_KEY]: '' },
       },
     });
     await sm.ensureConsumer('S', { durable_name: 'D' }, undefined, push);
@@ -272,6 +274,7 @@ describe('NatsStreamManager: a declared null is an omitted field', () => {
     };
     const entry = {
       name: 'default',
+      nc: { info: undefined },
       options: {},
       logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
       jsm: () => Promise.resolve({ streams, consumers }),
@@ -282,11 +285,7 @@ describe('NatsStreamManager: a declared null is an omitted field', () => {
   it('creates a stream without it', async () => {
     const { sm, streams } = manager();
     await sm.ensureStream({ name: 'S', subjects: ['a'], duplicate_window: null } as never);
-    expect(streams.add).toHaveBeenCalledExactlyOnceWith({
-      name: 'S',
-      subjects: ['a'],
-      metadata: { [SNAPSHOT_KEY]: 'subjects' },
-    });
+    expect(streams.add).toHaveBeenCalledExactlyOnceWith({ name: 'S', subjects: ['a'] });
   });
 
   it('does not count it as stream drift', async () => {
@@ -295,7 +294,6 @@ describe('NatsStreamManager: a declared null is an omitted field', () => {
         name: 'S',
         subjects: ['a'],
         duplicate_window: 120_000_000_000,
-        metadata: { [SNAPSHOT_KEY]: 'subjects' },
       },
     });
     const declared = { name: 'S', subjects: ['a'], duplicate_window: null } as never;
@@ -311,7 +309,6 @@ describe('NatsStreamManager: a declared null is an omitted field', () => {
       durable_name: 'D',
       ack_policy: AckPolicy.Explicit,
       max_deliver: -1,
-      metadata: { [SNAPSHOT_KEY]: '' },
     });
   });
 
@@ -321,7 +318,6 @@ describe('NatsStreamManager: a declared null is an omitted field', () => {
         durable_name: 'D',
         ack_policy: AckPolicy.Explicit,
         max_deliver: -1,
-        metadata: { [SNAPSHOT_KEY]: '' },
       },
     });
     const declared = { durable_name: 'D', max_deliver: null } as never;
@@ -358,7 +354,7 @@ describe('NatsStreamManager: a declared null is an omitted field', () => {
       expect(parseSnapshot({ [SNAPSHOT_KEY]: 'a,b' })).toEqual(['a', 'b']);
     });
 
-    it('removedFields splits reset and immutable, skipping fields absent on the server', () =>
+    it('removedFields splits reset and kept, skipping fields absent on the server', () =>
       expect(
         removedFields(
           { max_age: 5, storage: 'file', subjects: ['a'] },
@@ -366,13 +362,33 @@ describe('NatsStreamManager: a declared null is an omitted field', () => {
           ['subjects'],
           STREAM_IMMUTABLE_FIELDS,
         ),
-      ).toEqual({ reset: ['max_age'], immutable: ['storage'] }));
+      ).toEqual({ reset: ['max_age'], kept: ['storage'] }));
 
     it('removedFields is empty without a previous snapshot', () =>
       expect(removedFields({ max_age: 5 }, undefined, [], STREAM_IMMUTABLE_FIELDS)).toEqual({
         reset: [],
-        immutable: [],
+        kept: [],
       }));
+
+    it('lists the fields the server refuses to reset', () => {
+      expect(STREAM_KEPT_FIELDS).toEqual([
+        ...STREAM_IMMUTABLE_FIELDS,
+        'deny_delete',
+        'deny_purge',
+        'allow_msg_ttl',
+        'sealed',
+        'mirror',
+        'allow_msg_counter',
+        'allow_msg_schedules',
+      ]);
+      expect(CONSUMER_KEPT_FIELDS).toEqual([
+        ...CONSUMER_IMMUTABLE_FIELDS,
+        'deliver_subject',
+        'flow_control',
+        'idle_heartbeat',
+        'max_waiting',
+      ]);
+    });
 
     it('syncMetadata replaces declared metadata and keeps current otherwise', () => {
       const s = 'a,b';
@@ -397,6 +413,7 @@ describe('NatsStreamManager: a declared null is an omitted field', () => {
           { metadata: { '_nats.ver': 'x', [SNAPSHOT_KEY]: 'a', team: 'x' } },
           { metadata: { team: 'x' } },
           STREAM_IMMUTABLE_FIELDS,
+          true,
         ),
       ).toEqual([]);
       expect(
@@ -411,6 +428,7 @@ describe('NatsStreamManager: a declared null is an omitted field', () => {
           },
           { metadata: { team: 'x' } },
           STREAM_IMMUTABLE_FIELDS,
+          true,
         ),
       ).toEqual([
         {
@@ -421,6 +439,15 @@ describe('NatsStreamManager: a declared null is an omitted field', () => {
         },
       ]);
     });
+
+    it('diffConfig compares declared metadata as a subset unless told to compare it exactly', () =>
+      expect(
+        diffConfig(
+          { metadata: { '_nats.ver': 'x', [SNAPSHOT_KEY]: 'a', team: 'x', old: '1' } },
+          { metadata: { team: 'x' } },
+          STREAM_IMMUTABLE_FIELDS,
+        ),
+      ).toEqual([]));
   });
 });
 
@@ -430,11 +457,21 @@ describe('NatsStreamManager: fields removed from a declaration', () => {
   /**
    * A fake `jsm` that keeps the configs it is given. `add` and `update` merge the sent config
    * like nats.js and the server do (an `undefined` field is dropped) and echo the result back;
-   * with `keepsMetadata: false`, the server drops `metadata` like one older than 2.10.
+   * with `keepsMetadata: false`, the server drops `metadata` like one older than 2.10. The
+   * connection opts in with `removedFields: 'reset'` unless told otherwise.
    */
   function manager(
     init: { stream?: Config; consumer?: Config } = {},
-    { keepsMetadata = true, version }: { keepsMetadata?: boolean; version?: string } = {},
+    {
+      keepsMetadata = true,
+      version,
+      removedFields = 'reset',
+    }: {
+      keepsMetadata?: boolean;
+      version?: string;
+      /** `'default'`: the option is not set. */
+      removedFields?: 'reset' | 'ignore' | 'default';
+    } = {},
   ) {
     const state: { stream?: Config; consumer?: Config } = { ...init };
     const notFound = (err_code: number) =>
@@ -478,7 +515,7 @@ describe('NatsStreamManager: fields removed from a declaration', () => {
     const entry = {
       name: 'main',
       nc: { info: version === undefined ? undefined : { version } },
-      options: {},
+      options: removedFields === 'default' ? {} : { jetstream: { removedFields } },
       logger,
       jsm: () => Promise.resolve({ streams, consumers }),
     } as unknown as ConnectionEntry;
@@ -561,6 +598,64 @@ describe('NatsStreamManager: fields removed from a declaration', () => {
       expect(updateOf(streams.update)).not.toHaveProperty('storage');
       expect(logger.log).not.toHaveBeenCalled();
     });
+
+    it.each([
+      ['deny_delete', true],
+      ['deny_purge', true],
+      ['allow_msg_ttl', true],
+      ['sealed', true],
+      ['mirror', { name: 'M' }],
+      ['allow_msg_counter', true],
+      ['allow_msg_schedules', true],
+    ])('warns and keeps a removed %s, which the server cannot reset', async (field, value) => {
+      const { sm, streams, logger } = manager({
+        stream: { name: 'S', subjects: ['a'], [field]: value, metadata: snap(`${field},subjects`) },
+      });
+      await sm.ensureStream({ name: 'S', subjects: ['a'] });
+      expect(logger.warn).toHaveBeenCalledExactlyOnceWith(
+        `JetStream stream "S" keeps ${field} ${JSON.stringify(value)}: it cannot be changed (removed from the declaration)`,
+      );
+      expect(updateOf(streams.update)).not.toHaveProperty(field);
+      expect(logger.log).not.toHaveBeenCalled();
+    });
+
+    it('logs no reset when the update is rejected', async () => {
+      const { sm, streams, logger } = manager({
+        stream: { name: 'S', subjects: ['a'], max_age: 5, metadata: snap('max_age,subjects') },
+      });
+      streams.update.mockRejectedValueOnce(new Error('rejected'));
+      await expect(sm.ensureStream({ name: 'S', subjects: ['a'] })).rejects.toThrow('rejected');
+      expect(logger.log).not.toHaveBeenCalled();
+    });
+
+    it('only updates a stale snapshot when a field was added', async () => {
+      const { sm, streams, logger } = manager({
+        stream: { name: 'S', subjects: ['a'], max_age: 5, metadata: snap('subjects') },
+      });
+      await sm.ensureStream({ name: 'S', subjects: ['a'], max_age: 5 });
+      expect(streams.update).toHaveBeenCalledExactlyOnceWith('S', {
+        subjects: ['a'],
+        max_age: 5,
+        metadata: snap('max_age,subjects'),
+      });
+      expect(logger.log).not.toHaveBeenCalled();
+      expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    it.each(['_nats.level', SNAPSHOT_KEY])(
+      'rejects a declared metadata key %s before contacting the server',
+      async (key) => {
+        const { sm, streams } = manager();
+        await expect(
+          sm.ensureStream({ name: 'S', subjects: ['a'], metadata: { [key]: '1' } }),
+        ).rejects.toThrow(
+          new NatsConfigError(
+            `JetStream stream "S" declares metadata key "${key}", which the library or the server sets: declare no "_nats." key nor "${SNAPSHOT_KEY}"`,
+          ),
+        );
+        expect(streams.info).not.toHaveBeenCalled();
+      },
+    );
 
     it('does not update when nothing changed', async () => {
       const { sm, streams } = manager();
@@ -718,6 +813,127 @@ describe('NatsStreamManager: fields removed from a declaration', () => {
       expect(updateOf(consumers.update)).not.toHaveProperty('deliver_policy');
     });
 
+    it.each([
+      ['deliver_subject', 'push.S'],
+      ['flow_control', true],
+      ['idle_heartbeat', 5_000_000_000],
+      ['max_waiting', 100],
+    ])('warns and keeps a removed %s, which the server cannot reset', async (field, value) => {
+      const { sm, consumers, logger } = manager({
+        consumer: {
+          durable_name: 'D',
+          ack_policy: AckPolicy.Explicit,
+          [field]: value,
+          metadata: snap(field),
+        },
+      });
+      await sm.ensureConsumer('S', { durable_name: 'D' });
+      expect(logger.warn).toHaveBeenCalledExactlyOnceWith(
+        `JetStream consumer "S/D" keeps ${field} ${JSON.stringify(value)}: it cannot be changed (removed from the declaration)`,
+      );
+      expect(updateOf(consumers.update)).not.toHaveProperty(field);
+    });
+
+    it('leaves the consumer name out of the snapshot', async () => {
+      const { sm, consumers } = manager();
+      await sm.ensureConsumer('S', { durable_name: 'D', name: 'D', max_ack_pending: 3 });
+      expect(updateOf(consumers.add).metadata).toEqual(snap('max_ack_pending'));
+    });
+
+    it('logs no reset when the update is rejected', async () => {
+      const { sm, consumers, logger } = manager({
+        consumer: {
+          durable_name: 'D',
+          ack_policy: AckPolicy.Explicit,
+          max_ack_pending: 3,
+          metadata: snap('max_ack_pending'),
+        },
+      });
+      consumers.update.mockRejectedValueOnce(new Error('rejected'));
+      await expect(sm.ensureConsumer('S', { durable_name: 'D' })).rejects.toThrow('rejected');
+      expect(logger.log).not.toHaveBeenCalled();
+    });
+
+    it('rejects a declared reserved metadata key', async () => {
+      const { sm, consumers } = manager();
+      await expect(
+        sm.ensureConsumer('S', { durable_name: 'D', metadata: { '_nats.x': '1' } }),
+      ).rejects.toThrow(
+        'JetStream consumer "S/D" declares metadata key "_nats.x", which the library or the server sets',
+      );
+      expect(consumers.info).not.toHaveBeenCalled();
+    });
+
+    it('sends the library default of a removed push field, unless the server has it', async () => {
+      const { sm, consumers, logger, state } = manager({
+        consumer: {
+          durable_name: 'D',
+          ack_policy: AckPolicy.Explicit,
+          deliver_subject: '_nats.push.S.D',
+          flow_control: true,
+          idle_heartbeat: 5_000_000_000,
+          max_ack_pending: 7,
+          metadata: snap('max_ack_pending'),
+        },
+      });
+      const push = pushConsumerDefaults({ stream: 'S', durable: 'D', maxAckPending: 4 });
+      await sm.ensureConsumer('S', { durable_name: 'D' }, undefined, push);
+      expect(updateOf(consumers.update).max_ack_pending).toBe(4);
+      expect(state.consumer?.max_ack_pending).toBe(4);
+      expect(logger.log).toHaveBeenCalledExactlyOnceWith(
+        'JetStream consumer "S/D": reset max_ack_pending to the library default (removed from the declaration)',
+      );
+      expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    it('keeps deliver_group moved from config to the deliverGroup option', async () => {
+      const { sm, consumers, logger, state } = manager({
+        consumer: {
+          durable_name: 'D',
+          ack_policy: AckPolicy.Explicit,
+          deliver_subject: '_nats.push.S.D',
+          deliver_group: 'g',
+          metadata: snap('deliver_group'),
+        },
+      });
+      const push = pushConsumerDefaults({
+        stream: 'S',
+        durable: 'D',
+        deliverGroup: 'g',
+        maxAckPending: 4,
+      });
+      await sm.ensureConsumer('S', { durable_name: 'D' }, undefined, push);
+      const sent = updateOf(consumers.update);
+      expect(Object.entries(sent).filter(([, v]) => v === undefined)).toEqual([]);
+      expect(sent.metadata).toEqual(snap(''));
+      expect(state.consumer?.deliver_group).toBe('g');
+      expect(logger.log).not.toHaveBeenCalled();
+      await expect(
+        sm.ensureConsumer('S', { durable_name: 'D' }, 'verify', push),
+      ).resolves.toBeDefined();
+    });
+
+    it('reports a removed push field in verify only when it differs from the library default', async () => {
+      const { sm } = manager({
+        consumer: {
+          durable_name: 'D',
+          ack_policy: AckPolicy.Explicit,
+          deliver_subject: '_nats.push.S.D',
+          deliver_group: 'h',
+          metadata: snap('deliver_group'),
+        },
+      });
+      const push = pushConsumerDefaults({
+        stream: 'S',
+        durable: 'D',
+        deliverGroup: 'g',
+        maxAckPending: 4,
+      });
+      await expect(sm.ensureConsumer('S', { durable_name: 'D' }, 'verify', push)).rejects.toThrow(
+        'JetStream consumer "S/D" differs from its declaration: deliver_group (removed from the declaration, current: "h")',
+      );
+    });
+
     it('reports a removed field in verify', async () => {
       const { sm, consumers } = manager({
         consumer: {
@@ -747,6 +963,77 @@ describe('NatsStreamManager: fields removed from a declaration', () => {
       await sm.ensureConsumer('S', declared, undefined, push);
       expect(consumers.update).not.toHaveBeenCalled();
       expect(logger.log).not.toHaveBeenCalled();
+    });
+  });
+
+  describe.each(['default', 'ignore'] as const)('removedFields %s', (removedFields) => {
+    const opts = { removedFields };
+
+    it('writes no snapshot when it creates', async () => {
+      const { sm, streams, consumers } = manager({}, opts);
+      await sm.ensureStream({ name: 'S', subjects: ['a'], metadata: { team: 'x' } });
+      expect(streams.add).toHaveBeenCalledExactlyOnceWith({
+        name: 'S',
+        subjects: ['a'],
+        metadata: { team: 'x' },
+      });
+      await sm.ensureConsumer('S', { durable_name: 'D' });
+      expect(consumers.add).toHaveBeenCalledExactlyOnceWith('S', {
+        durable_name: 'D',
+        ack_policy: AckPolicy.Explicit,
+        max_deliver: -1,
+      });
+    });
+
+    it('never resets a removed field, nor reports it in verify', async () => {
+      const { sm, streams, consumers, logger } = manager(
+        {
+          stream: { name: 'S', subjects: ['a'], max_age: 5, metadata: snap('max_age,subjects') },
+          consumer: {
+            durable_name: 'D',
+            ack_policy: AckPolicy.Explicit,
+            max_ack_pending: 3,
+            metadata: snap('max_ack_pending'),
+          },
+        },
+        opts,
+      );
+      await sm.ensureStream({ name: 'S', subjects: ['a'] });
+      await sm.ensureConsumer('S', { durable_name: 'D' });
+      await expect(
+        sm.ensureStream({ name: 'S', subjects: ['a'] }, 'verify'),
+      ).resolves.toBeDefined();
+      await expect(sm.ensureConsumer('S', { durable_name: 'D' }, 'verify')).resolves.toBeDefined();
+      expect(streams.update).not.toHaveBeenCalled();
+      expect(consumers.update).not.toHaveBeenCalled();
+      expect(logger.warn).not.toHaveBeenCalled();
+      expect(logger.log).not.toHaveBeenCalled();
+    });
+
+    it('does not warn about a server older than 2.10', async () => {
+      const { sm, logger } = manager({}, { ...opts, version: '2.9.0' });
+      await sm.ensureStream({ name: 'S', subjects: ['a'] });
+      expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    it('accepts any declared metadata key, as before', async () => {
+      const { sm, streams } = manager({}, opts);
+      await sm.ensureStream({ name: 'S', metadata: { '_nats.x': '1', [SNAPSHOT_KEY]: 'a' } });
+      expect(streams.add).toHaveBeenCalledOnce();
+    });
+
+    it('compares declared metadata as a subset and sends it as declared', async () => {
+      const { sm, streams } = manager(
+        { stream: { name: 'S', subjects: ['a'], metadata: { team: 'x', other: 'y' } } },
+        opts,
+      );
+      await sm.ensureStream({ name: 'S', subjects: ['a'], metadata: { team: 'x' } });
+      expect(streams.update).not.toHaveBeenCalled();
+      await sm.ensureStream({ name: 'S', subjects: ['a'], metadata: { team: 'z' } });
+      expect(streams.update).toHaveBeenCalledExactlyOnceWith('S', {
+        subjects: ['a'],
+        metadata: { team: 'z' },
+      });
     });
   });
 });

@@ -12,6 +12,12 @@ type WithRequired<T, K extends keyof T> = T & { [P in K]-?: T[P] };
 
 export type StreamSyncMode = 'create-or-update' | 'create-only' | 'verify' | 'none';
 
+/**
+ * What stream/consumer sync does with a field removed from a declaration: `'reset'` it to the
+ * server default (and report it in `verify`), or `'ignore'` it and keep the server's value.
+ */
+export type RemovedFieldsMode = 'reset' | 'ignore';
+
 export type StreamDeclaration = WithRequired<Partial<StreamConfig>, 'name'>;
 
 export interface ConsumerDeclaration {
@@ -22,7 +28,18 @@ export interface ConsumerDeclaration {
 export interface NatsModuleOptions {
   name?: string;
   connection: NodeConnectionOptions;
-  jetstream?: { options?: JetStreamOptions; sync?: StreamSyncMode };
+  jetstream?: {
+    options?: JetStreamOptions;
+    sync?: StreamSyncMode;
+    /**
+     * `'reset'` remembers the declared fields of each stream and consumer in its metadata
+     * (`nestjs-nats.declared`, NATS server 2.10 or later), so that `create-or-update` resets a
+     * field removed from a declaration to the server default and `verify` reports it. Only
+     * for an application that is the only one declaring its streams and consumers. Default
+     * `'ignore'`: a removed field keeps its value on the server.
+     */
+    removedFields?: RemovedFieldsMode;
+  };
   streams?: StreamDeclaration[];
   consumers?: ConsumerDeclaration[];
   codec?: Codec;
