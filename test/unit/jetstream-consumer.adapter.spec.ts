@@ -1224,6 +1224,26 @@ describe('JetStreamConsumerAdapter', () => {
       return { ...ctx, fakes, states };
     }
 
+    it.each([
+      ['pull', policy, { max_messages: 1, abort_on_missing_resource: true }],
+      ['pull', false, { max_messages: 1 }],
+      ['push', policy, { abort_on_missing_resource: true }],
+      ['push', false, undefined],
+    ] as const)(
+      '%s consumer with restart %o consumes with %o',
+      async (delivery, restartPolicy, expected) => {
+        const { adapter, consume } = setup(() => Promise.resolve(), {
+          delivery,
+          restart: { policy: restartPolicy, track: () => () => {} },
+        });
+        await adapter.start();
+        if (expected === undefined) expect(consume).toHaveBeenCalledExactlyOnceWith();
+        else expect(consume).toHaveBeenCalledExactlyOnceWith(expected);
+        await adapter.stop();
+        await adapter.idle();
+      },
+    );
+
     it('reopens a pull consumer whose messages iterator fails, and keeps heartbeating held messages', async () => {
       let release!: () => void;
       const gate = new Promise<void>((resolve) => (release = resolve));
