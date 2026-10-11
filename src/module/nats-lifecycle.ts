@@ -23,6 +23,7 @@ import { validateHandlers } from '../discovery/handler-validator.js';
 import { NatsConfigError } from '../errors/errors.js';
 import type { IdempotencyStore } from '../idempotency/store.js';
 import { NatsStreamManager } from '../jetstream/stream-manager.js';
+import { rejectReservedMetadata } from '../jetstream/stream-sync.js';
 import { type RestartPolicy, resolveRestartPolicy } from '../settlement/restart.js';
 import { errorMessage, errorTrace } from '../util/errors.js';
 import { settlesWithin } from '../util/timeout.js';
@@ -57,7 +58,8 @@ export class NatsLifecycle
   private adapters: ManagedAdapter[] = [];
   /**
    * The consumers declared in the module options of each connection that resets removed
-   * fields (`consumerKey`): a handler must not declare them again.
+   * fields (`consumerKey`), filled by `collectDeclarations`: a handler must not declare them
+   * again.
    */
   private readonly moduleConsumers = new Map<string, Set<string>>();
   /** Stores already closed: a failed bootstrap followed by `app.close()` shuts down twice. */
@@ -72,6 +74,8 @@ export class NatsLifecycle
   async onModuleInit(): Promise<void> {
     try {
       const declarations = this.collectDeclarations();
+      // Before anything is written: a failed boot must leave the server as it was.
+      if (this.moduleConsumers.size > 0) this.checkHandlerConsumers(this.explorer.explore());
       for (const [name, { streams, consumers }] of declarations) {
         const sm = new NatsStreamManager(this.manager.get(name));
         for (const stream of streams) await sm.ensureStream(stream);
@@ -88,7 +92,6 @@ export class NatsLifecycle
     try {
       const defs = this.explorer.explore();
       validateHandlers(defs, this.manager);
-      this.rejectConsumersDeclaredTwice(defs);
       for (const managed of this.createAdapters(defs)) {
         this.adapters.push(managed);
         await managed.adapter.start();
@@ -317,18 +320,23 @@ export class NatsLifecycle
   }
 
   /**
-   * With removed fields reset, a consumer declared in the module options and by a handler's
-   * `config` would reset the other's fields on every boot: rejected before any handler starts.
+   * The consumers handlers declare with `config` on connections that reset removed fields,
+   * checked before any sync. One also declared in the module options would reset the other
+   * declaration's fields on every boot; a reserved metadata key would fail once the handler
+   * starts, after other writes.
    */
-  private rejectConsumersDeclaredTwice(defs: HandlerDefinition[]): void {
+  private checkHandlerConsumers(defs: HandlerDefinition[]): void {
     for (const def of defs) {
       if (def.kind !== 'consume' || def.options.config === undefined) continue;
-      const { stream, durable } = def.options;
-      const key = consumerKey({ stream, config: { durable_name: durable } });
-      if (!this.moduleConsumers.get(def.connection)?.has(key)) continue;
-      throw new NatsConfigError(
-        `JetStream consumer "${stream}/${durable}" is declared both in the module options and by ${def.className}.${def.methodName}; declare it in one place`,
-      );
+      const declared = this.moduleConsumers.get(def.connection);
+      if (!declared) continue;
+      const { stream, durable, config } = def.options;
+      if (declared.has(consumerKey({ stream, config: { durable_name: durable } }))) {
+        throw new NatsConfigError(
+          `JetStream consumer "${stream}/${durable}" is declared both in the module options and by ${def.className}.${def.methodName}; declare it in one place`,
+        );
+      }
+      rejectReservedMetadata(`consumer "${stream}/${durable}"`, config.metadata);
     }
   }
 }

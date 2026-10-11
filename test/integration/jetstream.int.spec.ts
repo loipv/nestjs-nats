@@ -1,9 +1,10 @@
-import { AckPolicy, StorageType } from '@nats-io/jetstream';
+import { AckPolicy, jetstreamManager, StorageType } from '@nats-io/jetstream';
 import { connect } from '@nats-io/transport-node';
-import type { LoggerService, ModuleMetadata } from '@nestjs/common';
+import { Controller, type LoggerService, type ModuleMetadata } from '@nestjs/common';
 import type { TestingModule } from '@nestjs/testing';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { NatsConnectionManager } from '../../src/connection/connection-manager.js';
+import { Consume } from '../../src/decorators/handler.decorators.js';
 import { NatsConfigError } from '../../src/errors/errors.js';
 import type { JetStreamClient } from '../../src/jetstream/jetstream-client.js';
 import type { NatsStreamManager } from '../../src/jetstream/stream-manager.js';
@@ -648,6 +649,37 @@ describe('JetStream removed fields', () => {
       expect(config.metadata?.['nestjs-nats.declared']).toBe('max_age,subjects');
     } finally {
       await app.close();
+    }
+  });
+
+  it('rejects a durable declared in the module options and by a controller before writing anything', async () => {
+    @Controller()
+    class DuplicateConsumer {
+      @Consume({ stream: 'RD', durable: 'd', config: { max_deliver: 3 } })
+      handle() {}
+    }
+    await expect(
+      createTestApp({
+        imports: [
+          NatsModule.forRoot({
+            connection: { servers: url },
+            logger: false,
+            jetstream: { removedFields: 'reset' },
+            streams: [{ name: 'RD', subjects: ['rd.>'] }],
+            consumers: [{ stream: 'RD', config: { durable_name: 'd' } }],
+          }),
+        ],
+        controllers: [DuplicateConsumer],
+      }),
+    ).rejects.toThrow(
+      'JetStream consumer "RD/d" is declared both in the module options and by DuplicateConsumer.handle; declare it in one place',
+    );
+    const nc = await connect({ servers: url });
+    try {
+      const jsm = await jetstreamManager(nc);
+      await expect(jsm.streams.info('RD')).rejects.toThrow(/stream not found/);
+    } finally {
+      await nc.close();
     }
   });
 

@@ -1,3 +1,4 @@
+import { JetStreamApiCodes, JetStreamApiError } from '@nats-io/jetstream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ForceStopResult, HandlerAdapter, HandlerState } from '../../src/adapters/adapter.js';
 import { CoreSubscriptionAdapter } from '../../src/adapters/core-subscription.adapter.js';
@@ -539,57 +540,92 @@ describe('NatsLifecycle declarations', () => {
     ]);
   });
 
-  describe('a durable declared both in the module options and by a handler', () => {
-    function consumeDef(config?: object) {
+  describe('consumers declared by handlers', () => {
+    function consumeDef(durable: string, config?: object) {
       return {
         kind: 'consume',
         delivery: 'pull',
         connection: 'default',
         className: 'Svc',
         methodName: 'handle',
-        options: { stream: 'S', durable: 'D', ...(config ? { config } : {}) },
+        options: { stream: 'S', durable, ...(config ? { config } : {}) },
         wrapper: { isDependencyTreeStatic: () => true, isTransient: false },
       };
     }
 
-    async function boot(options: ConnectionOptions, def: object) {
-      syncSpies();
+    /** A connection whose server has nothing yet, declaring stream S and consumer S/D. */
+    function setup(options: ConnectionOptions, def: object) {
+      const notFound = (err_code: number) =>
+        Promise.reject(new JetStreamApiError({ code: 404, err_code, description: 'not found' }));
+      const echo = vi.fn((...args: unknown[]) => Promise.resolve({ config: args.at(-1) }));
+      const jsm = {
+        streams: {
+          info: vi.fn(() => notFound(JetStreamApiCodes.StreamNotFound)),
+          add: echo,
+          update: echo,
+        },
+        consumers: {
+          info: vi.fn(() => notFound(JetStreamApiCodes.ConsumerNotFound)),
+          add: echo,
+          update: echo,
+        },
+      };
       const start = vi.spyOn(JetStreamConsumerAdapter.prototype, 'start').mockResolvedValue();
-      const { manager } = fakeManager({
+      const { manager, entries } = fakeManager({
         default: {
           ...options,
           streams: [{ name: 'S' }],
           consumers: [{ stream: 'S', config: { durable_name: 'D' } }],
         },
       });
+      Object.assign(entries.get('default') as object, {
+        nc: { info: undefined },
+        jsm: () => Promise.resolve(jsm),
+      });
+      const explorer = { explore: vi.fn(() => [def]) };
       const lifecycle = new NatsLifecycle(
         manager as unknown as ConnectionRegistry,
         { getProviders: () => [] } as never,
-        { explore: () => [def] } as never,
+        explorer as never,
       );
-      await lifecycle.onModuleInit();
-      return { start, bootstrap: lifecycle.onApplicationBootstrap() };
+      return { lifecycle, writes: echo, start, explorer };
     }
 
-    it("is rejected with removedFields 'reset', before any handler starts", async () => {
-      const { start, bootstrap } = await boot(reset, consumeDef({ max_deliver: 3 }));
-      await expect(bootstrap).rejects.toThrow(
+    it("rejects a durable also declared in the module options, before any sync, with removedFields 'reset'", async () => {
+      const { lifecycle, writes } = setup(reset, consumeDef('D', { max_deliver: 3 }));
+      await expect(lifecycle.onModuleInit()).rejects.toThrow(
         new NatsConfigError(
           'JetStream consumer "S/D" is declared both in the module options and by Svc.handle; declare it in one place',
         ),
       );
-      expect(start).not.toHaveBeenCalled();
+      expect(writes).not.toHaveBeenCalled();
     });
 
-    it('is accepted when the handler declares no config', async () => {
-      const { start, bootstrap } = await boot(reset, consumeDef());
-      await bootstrap;
+    it("rejects a reserved metadata key in a handler's config, before any sync, with removedFields 'reset'", async () => {
+      const { lifecycle, writes } = setup(reset, consumeDef('E', { metadata: { '_nats.x': '1' } }));
+      await expect(lifecycle.onModuleInit()).rejects.toThrow(
+        new NatsConfigError(
+          'JetStream consumer "S/E" declares metadata key "_nats.x", which the library or the server sets: declare no "_nats." key nor "nestjs-nats.declared"',
+        ),
+      );
+      expect(writes).not.toHaveBeenCalled();
+    });
+
+    it('accepts a durable also declared in the module options when the handler declares no config', async () => {
+      const { lifecycle, start } = setup(reset, consumeDef('D'));
+      await lifecycle.onModuleInit();
+      await lifecycle.onApplicationBootstrap();
       expect(start).toHaveBeenCalledOnce();
     });
 
-    it("is accepted with removedFields 'ignore'", async () => {
-      const { start, bootstrap } = await boot({}, consumeDef({ max_deliver: 3 }));
-      await bootstrap;
+    it("checks nothing up front with removedFields 'ignore'", async () => {
+      const { lifecycle, start, explorer } = setup(
+        {},
+        consumeDef('D', { max_deliver: 3, metadata: { '_nats.x': '1' } }),
+      );
+      await lifecycle.onModuleInit();
+      expect(explorer.explore).not.toHaveBeenCalled();
+      await lifecycle.onApplicationBootstrap();
       expect(start).toHaveBeenCalledOnce();
     });
   });

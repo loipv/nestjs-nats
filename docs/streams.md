@@ -68,6 +68,7 @@ NatsModule.forRoot({
 - **Kept fields.** A field that cannot be changed, or that the server refuses to turn off, keeps its value when removed, and the library logs a warning, `keeps <field> <value>: it cannot be changed`:
   - streams: `storage`, `retention`, `deny_delete`, `deny_purge`, `allow_msg_ttl`, `sealed`, `allow_msg_counter`, `allow_msg_schedules`, and `mirror`, whose removal would promote the mirror for good;
   - consumers: `ack_policy`, `deliver_policy`, `opt_start_seq`, `opt_start_time`, `replay_policy`, `deliver_subject`, `flow_control`, `idle_heartbeat` and `max_waiting`.
+- **`priority_groups` and `priority_policy`** must be removed from a consumer declaration together: the server refuses to remove only one of them, and the update fails.
 - **`verify`** reports each removed field, kept ones included, as drift, as `<field> (removed from the declaration, current: <value>)`, and writes nothing.
 - **`create-only`** writes the list only when it creates the stream or consumer, and never resets anything.
 - **The first run resets no removed fields.** A stream or consumer that has no list yet, because it was created before `'reset'` was turned on or elsewhere, only gets its list written. Fields removed before that run are not detected.
