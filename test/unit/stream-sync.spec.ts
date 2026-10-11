@@ -434,7 +434,7 @@ describe('NatsStreamManager: fields removed from a declaration', () => {
    */
   function manager(
     init: { stream?: Config; consumer?: Config } = {},
-    { keepsMetadata = true }: { keepsMetadata?: boolean } = {},
+    { keepsMetadata = true, version }: { keepsMetadata?: boolean; version?: string } = {},
   ) {
     const state: { stream?: Config; consumer?: Config } = { ...init };
     const notFound = (err_code: number) =>
@@ -477,6 +477,7 @@ describe('NatsStreamManager: fields removed from a declaration', () => {
     const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const entry = {
       name: 'main',
+      nc: { info: version === undefined ? undefined : { version } },
       options: {},
       logger,
       jsm: () => Promise.resolve({ streams, consumers }),
@@ -625,6 +626,47 @@ describe('NatsStreamManager: fields removed from a declaration', () => {
       expect(streams.update).toHaveBeenCalledOnce();
       expect(logger.warn).toHaveBeenCalledOnce();
     });
+
+    it('skips the snapshot on a server older than 2.10', async () => {
+      const { sm, entry, streams, consumers, logger } = manager({}, { version: '2.9.25' });
+      const declared = { name: 'S', subjects: ['a'] };
+      await sm.ensureStream(declared);
+      expect(streams.add).toHaveBeenCalledExactlyOnceWith({ name: 'S', subjects: ['a'] });
+      await new NatsStreamManager(entry).ensureStream(declared);
+      expect(streams.update).not.toHaveBeenCalled();
+      await sm.ensureConsumer('S', { durable_name: 'D' });
+      expect(consumers.add).toHaveBeenCalledExactlyOnceWith('S', {
+        durable_name: 'D',
+        ack_policy: AckPolicy.Explicit,
+        max_deliver: -1,
+      });
+      expect(logger.warn).toHaveBeenCalledExactlyOnceWith(
+        'JetStream on connection "main" does not keep stream/consumer metadata (NATS server 2.10 or later is needed); removed fields are not detected',
+      );
+    });
+
+    it('makes no snapshot-only update to an existing stream on a server older than 2.10', async () => {
+      const { sm, streams } = manager(
+        { stream: { name: 'S', subjects: ['a'], max_age: 5 } },
+        { version: '2.9.0' },
+      );
+      await sm.ensureStream({ name: 'S', subjects: ['a'] });
+      expect(streams.update).not.toHaveBeenCalled();
+    });
+
+    it.each(['2.10.0', '2.10.0-beta.2', '2.11.4', '3.0.0'])(
+      'writes the snapshot on server %s',
+      async (version) => {
+        const { sm, streams, logger } = manager({}, { version });
+        await sm.ensureStream({ name: 'S', subjects: ['a'] });
+        expect(streams.add).toHaveBeenCalledExactlyOnceWith({
+          name: 'S',
+          subjects: ['a'],
+          metadata: snap('subjects'),
+        });
+        expect(logger.warn).not.toHaveBeenCalled();
+      },
+    );
   });
 
   describe('consumers', () => {
