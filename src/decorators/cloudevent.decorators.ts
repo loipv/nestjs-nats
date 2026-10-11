@@ -5,15 +5,34 @@ import type { IdempotencyOptions } from '../idempotency/idempotency.js';
 import type { DlqOptions } from '../settlement/dlq.js';
 import type { RetryOptions } from '../settlement/retry.js';
 import { NATS_CLOUD_EVENT_ROUTER_METADATA, NATS_ON_CLOUD_EVENT_METADATA } from './constants.js';
+import type { OrderedDeliverPolicy } from './handler.decorators.js';
 
 /**
- * Options of `@CloudEventRouter`: one core subscription (`subscribe`) or one JetStream
- * consumer (`consume`) for the whole class, plus what to do with CloudEvents no
- * `@OnCloudEvent` matches (`unmatched`, default `'ack'`).
+ * Options of `@CloudEventRouter`: exactly one source for the whole class, plus what to do
+ * with CloudEvents no `@OnCloudEvent` matches (`unmatched`, default `'ack'`). The source is
+ * a core subscription (`subscribe`), a durable pull consumer (`consume`), a durable push
+ * consumer (`consumePush`, as `@ConsumePush`) or an ordered consumer (`consumeOrdered`, as
+ * `@ConsumeOrdered`; it has no `concurrency` and no acks).
  */
 export type CloudEventRouterOptions = (
   | { subscribe: string; queue?: string }
   | { consume: { stream: string; durable: string; config?: Partial<ConsumerConfig> } }
+  | {
+      consumePush: {
+        stream: string;
+        durable: string;
+        config?: Partial<ConsumerConfig>;
+        deliverGroup?: string;
+      };
+    }
+  | {
+      consumeOrdered: {
+        stream: string;
+        filterSubjects?: string | string[];
+        deliverPolicy?: OrderedDeliverPolicy;
+        headersOnly?: boolean;
+      };
+    }
 ) & {
   /**
    * `'ack'` (default): acknowledge and skip (logged at debug level). `'term'`: terminate
@@ -30,7 +49,8 @@ export type CloudEventRouterOptions = (
 };
 
 /**
- * Receives CloudEvents (binary or structured) on one subscription or consumer and hands
+ * Receives CloudEvents (binary or structured) on one subscription, pull, push or ordered
+ * consumer and hands
  * each to the `@OnCloudEvent` method whose type pattern matches it best.
  */
 export function CloudEventRouter(options: CloudEventRouterOptions): ClassDecorator {
