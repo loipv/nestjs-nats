@@ -706,12 +706,13 @@ describe('NatsLifecycle idempotency store binding', () => {
       default: { idempotency: { store }, streams: [{ name: 'S', subjects: ['s.>'] }] },
     });
     const nc = { name: 'nc' };
-    Object.assign(entries.get('default') as object, { nc });
+    const js = { name: 'js' };
+    Object.assign(entries.get('default') as object, { nc, js: () => js });
 
     await lifecycleFor(manager).onModuleInit();
 
     expect(bind).toHaveBeenCalledTimes(1);
-    expect(bind).toHaveBeenCalledWith({ connection: 'default', nc });
+    expect(bind).toHaveBeenCalledWith({ connection: 'default', nc, js });
     expect(bind.mock.invocationCallOrder[0]).toBeLessThan(
       ensureStream.mock.invocationCallOrder[0] as number,
     );
@@ -725,7 +726,8 @@ describe('NatsLifecycle idempotency store binding', () => {
         throw error;
       }),
     };
-    const { manager } = fakeManager({ default: { idempotency: { store } } });
+    const { manager, entries } = fakeManager({ default: { idempotency: { store } } });
+    Object.assign(entries.get('default') as object, { js: () => ({}) });
 
     await expect(lifecycleFor(manager).onModuleInit()).rejects.toBe(error);
     expect(manager.closeAll).toHaveBeenCalled();
@@ -740,14 +742,89 @@ describe('NatsLifecycle idempotency store binding', () => {
     });
     const ncA = { name: 'a' };
     const ncB = { name: 'b' };
-    Object.assign(entries.get('a') as object, { nc: ncA });
-    Object.assign(entries.get('b') as object, { nc: ncB });
+    const jsA = { name: 'js-a' };
+    const jsB = { name: 'js-b' };
+    Object.assign(entries.get('a') as object, { nc: ncA, js: () => jsA });
+    Object.assign(entries.get('b') as object, { nc: ncB, js: () => jsB });
 
     await lifecycleFor(manager).onModuleInit();
 
     expect(bind.mock.calls).toEqual([
-      [{ connection: 'a', nc: ncA }],
-      [{ connection: 'b', nc: ncB }],
+      [{ connection: 'a', nc: ncA, js: jsA }],
+      [{ connection: 'b', nc: ncB, js: jsB }],
     ]);
+  });
+
+  it('leaves a store without bind alone', async () => {
+    const close = vi.fn(async () => {});
+    const store = fakeStore(close);
+    const { manager, entries } = fakeManager({ default: { idempotency: { store } } });
+    const js = vi.fn();
+    Object.assign(entries.get('default') as object, { js });
+    const lifecycle = lifecycleFor(manager);
+
+    await lifecycle.onModuleInit();
+    expect(js).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+
+    await lifecycle.beforeApplicationShutdown();
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes the stores already bound when another fails to bind', async () => {
+    const error = new Error('bind failed');
+    const closeA = vi.fn(async () => {});
+    const storeA: IdempotencyStore = { ...fakeStore(closeA), bind: vi.fn(async () => {}) };
+    const storeB: IdempotencyStore = {
+      ...fakeStore(),
+      bind: vi.fn(async () => {
+        throw error;
+      }),
+    };
+    const { manager, entries } = fakeManager({
+      a: { idempotency: { store: storeA } },
+      b: { idempotency: { store: storeB } },
+    });
+    for (const entry of entries.values()) Object.assign(entry, { js: () => ({}) });
+
+    await expect(lifecycleFor(manager).onModuleInit()).rejects.toBe(error);
+    expect(storeA.bind).toHaveBeenCalledTimes(1);
+    expect(closeA).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not close a store whose bind failed: it may be bound to another application', async () => {
+    const error = new Error('already bound');
+    const close = vi.fn(async () => {});
+    const store: IdempotencyStore = {
+      ...fakeStore(close),
+      bind: vi.fn(async () => {
+        throw error;
+      }),
+    };
+    const { manager, entries } = fakeManager({ default: { idempotency: { store } } });
+    Object.assign(entries.get('default') as object, { js: () => ({}) });
+    const lifecycle = lifecycleFor(manager);
+
+    await expect(lifecycle.onModuleInit()).rejects.toBe(error);
+    await lifecycle.beforeApplicationShutdown();
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it('closes a store shared by two connections when only its second bind failed', async () => {
+    const error = new Error('already bound');
+    const close = vi.fn(async () => {});
+    const bind = vi
+      .fn<() => Promise<void>>()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(error);
+    const store: IdempotencyStore = { ...fakeStore(close), bind };
+    const { manager, entries } = fakeManager({
+      a: { idempotency: { store } },
+      b: { idempotency: { store } },
+    });
+    for (const entry of entries.values()) Object.assign(entry, { js: () => ({}) });
+
+    await expect(lifecycleFor(manager).onModuleInit()).rejects.toBe(error);
+    expect(close).toHaveBeenCalledTimes(1);
   });
 });
