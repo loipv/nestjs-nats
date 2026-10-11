@@ -107,3 +107,60 @@ Lần đầu chạy trên stream/consumer đã có sẵn (`previous` là `undefi
 - `docs/streams.md`: snapshot (`nestjs-nats.declared`), reset về mặc định ở `create-or-update`, báo lệch ở `verify`, field immutable chỉ warn, lần đầu chỉ ghi snapshot, yêu cầu server 2.10+ cho metadata, xử lý `metadata` của người dùng.
 - README, mục "Undetected removals": bỏ phần field bị xóa, giữ ghi chú về khai báo `0`, và đổi tên mục cho phù hợp.
 - `CHANGELOG.md`: gộp vào mục 0.1.0.
+
+## 9. Sửa đổi sau final review (2026-10-11)
+
+Final review đã chạy thử với server thật và phát hiện: một snapshot dùng chung cho cả stream/consumer làm cho nhiều nơi khai báo cùng một stream reset field của nhau ở mỗi lần boot. Hai nơi đó có thể là hai service, hoặc ngay trong một app (`forRoot` + `forFeature`, hoặc `consumers:` + `config` của handler). Hậu quả có thể là mất `subjects`, mất `mirror`, hoặc `verify` fail. Người dùng đã chọn hướng **opt-in, kèm gộp khai báo trùng trong app**. Các mục dưới đây thay cho những chỗ mâu thuẫn ở §3–§8.
+
+### 9.1 Opt-in
+
+- Option mới: `NatsModuleOptions.jetstream.removedFields?: 'reset' | 'ignore'`, mặc định `'ignore'`.
+- Với `'ignore'`, hành vi giống hệt trước SP-F:
+  - không ghi snapshot, không tính field bị xóa, không có mục lệch "removed" trong `verify`;
+  - `metadata` khai báo được so như trước (tập con), và không bị đụng tới.
+- Với `'reset'`, mọi thứ ở §3–§5 áp dụng, cộng các mục 9.2–9.4.
+- Option được validate lúc bootstrap. Giá trị khác hai giá trị trên ném `NatsConfigError`.
+
+### 9.2 Gộp khai báo trùng trong một app (khi `'reset'`)
+
+- **Stream:** các khai báo cùng `name` trong cùng một connection (`streams` của `forRoot` cùng mọi `forFeature`) được gộp thành một, theo hợp các field. Nếu cùng một field có giá trị khác nhau (so sâu), lib ném `NatsConfigError` `JetStream stream "<name>" is declared more than once with different <field>`. Riêng `metadata` gộp theo key, theo đúng quy tắc trên.
+- **Consumer khai báo trong `consumers:`:** các khai báo cùng `stream` + `durable_name` được gộp theo cùng quy tắc.
+- **Durable khai báo cả trong `consumers:` lẫn trong `config` của một handler:** ném `NatsConfigError` `JetStream consumer "<stream>/<durable>" is declared both in the module options and by <Class>.<method>; declare it in one place`.
+- Không gộp được giữa các service. Tài liệu ghi rõ: chỉ bật `'reset'` khi app là nơi **duy nhất** khai báo stream/consumer đó.
+
+### 9.3 Field server không cho reset
+
+Một field nằm trong các tập dưới đây mà bị xóa khỏi khai báo thì được **giữ nguyên và warn**, giống field immutable, chứ không reset:
+
+| Loại | Tập |
+|---|---|
+| Stream | `STREAM_IMMUTABLE_FIELDS` + `deny_delete`, `deny_purge`, `allow_msg_ttl`, `sealed`, `mirror` |
+| Consumer | `CONSUMER_IMMUTABLE_FIELDS` + `deliver_subject`, `flow_control`, `idle_heartbeat`, `max_waiting` |
+
+- `mirror` được thêm vào vì xóa nó sẽ promote mirror, một thao tác không đảo ngược được.
+- `allow_msg_counter` và `allow_msg_schedules` được kiểm tra bằng probe trên server thật trước khi quyết định có cho vào tập không.
+- Warn dùng chung một text: `JetStream stream "<name>" keeps <field> <json>: it cannot be changed (removed from the declaration)` (với consumer, thay `stream "<name>"` bằng `consumer "<stream>/<durable>"`).
+
+### 9.4 Mặc định của push consumer
+
+- Một key trong `createDefaults` (do adapter push truyền vào) bị xóa khỏi khai báo:
+  - nếu key nằm trong tập "giữ" ở 9.3 thì giữ và warn;
+  - nếu không (`max_ack_pending`, `deliver_group`) thì gửi **giá trị của `createDefaults`** thay cho `undefined`, tức là giá trị một lần tạo mới sẽ có, và bỏ qua nếu server đã đúng giá trị đó.
+- Log cho trường hợp này: `JetStream consumer "<stream>/<durable>": reset <field> to the library default (removed from the declaration)`.
+
+### 9.5 Bổ sung nhỏ
+
+- Khai báo `metadata` chứa key `_nats.*` hoặc `nestjs-nats.declared` thì ném `NatsConfigError`, vì nó sẽ không bao giờ khớp.
+- `name` của consumer bị loại khỏi snapshot, giống `durable_name`.
+
+### 9.6 Tài liệu
+
+`docs/streams.md`, mục mô tả option `removedFields`:
+- giả định "nơi khai báo duy nhất";
+- quy tắc gộp khai báo trùng;
+- quyền cần có: lần chạy đầu ghi lên mọi stream/consumer đã khai báo;
+- tool reconcile metadata (NACK, Terraform) xóa mất key snapshot sẽ gây một lần ghi ở mỗi lần boot;
+- các tập field được giữ;
+- cách kiểm tra version server.
+
+Đồng thời sửa câu "Only declared fields are compared" cho đúng với cả hai mode.
