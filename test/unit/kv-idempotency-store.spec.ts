@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { JetStreamApiCodes, JetStreamApiError } from '@nats-io/jetstream';
 import type { NatsConnection } from '@nats-io/transport-node';
 import { Logger } from '@nestjs/common';
@@ -408,11 +409,50 @@ describe('KvIdempotencyStore keys', () => {
     expect([...kv.entries.keys()]).toEqual([stored]);
     expect(stored).toMatch(/^[-\w]+$/);
     expect(Buffer.from(stored, 'base64url').toString('utf8')).toBe(key);
+  });
 
-    const long = `consume:S/d|${'x'.repeat(1024)}`;
-    expect(await store.claim(long, 1000)).toBe('claimed');
-    expect(kv.value(long)).toBeDefined();
-    expect(await store.claim(long, 1000)).toBe('in-progress');
+  it('stores a key encoded in at most 256 characters as its encoding', async () => {
+    const { store, kv } = await boundStore();
+    // 192 bytes encode to exactly 256 characters.
+    const key = `consume:S/d|${'x'.repeat(180)}`;
+    expect(enc(key)).toHaveLength(256);
+    expect(await store.claim(key, 1000)).toBe('claimed');
+    expect([...kv.entries.keys()]).toEqual([enc(key)]);
+  });
+
+  it('stores a longer key under its sha256', async () => {
+    const { store, kv } = await boundStore();
+    const key = `consume:S/d|${'x'.repeat(181)}`;
+    expect(enc(key)).toHaveLength(258);
+    expect(await store.claim(key, 1000)).toBe('claimed');
+    const hashed = `h.${createHash('sha256').update(key, 'utf8').digest('base64url')}`;
+    expect([...kv.entries.keys()]).toEqual([hashed]);
+  });
+
+  it('hashes long keys: distinct per key, stable for one key', async () => {
+    const { store, kv } = await boundStore();
+    const a = `consume:S/d|${'a'.repeat(5 * 1024)}`;
+    const b = `consume:S/d|${'a'.repeat(5 * 1024 - 1)}b`;
+    expect(await store.claim(a, 1000)).toBe('claimed');
+    expect(await store.claim(b, 1000)).toBe('claimed');
+    const keys = [...kv.entries.keys()];
+    expect(keys).toHaveLength(2);
+    for (const k of keys) expect(k).toMatch(/^h\.[-\w]{43}$/);
+
+    expect(await store.claim(a, 1000)).toBe('in-progress');
+    await store.complete(a, 1000);
+    expect(await store.claim(a, 1000)).toBe('duplicate');
+    await store.release(b);
+    expect(await store.claim(b, 1000)).toBe('claimed');
+    expect([...kv.entries.keys()]).toHaveLength(2);
+  });
+
+  it('hashes a long ordered key after the instanceId prefix', async () => {
+    const { store, kv } = await boundStore({ instanceId: 'i1' });
+    const rest = `C.m:${'k'.repeat(300)}`;
+    await store.claim(`ordered:${rest}`, 1000);
+    const hashed = `h.${createHash('sha256').update(`ordered:i1:${rest}`, 'utf8').digest('base64url')}`;
+    expect([...kv.entries.keys()]).toEqual([hashed]);
   });
 
   it('prefixes ordered keys with instanceId', async () => {

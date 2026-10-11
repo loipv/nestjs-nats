@@ -88,14 +88,15 @@ export interface IdempotencyStore {
 
 ### 4.1 Bind
 
-- Bind lần đầu: mở bucket bằng `new Kvm(nc).open(bucket)`. Nếu bucket chưa có (lỗi stream not found), tạo bằng `create(bucket, { history: 1, ttl: maxAge, storage, replicas })`. Bucket đã có thì để nguyên config.
+- Bind lần đầu: mở bucket bằng `new Kvm(nc).open(bucket)` rồi gọi `status()` trên bucket đó. `Kvm.open` của `@nats-io/kv` 3.4 không tra stream, nên bucket chưa có chỉ lộ ra ở `status()` (lỗi stream not found). Khi đó tạo bằng `create(bucket, { history: 1, ttl: maxAge, storage, replicas })`. Bucket đã có thì để nguyên config.
 - Gọi `bind` lần hai trên cùng một instance, kể cả cùng connection, ném `NatsConfigError` `KvIdempotencyStore is already bound to NATS connection "<a>"; give each connection its own store`.
 - Gọi `claim`, `complete` hay `release` trước khi bind ném `NatsModuleError` `KvIdempotencyStore is not bound to a NATS connection; pass it as idempotency.store of NatsModule.forRoot()`.
 
 ### 4.2 Key
 
-- Key KV là `base64url(utf8(storeKey))`, không có padding.
 - Với `instanceId`, khi `storeKey` bắt đầu bằng `ordered:`, key lưu là `ordered:<instanceId>:<phần còn lại>` trước khi mã hóa.
+- Key KV là `base64url(utf8(key))`, không có padding, với `key` là key sau bước `instanceId` ở trên.
+- Nếu chuỗi mã hóa đó dài hơn 256 ký tự, key KV là `h.` + `base64url(sha256(utf8(key)))` (43 ký tự sau `h.`). Lý do: `Nats-Msg-Id` do publisher đặt, có thể dài tùy ý; subject `$KV.<bucket>.<key>` vượt control line của server (mặc định 4096 byte) thì server đóng cả connection. Base64url không chứa `.`, nên key băm không trùng với key không băm.
 - Không có `instanceId` mà gặp key `ordered:` lần đầu: warn một lần, bằng logger `Logger('KvIdempotencyStore')` của Nest:
   `KvIdempotencyStore without instanceId is shared by the instances of @ConsumeOrdered handlers: each instance skips the messages another processed. Set instanceId.`
 
@@ -140,7 +141,7 @@ export interface IdempotencyStore {
   - lỗi sai revision thì thử lại, và trả `'in-progress'` nếu instance khác vừa claim;
   - value hỏng thì ghi đè.
 - `complete` và `release` gọi đúng `put` và `delete`; claim sau release thì `'claimed'`.
-- Mã hóa key: ký tự `:`, `|`, `%`, `/`, unicode; tiền tố `instanceId` chỉ áp dụng cho key `ordered:`; warn đúng một lần khi không có `instanceId`.
+- Mã hóa key: ký tự `:`, `|`, `%`, `/`, unicode; key mã hóa ≤ 256 ký tự giữ nguyên, key dài hơn được băm (`h.<43 ký tự>`, khác nhau theo key, ổn định cho cùng key); tiền tố `instanceId` chỉ áp dụng cho key `ordered:`; warn đúng một lần khi không có `instanceId`.
 - `bind`: lần hai thì lỗi; dùng trước bind thì lỗi; bucket chưa có thì được tạo với đúng config; bucket đã có thì chỉ mở.
 - Lifecycle: `bind` được gọi một lần với `{ connection, nc }` trước khi sync stream; `bind` ném lỗi thì init fail.
 
@@ -149,6 +150,7 @@ export interface IdempotencyStore {
 - Hai app, mỗi app một connection, cùng `bucket`. Mỗi app có một handler `@Subscribe` dùng queue group khác nhau, nên cả hai cùng nhận message, và bật `idempotency`. Publish hai message có cùng `Nats-Msg-Id`: handler chỉ chạy một lần tổng cộng trên hai app.
 - Claim hết hạn: một store với `now` giả claim một key với ttl 1 ms, rồi tiến đồng hồ; claim lại thì `'claimed'` trên server thật.
 - Bucket chưa có thì được tạo với `history: 1` và `max_age` đúng.
+- Hai message có cùng một `Nats-Msg-Id` dài 5 KB: handler chạy một lần, connection không bị đóng (một message thường sau đó vẫn được xử lý).
 
 ## 7. Tài liệu
 
