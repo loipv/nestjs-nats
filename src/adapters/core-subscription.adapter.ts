@@ -39,8 +39,8 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
   private sub?: Subscription;
   private loop?: Promise<void>;
   private stopping = false;
-  /** Subscriptions whose loop ended while they were current. */
-  private readonly ended = new WeakSet<Subscription>();
+  /** Whether the loop of the current subscription is still running. */
+  private loopRunning = false;
   private readonly supervisor: RestartSupervisor;
   /** Whether a request rejected by this batch handler was already logged. */
   private warnedBatchRequest = false;
@@ -87,16 +87,17 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
 
   async start(): Promise<void> {
     if (this.sub) return;
-    await this.open(true);
+    await this.open();
     this.supervisor.started();
   }
 
-  private async open(initial = false): Promise<void> {
+  private async open(): Promise<void> {
     if (this.stopping) return;
     const { queue } = this.def.options;
     const sub = this.entry.nc.subscribe(this.def.subject, queue ? { queue } : {});
-    const previous = { sub: this.sub, loop: this.loop };
+    const previous = { sub: this.sub, loop: this.loop, running: this.loopRunning };
     this.sub = sub;
+    this.loopRunning = true;
     this.loop = this.consume(sub);
     try {
       // Make sure the server knows about the subscription before bootstrap completes.
@@ -105,6 +106,7 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
       // The new subscription is dropped: its loop is no longer current and is ignored.
       this.sub = previous.sub;
       this.loop = previous.loop;
+      this.loopRunning = previous.running;
       try {
         sub.unsubscribe();
       } catch {
@@ -112,21 +114,13 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
       }
       throw err;
     }
-    if (this.stopping) {
-      // stop() ran while this was in flight: it only knew the previous subscription.
-      await sub.drain().catch(() => undefined);
-      return;
-    }
-    if (!initial && this.ended.has(sub)) {
-      throw new Error('the subscription ended before the server confirmed it');
-    }
   }
 
   async stop(): Promise<void> {
     this.stopping = true;
     this.supervisor.stop();
     // Without a running loop nobody else stops the dispatcher (e.g. during a restart delay).
-    if (this.supervisor.state !== 'running') void this.dispatcher.stop();
+    if (!this.sub || !this.loopRunning) void this.dispatcher.stop();
     const sub = this.sub;
     if (!sub || sub.isClosed() || this.entry.nc.isClosed()) return;
     try {
@@ -168,7 +162,7 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
     }
     // A subscription that was replaced or dropped is not this handler's intake anymore.
     if (sub !== this.sub) return;
-    this.ended.add(sub);
+    this.loopRunning = false;
     if (!this.stopping) {
       const tail = this.supervisor.restartable ? '' : '; no more messages will be received';
       if (failed) {

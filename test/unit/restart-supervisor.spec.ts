@@ -167,4 +167,80 @@ describe('RestartSupervisor', () => {
     expect(supervisor.state).toBe('restarting');
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it('counts an intake that ends during its reopen as a failed attempt', async () => {
+    let resolve!: () => void;
+    const { supervisor, logger, states } = setup({
+      reopen: () =>
+        new Promise<void>((r) => {
+          resolve = r;
+        }),
+    });
+    supervisor.started();
+    supervisor.ended();
+    await vi.advanceTimersByTimeAsync(1000);
+    supervisor.ended();
+    resolve();
+    await supervisor.settled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Restart of L failed (attempt 1): the intake ended while restarting',
+    );
+    expect(logger.warn).toHaveBeenLastCalledWith('Restarting L in 2000 ms (attempt 2)');
+    expect(logger.log).not.toHaveBeenCalled();
+    expect(states).toEqual(['running', 'restarting', 'restarting']);
+  });
+
+  it('counts an intake that ends right after its reopen resolved', async () => {
+    const ref: { s?: RestartSupervisor } = {};
+    const { supervisor, logger, states } = setup({
+      reopen: () => {
+        const p = Promise.resolve();
+        // Runs before the supervisor's own continuation on the same promise.
+        void p.then(() => ref.s?.ended());
+        return p;
+      },
+    });
+    ref.s = supervisor;
+    supervisor.started();
+    supervisor.ended();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Restart of L failed (attempt 1): the intake ended while restarting',
+    );
+    expect(logger.warn).toHaveBeenLastCalledWith('Restarting L in 2000 ms (attempt 2)');
+    expect(logger.log).not.toHaveBeenCalled();
+    expect(states).toEqual(['running', 'restarting', 'restarting']);
+  });
+
+  it('counts one failed attempt when the reopen rejects after the intake ended', async () => {
+    let reject!: (e: Error) => void;
+    const { supervisor, logger } = setup({
+      reopen: () =>
+        new Promise<void>((_, rej) => {
+          reject = rej;
+        }),
+    });
+    supervisor.started();
+    supervisor.ended();
+    await vi.advanceTimersByTimeAsync(1000);
+    supervisor.ended();
+    reject(new Error('boom'));
+    await supervisor.settled();
+    expect(logger.warn).toHaveBeenCalledWith('Restart of L failed (attempt 1): boom');
+    expect(logger.warn).toHaveBeenLastCalledWith('Restarting L in 2000 ms (attempt 2)');
+    expect(logger.warn).toHaveBeenCalledTimes(3);
+  });
+
+  it('treats a synchronous throw from reopen as a failed attempt', async () => {
+    const { supervisor, logger } = setup({
+      reopen: () => {
+        throw new Error('sync boom');
+      },
+    });
+    supervisor.started();
+    supervisor.ended();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(logger.warn).toHaveBeenCalledWith('Restart of L failed (attempt 1): sync boom');
+    expect(logger.warn).toHaveBeenLastCalledWith('Restarting L in 2000 ms (attempt 2)');
+  });
 });
