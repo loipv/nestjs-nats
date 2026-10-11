@@ -190,6 +190,7 @@ describe('NatsTestHarness', () => {
     }));
 
   it('dead-letters an exhausted message', async () => {
+    // deliveryCount 6 is past the default maxRetries (5): the retries are exhausted.
     const r = await h.dispatch({ handler: 'Handlers.dead' }, { id: 9 }, { deliveryCount: 6 });
     expect(r.settlement).toBe('dlq');
     expect(r.dlq).toHaveLength(1);
