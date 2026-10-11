@@ -1,14 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ForceStopResult, HandlerAdapter, HandlerState } from '../../src/adapters/adapter.js';
 import { CoreSubscriptionAdapter } from '../../src/adapters/core-subscription.adapter.js';
+import { JetStreamConsumerAdapter } from '../../src/adapters/jetstream-consumer.adapter.js';
 import type {
   ConnectionEntry,
   ConnectionRegistry,
   UsedIdempotencyStore,
 } from '../../src/connection/connection-registry.js';
+import { NatsConfigError } from '../../src/errors/errors.js';
 import type { IdempotencyStore } from '../../src/idempotency/store.js';
+import { NatsStreamManager } from '../../src/jetstream/stream-manager.js';
 import { NatsLifecycle } from '../../src/module/nats-lifecycle.js';
-import type { NatsModuleOptions } from '../../src/module/options.js';
+import type { NatsFeatureOptions, NatsModuleOptions } from '../../src/module/options.js';
+import { NATS_FEATURE_TOKEN_PREFIX } from '../../src/module/tokens.js';
 
 const never = () => new Promise<void>(() => {});
 
@@ -408,5 +412,185 @@ describe('NatsLifecycle restart wiring', () => {
     expect(manager.handlerStates('default')).toHaveLength(1);
     await lifecycle.beforeApplicationShutdown();
     expect(manager.handlerStates('default')).toEqual([]);
+  });
+});
+
+describe('NatsLifecycle declarations', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function lifecycleWith(
+    manager: ReturnType<typeof fakeManager>['manager'],
+    features: NatsFeatureOptions[] = [],
+  ) {
+    const discovery = {
+      getProviders: () =>
+        features.map((instance, i) => ({ token: `${NATS_FEATURE_TOKEN_PREFIX}${i}`, instance })),
+    };
+    return new NatsLifecycle(
+      manager as unknown as ConnectionRegistry,
+      discovery as never,
+      { explore: () => [] } as never,
+    );
+  }
+
+  it('rejects an invalid jetstream.removedFields before syncing anything', async () => {
+    const ensureStream = vi.spyOn(NatsStreamManager.prototype, 'ensureStream');
+    const { manager } = fakeManager({
+      default: {
+        jetstream: { removedFields: 'drop' as never },
+        streams: [{ name: 'S', subjects: ['s.>'] }],
+      },
+    });
+    await expect(lifecycleWith(manager).onModuleInit()).rejects.toThrow(
+      new NatsConfigError(
+        `NATS connection "default" jetstream.removedFields must be 'reset' or 'ignore', got "drop"`,
+      ),
+    );
+    expect(ensureStream).not.toHaveBeenCalled();
+    expect(manager.closeAll).toHaveBeenCalled();
+  });
+
+  function syncSpies() {
+    return {
+      ensureStream: vi
+        .spyOn(NatsStreamManager.prototype, 'ensureStream')
+        .mockResolvedValue(undefined),
+      ensureConsumer: vi
+        .spyOn(NatsStreamManager.prototype, 'ensureConsumer')
+        .mockResolvedValue(undefined),
+    };
+  }
+
+  const reset = { jetstream: { removedFields: 'reset' as const } };
+
+  it("merges declarations of one stream with removedFields 'reset'", async () => {
+    const { ensureStream } = syncSpies();
+    const { manager } = fakeManager({
+      default: { ...reset, streams: [{ name: 'S', subjects: ['s.>'], metadata: { a: '1' } }] },
+    });
+    await lifecycleWith(manager, [
+      { streams: [{ name: 'S', subjects: ['s.>'], max_age: 5, metadata: { b: '2' } }] },
+      { streams: [{ name: 'T' }, { name: 'S', max_msgs: null as never }] },
+    ]).onModuleInit();
+    expect(ensureStream.mock.calls).toEqual([
+      [{ name: 'S', subjects: ['s.>'], max_age: 5, metadata: { a: '1', b: '2' } }],
+      [{ name: 'T' }],
+    ]);
+  });
+
+  it('merges module consumers of one durable, and keeps streams of other connections apart', async () => {
+    const { ensureStream, ensureConsumer } = syncSpies();
+    const { manager } = fakeManager({
+      default: {
+        ...reset,
+        streams: [{ name: 'S' }],
+        consumers: [{ stream: 'S', config: { durable_name: 'D', max_ack_pending: 5 } }],
+      },
+      other: { ...reset, streams: [{ name: 'S', max_age: 1 }] },
+    });
+    await lifecycleWith(manager, [
+      { consumers: [{ stream: 'S', config: { durable_name: 'D', filter_subject: 's.a' } }] },
+      { consumers: [{ stream: 'S', config: { durable_name: 'E' } }] },
+    ]).onModuleInit();
+    expect(ensureStream.mock.calls).toEqual([[{ name: 'S' }], [{ name: 'S', max_age: 1 }]]);
+    expect(ensureConsumer.mock.calls).toEqual([
+      ['S', { durable_name: 'D', max_ack_pending: 5, filter_subject: 's.a' }],
+      ['S', { durable_name: 'E' }],
+    ]);
+  });
+
+  it.each([
+    [
+      'a field',
+      { streams: [{ name: 'S', subjects: ['a'] }] },
+      { streams: [{ name: 'S', subjects: ['b'] }] },
+      'JetStream stream "S" is declared more than once with different subjects',
+    ],
+    [
+      'a metadata key',
+      { streams: [{ name: 'S', metadata: { a: '1' } }] },
+      { streams: [{ name: 'S', metadata: { a: '2' } }] },
+      'JetStream stream "S" is declared more than once with different metadata key "a"',
+    ],
+    [
+      'a consumer field',
+      { consumers: [{ stream: 'S', config: { durable_name: 'D', max_deliver: 3 } }] },
+      { consumers: [{ stream: 'S', config: { durable_name: 'D', max_deliver: 4 } }] },
+      'JetStream consumer "S/D" is declared more than once with different max_deliver',
+    ],
+  ])('rejects declarations that disagree on %s', async (_, root, feature, message) => {
+    const { ensureStream } = syncSpies();
+    const { manager } = fakeManager({ default: { ...reset, ...root } });
+    await expect(lifecycleWith(manager, [feature]).onModuleInit()).rejects.toThrow(
+      new NatsConfigError(message),
+    );
+    expect(ensureStream).not.toHaveBeenCalled();
+  });
+
+  it("syncs every declaration as given with removedFields 'ignore' (the default)", async () => {
+    const { ensureStream } = syncSpies();
+    const { manager } = fakeManager({ default: { streams: [{ name: 'S', subjects: ['a'] }] } });
+    await lifecycleWith(manager, [{ streams: [{ name: 'S', subjects: ['b'] }] }]).onModuleInit();
+    expect(ensureStream.mock.calls).toEqual([
+      [{ name: 'S', subjects: ['a'] }],
+      [{ name: 'S', subjects: ['b'] }],
+    ]);
+  });
+
+  describe('a durable declared both in the module options and by a handler', () => {
+    function consumeDef(config?: object) {
+      return {
+        kind: 'consume',
+        delivery: 'pull',
+        connection: 'default',
+        className: 'Svc',
+        methodName: 'handle',
+        options: { stream: 'S', durable: 'D', ...(config ? { config } : {}) },
+        wrapper: { isDependencyTreeStatic: () => true, isTransient: false },
+      };
+    }
+
+    async function boot(options: ConnectionOptions, def: object) {
+      syncSpies();
+      const start = vi.spyOn(JetStreamConsumerAdapter.prototype, 'start').mockResolvedValue();
+      const { manager } = fakeManager({
+        default: {
+          ...options,
+          streams: [{ name: 'S' }],
+          consumers: [{ stream: 'S', config: { durable_name: 'D' } }],
+        },
+      });
+      const lifecycle = new NatsLifecycle(
+        manager as unknown as ConnectionRegistry,
+        { getProviders: () => [] } as never,
+        { explore: () => [def] } as never,
+      );
+      await lifecycle.onModuleInit();
+      return { start, bootstrap: lifecycle.onApplicationBootstrap() };
+    }
+
+    it("is rejected with removedFields 'reset', before any handler starts", async () => {
+      const { start, bootstrap } = await boot(reset, consumeDef({ max_deliver: 3 }));
+      await expect(bootstrap).rejects.toThrow(
+        new NatsConfigError(
+          'JetStream consumer "S/D" is declared both in the module options and by Svc.handle; declare it in one place',
+        ),
+      );
+      expect(start).not.toHaveBeenCalled();
+    });
+
+    it('is accepted when the handler declares no config', async () => {
+      const { start, bootstrap } = await boot(reset, consumeDef());
+      await bootstrap;
+      expect(start).toHaveBeenCalledOnce();
+    });
+
+    it("is accepted with removedFields 'ignore'", async () => {
+      const { start, bootstrap } = await boot({}, consumeDef({ max_deliver: 3 }));
+      await bootstrap;
+      expect(start).toHaveBeenCalledOnce();
+    });
   });
 });
