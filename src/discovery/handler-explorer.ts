@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { type ArgumentsHost, Injectable } from '@nestjs/common';
 import { ROUTE_ARGS_METADATA } from '@nestjs/common/constants.js';
 import { DiscoveryService, ExternalContextCreator, MetadataScanner } from '@nestjs/core';
 import type { InstanceWrapper } from '@nestjs/core/injector/instance-wrapper.js';
@@ -26,6 +26,7 @@ import type {
 } from '../decorators/handler.decorators.js';
 import { NatsConfigError, NatsModuleError } from '../errors/errors.js';
 import { DEFAULT_CONNECTION } from '../module/tokens.js';
+import { NatsArgumentsHost } from './nats-arguments-host.js';
 import { NatsParamsFactory } from './nats-params-factory.js';
 
 export type HandlerKind = 'subscribe' | 'consume' | 'ordered' | 'service-endpoint';
@@ -296,19 +297,69 @@ export class HandlerExplorer {
 
   /** Wraps a method with Nest guards, pipes, interceptors and exception filters. */
   private wrap(instance: object, methodName: string): Invoke {
-    const callback = (instance as Record<string, (...args: unknown[]) => unknown>)[methodName];
-    return this.ecc.create(
+    const callback = (instance as Record<string, (...args: unknown[]) => unknown>)[methodName] as (
+      ...args: unknown[]
+    ) => unknown;
+    const filters = this.exceptionFilters(instance, callback);
+    const target = this.ecc.create(
       instance,
-      callback as (...args: unknown[]) => unknown,
+      callback,
       methodName,
       ROUTE_ARGS_METADATA,
       new NatsParamsFactory(),
       undefined,
       undefined,
-      { guards: true, interceptors: true, filters: true },
+      { guards: true, interceptors: true, filters: !filters },
       'nats',
     ) as Invoke;
+    if (!filters) return target;
+    return async (payload, ctx) => {
+      try {
+        return await target(payload, ctx);
+      } catch (err) {
+        // Like Nest: a filter handles the error by returning a value (or throwing its own).
+        const handled = filters.invokeCustomFilters(err, new NatsArgumentsHost([payload, ctx]));
+        if (handled) return handled;
+        throw err;
+      }
+    };
   }
+
+  /**
+   * The exception filters of a method, without Nest's `ExceptionsHandler`, which logs every
+   * error they do not handle that the library logs as well. They are reached through a private
+   * field of `ExternalContextCreator`; `undefined` if a Nest version does not have it, so Nest
+   * handles errors itself.
+   */
+  private exceptionFilters(
+    instance: object,
+    callback: (...args: unknown[]) => unknown,
+  ): ExceptionFilters | undefined {
+    const creator = (this.ecc as unknown as { filtersContextCreator?: FiltersContextCreator })
+      .filtersContextCreator;
+    if (typeof creator?.create !== 'function') return undefined;
+    const filters = creator.create(
+      instance,
+      callback,
+      this.ecc.getContextModuleKey(instance.constructor),
+    );
+    return typeof filters?.invokeCustomFilters === 'function' ? filters : undefined;
+  }
+}
+
+/** Nest's `ExternalExceptionsHandler`, as far as the library uses it. */
+interface ExceptionFilters {
+  /** What the first filter catching `err` returns, `null` when none catches it. */
+  invokeCustomFilters(err: unknown, host: ArgumentsHost): unknown;
+}
+
+/** Nest's `ExternalExceptionFilterContext`, as far as the library uses it. */
+interface FiltersContextCreator {
+  create(
+    instance: object,
+    callback: (...args: unknown[]) => unknown,
+    moduleKey: string,
+  ): ExceptionFilters | undefined;
 }
 
 /** `obj` without the keys whose value is `undefined`. */
