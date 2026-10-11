@@ -27,7 +27,7 @@ Store mặc định là `InMemoryIdempotencyStore`: mỗi connection một store
 
 ```ts
 export interface KvIdempotencyStoreOptions {
-  /** KV bucket name ([-_A-Za-z0-9]+; default 'nestjs_nats_idempotency'). */
+  /** KV bucket name (1 to 64 of [-_A-Za-z0-9]; default 'nestjs_nats_idempotency'). */
   bucket?: string;
   /** How long the bucket keeps an entry after its last write, in ms (garbage collection; default 86_400_000). Must exceed every handler's ttl. */
   maxAge?: number;
@@ -50,7 +50,7 @@ export class KvIdempotencyStore implements IdempotencyStore {
 ```
 
 - Option được validate trong constructor, lỗi ném `NatsConfigError`:
-  - `bucket` khớp `/^[-\w]+$/`;
+  - `bucket` khớp `/^[-\w]+$/` và dài không quá 64 ký tự (`expected at most 64 letters, digits, "-" or "_"`);
   - `maxAge` là số nguyên lớn hơn 0 và không quá 2^31-1 nhân 1000;
   - `storage` thuộc hai giá trị đã cho;
   - `replicas` là số nguyên ≥ 1;
@@ -69,6 +69,8 @@ export interface IdempotencyStoreContext {
   connection: string;
   /** The connection the store runs on. */
   nc: NatsConnection;
+  /** The JetStream client of that connection, with its `jetstream.options` (domain, API prefix, timeout). */
+  js: JetStreamClient;
 }
 
 export interface IdempotencyStore {
@@ -82,14 +84,19 @@ export interface IdempotencyStore {
 
 - `IdempotencyStoreContext` được export từ entry chính.
 - Lifecycle gọi `bind` trong `onModuleInit`, trước khi sync stream, cho mọi connection có `options.idempotency.store` với `bind`. Store mặc định (in-memory) không có `bind`.
-- Lỗi từ `bind` làm init fail: lifecycle shutdown rồi ném lại lỗi, như các lỗi init khác.
+- `js` là `entry.js()` của connection đó, nên store dùng đúng `jetstream.options` (domain, API prefix) của connection.
+- Lỗi từ `bind` làm init fail: lifecycle shutdown rồi ném lại lỗi, như các lỗi init khác. Khi shutdown, lifecycle không gọi `close()` trên store mà mọi lần `bind` trong app này đều lỗi: store đó có thể đang gắn với một app khác (bind lần hai của `KvIdempotencyStore` lỗi), và `close()` sẽ gỡ binding của app kia. Store đã bind thành công (kể cả khi store của connection khác bind lỗi) vẫn được đóng.
 
 ## 4. Hành vi của `KvIdempotencyStore`
 
 ### 4.1 Bind
 
-- Bind lần đầu: mở bucket bằng `new Kvm(nc).open(bucket)` rồi gọi `status()` trên bucket đó. `Kvm.open` của `@nats-io/kv` 3.4 không tra stream, nên bucket chưa có chỉ lộ ra ở `status()` (lỗi stream not found). Khi đó tạo bằng `create(bucket, { history: 1, ttl: maxAge, storage, replicas })`. Bucket đã có thì để nguyên config.
-- Gọi `bind` lần hai trên cùng một instance, kể cả cùng connection, ném `NatsConfigError` `KvIdempotencyStore is already bound to NATS connection "<a>"; give each connection its own store`.
+- Bind lần đầu: mở bucket bằng `new Kvm(js).open(bucket, { allow_direct: false })` rồi gọi `status()` trên bucket đó. `Kvm.open` của `@nats-io/kv` 3.4 không tra stream, nên bucket chưa có chỉ lộ ra ở `status()` (lỗi stream not found). Khi đó tạo bằng `create(bucket, { history: 1, ttl: maxAge, storage, replicas })`, rồi mở lại bằng `open(bucket, { allow_direct: false })` và gọi `status()`. Bucket đã có thì để nguyên config.
+- Đọc từ leader, không dùng direct get: direct get có thể do một replica chậm hơn leader trả lời, mà claim compare-and-set trên revision vừa đọc. Handle do `create` trả về dùng direct get khi server hỗ trợ, nên store mở lại bucket sau khi tạo. Stream vẫn giữ `allow_direct` mặc định cho client khác.
+- `status().ttl` (max age của bucket, 0 là không giới hạn) được lưu lại. Lần đầu một `claim` có `ttlMs` lớn hơn max age đó (khi > 0), warn một lần bằng `Logger('KvIdempotencyStore')`: `KvIdempotencyStore bucket "<b>" keeps entries for <n> ms, less than the idempotency ttl <m> ms; raise its max age`.
+- Gọi `bind` lần hai khi store vẫn đang gắn, kể cả cùng connection, ném `NatsConfigError` `KvIdempotencyStore is already bound to NATS connection "<a>"; give each connection its own store`.
+- `close()` gỡ binding (connection và handle KV về `undefined`), không đóng connection (do lib sở hữu). Sau đó store bind lại được, ví dụ cho app thứ hai trong cùng process. Lifecycle gọi `close()` cho store trong option khi shutdown và sau init lỗi.
+- `bind` lỗi thì binding được gỡ ngay, nên store bind lại được.
 - Gọi `claim`, `complete` hay `release` trước khi bind ném `NatsModuleError` `KvIdempotencyStore is not bound to a NATS connection; pass it as idempotency.store of NatsModule.forRoot()`.
 
 ### 4.2 Key
@@ -110,10 +117,12 @@ export interface IdempotencyStore {
 
 | Thao tác | Cách làm |
 |---|---|
-| `claim(key, ttl)` | `create(k, p)`. Thành công thì trả `'claimed'`. Nếu key đã tồn tại, `get(k)`:<br>• entry rỗng, bị xóa, purge hoặc hết hạn: `update(k, p, revision)`. Thành công thì `'claimed'`. Lỗi sai revision thì lặp lại thao tác (tối đa 3 lần, sau đó ném lỗi). Entry đã bị xóa ở giữa chừng thì `create` lại.<br>• còn hiệu lực: trả `'duplicate'` nếu `s` là `d`, `'in-progress'` nếu `s` là `p`. |
+| `claim(key, ttl)` | `put(k, p, { previousSeq: 0 })`: chỉ ghi được khi subject chưa có revision nào. Thành công thì trả `'claimed'`. Nếu subject đã có revision (kể cả marker DEL hay PURGE), server trả lỗi sai revision (10071), rồi `get(k)`:<br>• entry bị xóa, purge, hết hạn hoặc không đọc được: `update(k, p, revision)`. Thành công thì `'claimed'`. Lỗi sai revision thì lặp lại thao tác (tối đa 3 lần, sau đó ném lỗi, lib xử lý như store error và retry). Entry đã biến mất ở giữa chừng (`get` trả `null`) thì `put` lại.<br>• còn hiệu lực: trả `'duplicate'` nếu `s` là `d`, `'in-progress'` nếu `s` là `p`. |
 | `complete(key, ttl)` | `put(k, d)` |
 | `release(key)` | `delete(k)` |
-| `close()` | Không làm gì (connection do lib sở hữu) |
+| `close()` | Gỡ binding (§4.1); không đóng connection (do lib sở hữu) |
+
+- Không dùng `kv.create`: trong `@nats-io/kv` 3.4 nó tự `get` rồi ghi đè marker DEL/PURGE, trùng với đường `get` → `update(revision)` của store.
 
 - Value không đọc được (JSON lỗi hoặc thiếu field) được coi là hết hạn và bị ghi đè.
 - Lỗi khác từ KV được ném nguyên, và lib xử lý theo đường "store error" hiện có (retry, không dead-letter).

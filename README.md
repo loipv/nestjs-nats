@@ -33,7 +33,7 @@ Decorator-driven [NATS](https://nats.io) integration for [NestJS](https://nestjs
 | Node.js | `>= 22.12` |
 | NestJS | `11.x` or `12.x` |
 | NATS client | `@nats-io/transport-node`, `@nats-io/jetstream`, `@nats-io/services` `3.x` |
-| NATS server | JetStream enabled, needed only for the JetStream consumers and `JetStreamClient`. `publishAtomic()` needs `2.12` or later |
+| NATS server | JetStream enabled, needed only for the JetStream consumers, `JetStreamClient` and `KvIdempotencyStore`. `publishAtomic()` needs `2.12` or later |
 | `@opentelemetry/api` | `^1.9.0`, optional: only for `@loipv/nestjs-nats/otel` |
 | `@nestjs/terminus` | `11.x` or `12.x`, optional: only for `@loipv/nestjs-nats/health` |
 | `@nats-io/kv` | `3.x`, optional: only for `@loipv/nestjs-nats/kv` |

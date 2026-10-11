@@ -40,6 +40,7 @@ class InvoiceHandlers {
 - **No reply for duplicates.** A skipped `@Subscribe` request gets no reply, and its requester times out.
 - **Store errors.** If the store fails to claim a key, the handler does not run and the message is retried after the retry backoff (the default one when retries are off), capped at `maxDelay`, and a warning is logged. This does not depend on `isRetryable` or on the retries left: a store outage delays messages but never dead-letters or drops them. A JetStream message is `nak`'d, and each redelivery increments its `deliveryCount`, so after a long outage it may have few or no retries left when it finally runs. A consumer's `max_deliver` still applies. A `@Subscribe` message is retried in the process, and a request gets an error reply. In a [batch](./batching.md#batch-processing), a store error on one key fails the whole batch: the keys it had claimed are released and every message is retried.
 - **`ttl` must exceed the longest run of the handler.** A claim that expires while the handler still runs lets a redelivery start a second run. After the `ttl` has passed, a redelivered message is processed again.
+- **Crashes and failed releases.** A claim stays in the store when the process crashes or is force-stopped while the handler runs, or when the release after a failure fails (a store outage, say). With a store that outlives the process, such as the [JetStream KV store](#jetstream-kv-store), that claim blocks the message on every instance until its `ttl` expires: each redelivery is skipped as in progress and `nak`'d, and spends one delivery (its `deliveryCount` grows towards the consumer's `max_deliver`). So choose a `ttl` of the longest run of the handler plus a margin, not as long as possible.
 
 ## Stores
 
@@ -82,7 +83,7 @@ const store = new InMemoryIdempotencyStore({ maxKeys: 10_000 });
 
 `claim` returns `'claimed'` when the caller should process the message, `'duplicate'` when it was already processed and `'in-progress'` when another delivery holds the key. A store may also implement `close()`. The library calls it at shutdown, for the stores it created and for the one given in the module options.
 
-A store may also implement `bind({ connection, nc })`. The library calls it once at module init, before any message is handled, with the name and the `NatsConnection` of the connection whose `idempotency.store` it is. An error from `bind` fails startup. The KV store below uses it to open its bucket on that connection.
+A store may also implement `bind({ connection, nc, js })`. The library calls it once at module init, before any message is handled, with the name, the `NatsConnection` and the `JetStreamClient` (with the connection's `jetstream.options`) of the connection whose `idempotency.store` it is. An error from `bind` fails startup, and the library then does not call `close()` on that store: it may be bound to another application. The KV store below uses `bind` to open its bucket on that connection.
 
 ### JetStream KV store
 
@@ -111,8 +112,8 @@ NatsModule.forRoot({
 
 | Option | Default | Description |
 |---|---|---|
-| `bucket` | `'nestjs_nats_idempotency'` | The KV bucket. Letters, digits, `-` and `_` |
-| `maxAge` | `86400000` | How long, in ms, the bucket keeps an entry after its last write. An integer above `0` and at most `2147483647000`. It must exceed the `ttl` of every handler |
+| `bucket` | `'nestjs_nats_idempotency'` | The KV bucket. At most 64 letters, digits, `-` and `_` |
+| `maxAge` | `86400000` | How long, in ms, a bucket the store creates keeps an entry after its last write. An integer above `0` and at most `2147483647000`. It must exceed the `ttl` of every handler. An existing bucket keeps its own max age |
 | `storage` | `'file'` | `'file'` or `'memory'`, for a bucket the store creates |
 | `replicas` | `1` | Replicas of a bucket the store creates |
 | `instanceId` | none | Keeps the keys of `@ConsumeOrdered` handlers apart per instance (see below). A non-empty string |
@@ -120,12 +121,13 @@ NatsModule.forRoot({
 
 Invalid options throw a `NatsConfigError` from the constructor.
 
-- **Bucket.** At module init the store opens its bucket. If the bucket does not exist, the store creates it with `history: 1`, `ttl: maxAge`, `storage` and `replicas`. An existing bucket is used as it is: the store never changes its configuration.
+- **Bucket.** At module init the store opens its bucket. If the bucket does not exist, the store creates it with `history: 1`, `ttl: maxAge`, `storage` and `replicas`. An existing bucket is used as it is: the store never changes its configuration, so `maxAge`, `storage` and `replicas` do not apply to it.
 - **TTL.** Each entry records when it expires, `now() + ttl`, and an expired entry counts as missing: the next claim takes it over. Each instance compares that time with its own clock, so a clock skew between instances lengthens or shortens the `ttl` by as much.
-- **`maxAge` versus `ttl`.** The bucket's `maxAge` only removes old entries from the server. It is not the `ttl` of a key. If it were shorter than a handler's `ttl`, a key could disappear before it expires and a duplicate would be processed.
-- **Concurrent claims.** Claims are compare-and-set writes on the key's revision. When two instances claim the same key at the same moment, one gets it and the other sees it in progress.
-- **Keys.** A key is stored as its UTF-8 bytes in base64url, so any character is allowed. When that takes more than 256 characters, the key is stored as `h.` followed by the base64url SHA-256 of the key instead, so that the KV subject stays well within the server's control line (4096 bytes by default; a longer subject makes the server close the connection). A `Nats-Msg-Id` of any length is therefore safe.
+- **`maxAge` versus `ttl`.** The bucket's max age only removes old entries from the server. It is not the `ttl` of a key. If it were shorter than a handler's `ttl`, a key could disappear before it expires and a duplicate would be processed. The store reads the max age of its bucket at module init and logs a warning, once, the first time a claim's `ttl` exceeds it.
+- **Storage.** An entry stays in the bucket until the max age has passed since its last write, also once its `ttl` has expired, and so does the marker a `release` leaves. The bucket holds about one entry per message processed (or released) within the max age. Keep it small: a `maxAge` of the largest `ttl` plus a margin is enough.
+- **Concurrent claims.** Claims are compare-and-set writes on the key's revision, and the store reads keys from the stream leader (not with direct gets, which a lagging replica may answer). When two instances claim the same key at the same moment, one gets it and the other sees it in progress. A claim that loses the race 3 times in a row fails, and is handled as a store error: the message is retried.
+- **Keys.** A key is stored as its UTF-8 bytes in base64url, so any character is allowed. When that takes more than 256 characters, the key is stored as `h.` followed by the base64url SHA-256 of the key instead, so that the KV subject stays well within the server's control line (4096 bytes by default; a longer subject makes the server close the connection). A long `Nats-Msg-Id` therefore cannot break the connection.
 - **Release.** `release` deletes the key, even if it expired meanwhile and another instance claimed it, as the in-memory store does. A `ttl` longer than the longest run of the handler avoids it.
 - **Errors.** KV errors are passed on unchanged. A failed claim is handled like any store error (see **Store errors** above): the message is retried, never dead-lettered.
 - **Ordered consumers.** Every instance must process every message of a `@ConsumeOrdered` handler. Set `instanceId` to a value of its own on each instance: the store then prefixes the keys that start with `ordered:` with it. Without `instanceId`, the store logs a warning the first time it sees such a key.
-- **One store per connection.** The store binds to the connection of the `forRoot()` it is given to. Giving the same store object to a second connection fails startup with a `NatsConfigError`. Create one store per connection; several stores, on several connections or in several applications, can share a bucket.
+- **One store per connection.** The store binds to the connection of the `forRoot()` it is given to, until that application closes. Giving the same store object to a second connection, or to a second application while the first one runs, fails startup with a `NatsConfigError`. Create one store per connection and application instance, for example in the factory of `NatsModule.forRootAsync()` (see [Connections](./connections.md)), rather than in a constant shared by several applications of one process. Several stores, on several connections or in several applications, can share a bucket. Once its application has closed, a store can be bound again.
