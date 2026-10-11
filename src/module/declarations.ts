@@ -72,7 +72,7 @@ function mergeBy<T>(
  */
 function mergeConfigs(label: string, configs: object[]): Record<string, unknown> {
   const merged: Record<string, unknown> = {};
-  const metadata: Record<string, unknown> = {};
+  const metadata = new Map<string, unknown>();
   let hasMetadata = false;
   const conflict = (what: string) =>
     new NatsConfigError(`JetStream ${label} is declared more than once with different ${what}`);
@@ -82,14 +82,15 @@ function mergeConfigs(label: string, configs: object[]): Record<string, unknown>
       if (field === 'metadata') {
         hasMetadata = true;
         for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-          if (k in metadata && metadata[k] !== v) throw conflict(`metadata key "${k}"`);
-          metadata[k] = v;
+          if (metadata.has(k) && metadata.get(k) !== v) throw conflict(`metadata key "${k}"`);
+          metadata.set(k, v);
         }
         continue;
       }
-      if (field in merged && !isDeepStrictEqual(merged[field], value)) throw conflict(field);
+      if (Object.hasOwn(merged, field) && !isDeepStrictEqual(merged[field], value))
+        throw conflict(field);
       merged[field] = value;
     }
   }
-  return hasMetadata ? { ...merged, metadata } : merged;
+  return hasMetadata ? { ...merged, metadata: Object.fromEntries(metadata) } : merged;
 }

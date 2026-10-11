@@ -72,6 +72,7 @@ NatsModule.forRoot({
 - **`verify`** reports each removed field, kept ones included, as drift, as `<field> (removed from the declaration, current: <value>)`, and writes nothing.
 - **`create-only`** writes the list only when it creates the stream or consumer, and never resets anything.
 - **The first run resets no removed fields.** A stream or consumer that has no list yet, because it was created before `'reset'` was turned on or elsewhere, only gets its list written. Fields removed before that run are not detected.
+- **Turning `'reset'` off and on.** Under `'ignore'` the list stays on the server when no `metadata` is declared, so a field removed in between is reset on the next `'reset'` run.
 - **Permissions.** That first run updates every declared stream and consumer, unchanged ones included, so the application needs permission to update them, not only to read them.
 - **`metadata`.** A declared `metadata` is compared exactly, ignoring `_nats.*` keys and `nestjs-nats.declared`, and the list is added to it. Declaring a `_nats.*` key or `nestjs-nats.declared` fails with a `NatsConfigError`: the server would never report it back. Without a declared `metadata`, the keys already on the server are kept, so another tool's keys survive. Removing `metadata` from a declaration does not delete its keys.
 - **Tools that reconcile metadata.** A tool that also manages the stream or consumer and sets its whole `metadata`, such as the NACK controller or Terraform, deletes `nestjs-nats.declared`. The next boot writes it again, so every boot makes one update.
