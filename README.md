@@ -14,7 +14,7 @@ Decorator-driven [NATS](https://nats.io) integration for [NestJS](https://nestjs
 - Parameter decorators (`@Payload`, `@Headers`, `@Subject`, `@Msg`, `@Ctx`) that work with pipes, including a global `ValidationPipe`, and with guards, interceptors and exception filters. See [Parameters, pipes and Nest enhancers](./docs/handlers.md#parameters-pipes-and-nest-enhancers).
 - `NatsClient` for fire-and-forget publish and request/reply, and `JetStreamClient` for publishing with acknowledgements and de-duplication. See [Publishing](./docs/publishing.md).
 - Declarative streams and consumers, synced at startup with four modes from create-or-update to read-only verification. See [Streams and consumers](./docs/streams.md).
-- Retry with exponential backoff and an optional dead-letter queue (DLQ), idempotency with a pluggable store, and batch processing for `@Subscribe`, `@Consume` and `@ConsumePush`. See [Retry and dead-letter queue](./docs/retry-and-dlq.md), [Idempotency](./docs/idempotency.md) and [Batch processing](./docs/batching.md#batch-processing).
+- Retry with exponential backoff and an optional dead-letter queue (DLQ), idempotency with a pluggable store (in memory, or shared through a JetStream KV bucket with `@loipv/nestjs-nats/kv`), and batch processing for `@Subscribe`, `@Consume` and `@ConsumePush`. See [Retry and dead-letter queue](./docs/retry-and-dlq.md), [Idempotency](./docs/idempotency.md) and [Batch processing](./docs/batching.md#batch-processing).
 - Batched JetStream publishing with `publishMany()` and an auto-flushing `batcher()`. See [Batch publishing](./docs/batching.md#batch-publishing).
 - All-or-nothing publishing with `publishAtomic()`: several messages stored as one atomic batch. See [Atomic batches](./docs/publishing.md#atomic-batches).
 - Several named connections in one application, each passing its options straight to the NATS client, so every NATS auth method and TLS/mTLS works unchanged. See [Connections](./docs/connections.md).
@@ -36,6 +36,7 @@ Decorator-driven [NATS](https://nats.io) integration for [NestJS](https://nestjs
 | NATS server | JetStream enabled, needed only for the JetStream consumers and `JetStreamClient`. `publishAtomic()` needs `2.12` or later |
 | `@opentelemetry/api` | `^1.9.0`, optional: only for `@loipv/nestjs-nats/otel` |
 | `@nestjs/terminus` | `11.x` or `12.x`, optional: only for `@loipv/nestjs-nats/health` |
+| `@nats-io/kv` | `3.x`, optional: only for `@loipv/nestjs-nats/kv` |
 
 The package is **ESM-only**. CommonJS applications, which includes most Nest 11 projects, can still `require()` it, because Node 22.12+ loads ES modules through `require(esm)`.
 
@@ -52,6 +53,7 @@ The optional entry points have optional peer dependencies. The main entry point 
 ```bash
 npm install @opentelemetry/api   # for @loipv/nestjs-nats/otel
 npm install @nestjs/terminus     # for @loipv/nestjs-nats/health
+npm install @nats-io/kv          # for @loipv/nestjs-nats/kv
 ```
 
 `@loipv/nestjs-nats/testing` needs nothing extra. Your tests will normally use `@nestjs/testing` next to it.
