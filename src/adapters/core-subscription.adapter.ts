@@ -107,6 +107,8 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
       this.sub = previous.sub;
       this.loop = previous.loop;
       this.loopRunning = previous.running;
+      // stop() may have seen the new loop as running; its own end is ignored from now on.
+      if (this.stopping && !this.loopRunning) void this.dispatcher.stop();
       try {
         sub.unsubscribe();
       } catch {

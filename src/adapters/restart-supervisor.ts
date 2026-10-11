@@ -28,6 +28,8 @@ export class RestartSupervisor {
   private inFlight: Promise<void> | undefined;
   /** A reopen was called and has not been handled yet. */
   private reopening = false;
+  /** The first intake ended before `started()`. */
+  private endedBeforeStart = false;
   /** The intake ended while `reopening`. */
   private endedWhileReopening = false;
 
@@ -51,10 +53,23 @@ export class RestartSupervisor {
 
   started(): void {
     this.setState('running');
+    if (this.endedBeforeStart) {
+      this.endedBeforeStart = false;
+      this.ended();
+    }
   }
 
+  /**
+   * The intake stopped on its own. Adapters must call this only for their current intake:
+   * an old intake finishing late during a reopen would be charged to the new one.
+   */
   ended(_err?: unknown): void {
     if (this.stopped) return;
+    if (this.current === undefined) {
+      // The first open is still in progress: handled once `started()` is called.
+      this.endedBeforeStart = true;
+      return;
+    }
     if (this.reopening) {
       // The reopened intake died before it was marked running: the reopen then counts as failed.
       this.endedWhileReopening = true;
