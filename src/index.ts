@@ -92,5 +92,6 @@ export type {
   OutgoingMessage,
 } from './pipeline/types.js';
 export type { DlqOptions } from './settlement/dlq.js';
+export type { RestartOptions } from './settlement/restart.js';
 export type { RetryOptions } from './settlement/retry.js';
 export { defaultIsRetryable } from './settlement/retry.js';
