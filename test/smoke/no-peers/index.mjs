@@ -12,4 +12,10 @@ await assert.rejects(import('@loipv/nestjs-nats/otel'), (err) => {
   return true;
 });
 
+await assert.rejects(import('@loipv/nestjs-nats/kv'), (err) => {
+  assert.equal(err.code, 'ERR_MODULE_NOT_FOUND');
+  assert.match(err.message, /@nats-io\/kv/);
+  return true;
+});
+
 console.log('SMOKE OK');

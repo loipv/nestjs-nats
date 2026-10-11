@@ -6,6 +6,7 @@ const { NestFactory } = require('@nestjs/core');
 const { Subscribe, Payload } = require('@loipv/nestjs-nats');
 const { tracing } = require('@loipv/nestjs-nats/otel');
 const { NatsHealthIndicator } = require('@loipv/nestjs-nats/health');
+const { KvIdempotencyStore } = require('@loipv/nestjs-nats/kv');
 const { NatsTestingModule, NatsTestHarness } = require('@loipv/nestjs-nats/testing');
 
 const received = [];
@@ -30,6 +31,7 @@ Module({ imports: [NatsTestingModule.forRoot()], providers: [Handlers] })(AppMod
 async function main() {
   assert.equal(typeof tracing, 'function');
   assert.equal(typeof NatsHealthIndicator, 'function');
+  assert.equal(typeof new KvIdempotencyStore().claim, 'function');
 
   const app = await NestFactory.createApplicationContext(AppModule, { logger: false });
   let failure;
