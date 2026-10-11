@@ -148,7 +148,7 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
       // `decide` only returns 'dlq' when a DLQ policy is set.
       if (!dlq) throw new Error('no DLQ configured');
       subject = dlq.subject(d.handler, msg);
-      await sendToDlq(entry, subject, dlq.mode, msg, err, msg.attempt, consumer);
+      await sendToDlq(entry, subject, dlq.mode, msg, err, msg.attempt, d.handler, consumer);
       return { subject };
     } catch (error) {
       return { subject, error: error ?? new Error(String(error)) };

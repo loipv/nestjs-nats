@@ -1,8 +1,13 @@
 import type { JsMsg } from '@nats-io/jetstream';
 import { headers, type MsgHdrs, NoRespondersError } from '@nats-io/transport-node';
+import { DEFAULT_REQUEST_TIMEOUT } from '../client/nats-client.js';
+import { jsonCodec } from '../codec/codec.js';
 import type { ConnectionEntry } from '../connection/connection-registry.js';
 import { NatsModuleError } from '../errors/errors.js';
+import { publishOutgoing } from '../jetstream/publish.js';
 import type { HandlerInfo, InboundMessage } from '../pipeline/delivery.js';
+import { encodeOutgoing, sendOutbound } from '../pipeline/outbound.js';
+import type { OutgoingMessage } from '../pipeline/types.js';
 
 export interface DlqOptions {
   /** Static subject, or a function of the handler and the failed message. */
@@ -140,9 +145,15 @@ export function isNoResponders(err: unknown): boolean {
   return false;
 }
 
+/** What `skipped` rejects with: the outbound plugins dropped the dead letter. */
+const DROPPED = new Error('the outbound plugins dropped the dead letter');
+
 /**
- * Internal: publishes a dead letter to an already resolved subject; `consumer` overrides
- * the consumer name of the headers (see `buildDlqHeaders`).
+ * Internal: sends a dead letter to an already resolved subject, through the outbound
+ * plugins of the connection (marked by `OutgoingMessage.deadLetter`); `consumer` overrides
+ * the consumer name of the headers (see `buildDlqHeaders`). Resolves `'dropped'` when a
+ * plugin returned without passing it on; rejects when the publish fails or the plugins
+ * fail or are too slow.
  */
 export async function sendToDlq(
   entry: ConnectionEntry,
@@ -151,32 +162,67 @@ export async function sendToDlq(
   msg: InboundMessage,
   err: unknown,
   deliveries: number,
+  handler: HandlerInfo,
   consumer?: string,
-): Promise<void> {
-  const h = buildDlqHeaders(msg, err, deliveries, new Date(), consumer);
-  if (mode === 'core') {
-    entry.nc.publish(subject, msg.data, { headers: h });
-    return;
-  }
+): Promise<'sent' | 'dropped'> {
+  const message: OutgoingMessage = {
+    kind: mode === 'core' ? 'publish' : 'jetstream',
+    connection: entry.name,
+    subject,
+    data: msg.data,
+    headers: buildDlqHeaders(msg, err, deliveries, new Date(), consumer),
+    codec: entry.options.codec ?? jsonCodec(),
+    deadLetter: { subject: msg.subject, handler, error: err },
+  };
+  const what = `DLQ publish to "${subject}"`;
+  const skipped = (): Error => DROPPED;
   try {
+    if (mode === 'core') {
+      await sendOutbound(
+        entry,
+        message,
+        (m) => {
+          const payload = encodeOutgoing(m);
+          if (m.headers.keys().length > 0) {
+            entry.nc.publish(m.subject, payload, { headers: m.headers });
+          } else {
+            entry.nc.publish(m.subject, payload);
+          }
+        },
+        { what, timeout: DEFAULT_REQUEST_TIMEOUT, skipped },
+      );
+      return 'sent';
+    }
     // A `duplicate` PubAck means this very dead letter (same stream, consumer and stream
     // sequence) is already stored: the message is dead-lettered either way.
-    await entry.js().publish(subject, msg.data, { headers: h });
-  } catch (pubErr) {
-    if (isNoResponders(pubErr)) {
-      throw new NatsModuleError(
-        `Cannot publish to DLQ subject "${subject}": no stream captures this subject`,
-        { cause: pubErr },
-      );
-    }
-    throw pubErr;
+    await publishOutgoing(
+      entry,
+      message,
+      {},
+      {
+        what,
+        skipped,
+        wrap: (pubErr) =>
+          isNoResponders(pubErr)
+            ? new NatsModuleError(
+                `Cannot publish to DLQ subject "${subject}": no stream captures this subject`,
+                { cause: pubErr },
+              )
+            : pubErr,
+      },
+    );
+    return 'sent';
+  } catch (error) {
+    if (error === DROPPED) return 'dropped';
+    throw error;
   }
 }
 
 /**
  * Publishes a failed message to its DLQ subject, with the original body and user headers
- * plus the `Nats-DLQ-*` headers (see `buildDlqHeaders`). Bypasses the outbound plugins. In `'jetstream'` mode it waits
- * for the PubAck and fails when no stream captures the subject.
+ * plus the `Nats-DLQ-*` headers (see `buildDlqHeaders`), through the outbound plugins. In
+ * `'jetstream'` mode it waits for the PubAck and fails when no stream captures the subject.
+ * Resolves `'dropped'` when an outbound plugin did not pass the dead letter on.
  */
 export async function publishToDlq(
   entry: ConnectionEntry,
@@ -185,6 +231,6 @@ export async function publishToDlq(
   msg: InboundMessage,
   err: unknown,
   deliveries: number,
-): Promise<void> {
-  await sendToDlq(entry, dlq.subject(info, msg), dlq.mode, msg, err, deliveries);
+): Promise<'sent' | 'dropped'> {
+  return sendToDlq(entry, dlq.subject(info, msg), dlq.mode, msg, err, deliveries, info);
 }

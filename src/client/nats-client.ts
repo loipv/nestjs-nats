@@ -13,7 +13,8 @@ import { NatsModuleError, NatsRequestError } from '../errors/errors.js';
 import { createOutgoingMessage, encodeOutgoing, sendOutbound } from '../pipeline/outbound.js';
 import type { OutgoingMessage } from '../pipeline/types.js';
 
-const DEFAULT_REQUEST_TIMEOUT = 5000;
+/** The default timeout (ms) of a request, and how long the outbound plugins have to pass a publish on. */
+export const DEFAULT_REQUEST_TIMEOUT = 5000;
 const SERVICE_ERROR_CODE_HEADER = 'Nats-Service-Error-Code';
 const SERVICE_ERROR_HEADER = 'Nats-Service-Error';
 

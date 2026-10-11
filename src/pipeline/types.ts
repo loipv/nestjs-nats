@@ -1,7 +1,7 @@
 import type { MsgHdrs } from '@nats-io/transport-node';
 import type { CloudEventMeta } from '../cloudevents/types.js';
 import type { Codec } from '../codec/codec.js';
-import type { Delivery } from './delivery.js';
+import type { Delivery, HandlerInfo } from './delivery.js';
 
 export type { Delivery, MessageOutcome } from './delivery.js';
 
@@ -25,6 +25,19 @@ export interface OutgoingMessage {
    * the batch and the batch size. Its `next()` settles once the whole batch is committed.
    */
   atomic?: { index: number; count: number };
+  /**
+   * Set on a dead letter: the message a handler failed on, published to its DLQ subject
+   * (`subject`). Its `data` is the original body (bytes) and its `headers` the dead letter's
+   * (`Nats-DLQ-*` and its `Nats-Msg-Id`).
+   */
+  deadLetter?: {
+    /** Subject the failed message arrived on. */
+    subject: string;
+    /** The handler that failed. */
+    handler: HandlerInfo;
+    /** The last error. */
+    error: unknown;
+  };
 }
 
 export interface OutboundMiddleware {

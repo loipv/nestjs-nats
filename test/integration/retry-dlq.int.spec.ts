@@ -312,7 +312,11 @@ describe('retry, backoff and DLQ', () => {
         raw: { info: { stream: 'ORD', consumer: 'billing', streamSequence: ack.seq } } as never,
         attempt: 1,
       };
-      await sendToDlq(entry, 'dlq.ORD.billing', 'jetstream', again, new Error('again'), 1);
+      await sendToDlq(entry, 'dlq.ORD.billing', 'jetstream', again, new Error('again'), 1, {
+        kind: 'consume',
+        stream: 'ORD',
+        durable: 'billing',
+      } as never);
       expect(await counts()).toMatchObject({ 'dlq.ORD.billing': 1, 'dlq.ORD.shipping': 1 });
       expect(sharedApp.get(SharedDlqHandlers).attempts('billing:ord.poison')).toEqual([1]);
       expect(sharedApp.get(SharedDlqHandlers).attempts('shipping:ord.poison')).toEqual([1]);
