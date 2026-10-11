@@ -7,7 +7,8 @@ import {
 import { connect, type NatsConnection, type Status } from '@nats-io/transport-node';
 import { Injectable, type LoggerService } from '@nestjs/common';
 import { Observable, Subject } from 'rxjs';
-import { NatsConfigError, NatsConnectionError } from '../errors/errors.js';
+import type { HandlerState } from '../adapters/adapter.js';
+import { NatsConfigError, NatsConnectionError, NatsModuleError } from '../errors/errors.js';
 import { type IdempotencyStore, InMemoryIdempotencyStore } from '../idempotency/store.js';
 import { createNatsLogger } from '../module/logger.js';
 import type { NatsModuleOptions } from '../module/options.js';
@@ -54,6 +55,7 @@ interface InternalEntry {
   reconnecting: boolean;
   usedStores: UsedIdempotencyStore[];
   closeHooks: Set<() => Promise<void>>;
+  handlers: Set<{ handler: string; state: HandlerState }>;
 }
 
 const DEFAULT_CLOSE_TIMEOUT = 10_000;
@@ -148,7 +150,13 @@ export class ConnectionRegistry {
           };
         },
       };
-      const internal: InternalEntry = { entry, reconnecting: false, usedStores: [], closeHooks };
+      const internal: InternalEntry = {
+        entry,
+        reconnecting: false,
+        usedStores: [],
+        closeHooks,
+        handlers: new Set(),
+      };
       this.entries.set(name, internal);
       void this.watchStatus(internal);
       return entry;
@@ -219,6 +227,31 @@ export class ConnectionRegistry {
   /** The idempotency stores handed to handlers so far (for closing them on shutdown). */
   idempotencyStores(): UsedIdempotencyStore[] {
     return [...this.entries.values()].flatMap(({ usedStores }) => usedStores);
+  }
+
+  /**
+   * Internal: records a handler loop on `connection`, starting at `'running'`. Each call adds
+   * its own entry; the returned function updates its state.
+   */
+  trackHandler(connection: string, label: string): (state: HandlerState) => void {
+    const internal = this.entries.get(connection);
+    if (!internal) throw new NatsModuleError(`Unknown NATS connection "${connection}"`);
+    const record = { handler: label, state: 'running' as HandlerState };
+    internal.handlers.add(record);
+    return (state) => {
+      record.state = state;
+    };
+  }
+
+  /** The tracked handlers of a connection, in registration order (`[]` if unknown). */
+  handlerStates(connection: string): ReadonlyArray<{ handler: string; state: HandlerState }> {
+    const internal = this.entries.get(connection);
+    return internal ? [...internal.handlers].map(({ handler, state }) => ({ handler, state })) : [];
+  }
+
+  /** Internal: forgets every tracked handler (they are rebuilt when handlers are registered). */
+  clearHandlers(): void {
+    for (const { handlers } of this.entries.values()) handlers.clear();
   }
 
   status(name: string = DEFAULT_CONNECTION): {

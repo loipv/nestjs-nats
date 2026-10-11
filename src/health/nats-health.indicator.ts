@@ -17,6 +17,13 @@ export interface NatsHealthCheckOptions {
   rttTimeout?: number;
   /** Also require JetStream to answer an account info request (default `false`). */
   jetstream?: boolean;
+  /**
+   * Also report the connection's message handlers (default `false`). A handler that gave up
+   * restarting (`failed`) makes the check `down` with `reason: 'handler failed: <label>'`
+   * (`, +<n> more` when several failed) and `handlers: { failed, restarting }`. Otherwise the
+   * check stays `up`, with `handlers: { restarting }` added while some handler is restarting.
+   */
+  handlers?: boolean;
 }
 
 /** The largest delay `setTimeout` honours; above it Node fires after 1 ms. */
@@ -59,8 +66,8 @@ export class NatsHealthIndicator {
     }
     const session = this.health.check(key);
     const connection = options.connection ?? DEFAULT_CONNECTION;
-    const down = (reason: string): HealthIndicatorResult<K> =>
-      session.down({ connection, reason }) as HealthIndicatorResult<K>;
+    const down = (reason: string, extra: Record<string, unknown> = {}): HealthIndicatorResult<K> =>
+      session.down({ connection, reason, ...extra }) as HealthIndicatorResult<K>;
     let secrets: Array<string | undefined> = [];
     try {
       if (!this.registry.has(connection)) return down('unknown connection');
@@ -84,10 +91,23 @@ export class NatsHealthIndicator {
         }
       }
 
+      let restartingDetail = {};
+      if (options.handlers) {
+        const states = this.registry.handlerStates(connection);
+        const failed = states.filter((h) => h.state === 'failed').map((h) => h.handler);
+        const restarting = states.filter((h) => h.state === 'restarting').map((h) => h.handler);
+        if (failed.length > 0) {
+          const more = failed.length > 1 ? `, +${failed.length - 1} more` : '';
+          return down(`handler failed: ${failed[0]}${more}`, { handlers: { failed, restarting } });
+        }
+        if (restarting.length > 0) restartingDetail = { handlers: { restarting } };
+      }
+
       return session.up({
         connection,
         ...(status.server !== undefined ? { server: redactServers(status.server)[0] } : {}),
         rtt: Math.round(rtt.value),
+        ...restartingDetail,
       }) as HealthIndicatorResult<K>;
     } catch (err) {
       return down(`check failed: ${redactText(errorMessage(err), secrets)}`);

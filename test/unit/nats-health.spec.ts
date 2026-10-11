@@ -13,6 +13,7 @@ interface FakeOptions {
   accountInfo?: () => Promise<unknown>;
   jsm?: () => Promise<unknown>;
   pass?: string;
+  handlers?: Array<{ handler: string; state: 'running' | 'restarting' | 'failed' }>;
 }
 
 /** Builds the indicator as Nest's property injection would. */
@@ -34,6 +35,7 @@ function setup(opts: FakeOptions = {}) {
   const manager = {
     has: (name: string) => name === 'default',
     get: () => entry,
+    handlerStates: () => opts.handlers ?? [],
     status: (name: string) => ({
       name,
       state: opts.state ?? 'connected',
@@ -174,6 +176,65 @@ describe('NatsHealthIndicator', () => {
         connection: 'default',
         reason: 'jetstream unavailable: timeout after 50ms',
       },
+    });
+  });
+
+  describe('handlers option', () => {
+    const states = [
+      { handler: 'A', state: 'failed' },
+      { handler: 'B', state: 'restarting' },
+      { handler: 'C', state: 'failed' },
+    ] as const;
+
+    it('ignores handler states without the handlers option', async () => {
+      const plain = await setup({ rtt: async () => 3 }).ind.isHealthy('nats');
+      const withFailed = await setup({ rtt: async () => 3, handlers: [...states] }).ind.isHealthy(
+        'nats',
+      );
+      expect(withFailed).toEqual(plain);
+    });
+
+    it('is down when a handler failed', async () => {
+      const { ind } = setup({ handlers: [...states] });
+      expect(await ind.isHealthy('nats', { handlers: true })).toEqual({
+        nats: {
+          status: 'down',
+          connection: 'default',
+          reason: 'handler failed: A, +1 more',
+          handlers: { failed: ['A', 'C'], restarting: ['B'] },
+        },
+      });
+    });
+
+    it('is up and lists restarting handlers', async () => {
+      const { ind } = setup({
+        rtt: async () => 3,
+        handlers: [
+          { handler: 'A', state: 'running' },
+          { handler: 'B', state: 'restarting' },
+        ],
+      });
+      expect(await ind.isHealthy('nats', { handlers: true })).toEqual({
+        nats: {
+          status: 'up',
+          connection: 'default',
+          server: 'nats://***@h:4222',
+          rtt: 3,
+          handlers: { restarting: ['B'] },
+        },
+      });
+    });
+
+    it('is up without a handlers field when all run', async () => {
+      const { ind } = setup({ handlers: [{ handler: 'A', state: 'running' }] });
+      expect((await ind.isHealthy('nats', { handlers: true })).nats).not.toHaveProperty('handlers');
+    });
+
+    it('checks the connection before handlers', async () => {
+      const { ind } = setup({ state: 'reconnecting', handlers: [...states] });
+      expect(await ind.isHealthy('nats', { handlers: true })).toEqual({
+        nats: { status: 'down', connection: 'default', reason: 'reconnecting' },
+      });
     });
   });
 
