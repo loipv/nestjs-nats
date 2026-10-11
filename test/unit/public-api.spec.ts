@@ -116,8 +116,10 @@ async function importGraph(entry: string): Promise<{ files: Set<string>; package
 it('does not pull optional peers or subpath entries, even transitively', async () => {
   const { files, packages } = await importGraph('index.ts');
   const offenders = [
-    ...[...files].filter((f) => /^(otel|health|testing)\//.test(f)),
-    ...packages.filter((p) => / -> (@opentelemetry\/|@nestjs\/terminus|@nestjs\/testing)/.test(p)),
+    ...[...files].filter((f) => /^(otel|health|testing|kv)\//.test(f)),
+    ...packages.filter((p) =>
+      / -> (@opentelemetry\/|@nestjs\/terminus|@nestjs\/testing|@nats-io\/kv)/.test(p),
+    ),
   ];
   expect(files.size).toBeGreaterThan(20);
   expect(offenders).toEqual([]);
@@ -127,9 +129,11 @@ it('keeps the testing entry free of the network lifecycle and optional peers', a
   const { files, packages } = await importGraph('testing/index.ts');
   const offenders = [
     ...[...files].filter((f) =>
-      /^(otel|health)\/|^module\/(nats-core\.module|nats-lifecycle|nats\.module)\.ts$/.test(f),
+      /^(otel|health|kv)\/|^module\/(nats-core\.module|nats-lifecycle|nats\.module)\.ts$/.test(f),
     ),
-    ...packages.filter((p) => / -> (@opentelemetry\/|@nestjs\/terminus|@nestjs\/testing)/.test(p)),
+    ...packages.filter((p) =>
+      / -> (@opentelemetry\/|@nestjs\/terminus|@nestjs\/testing|@nats-io\/kv)/.test(p),
+    ),
   ];
   expect(files).toContain('adapters/handler-pipeline.ts');
   expect(offenders).toEqual([]);

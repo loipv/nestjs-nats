@@ -44,6 +44,10 @@
     "./testing": {
       "types": "./dist/testing/index.d.ts",
       "default": "./dist/testing/index.js"
+    },
+    "./kv": {
+      "types": "./dist/kv/index.d.ts",
+      "default": "./dist/kv/index.js"
     }
   },
   "files": [
@@ -76,6 +80,7 @@
   },
   "peerDependencies": {
     "@nats-io/jetstream": "^3.0.0",
+    "@nats-io/kv": "^3.0.0",
     "@nats-io/services": "^3.0.0",
     "@nats-io/transport-node": "^3.0.0",
     "@nestjs/common": "^11.0.0 || ^12.0.0",
@@ -86,6 +91,9 @@
     "rxjs": "^7.1.0"
   },
   "peerDependenciesMeta": {
+    "@nats-io/kv": {
+      "optional": true
+    },
     "@nestjs/terminus": {
       "optional": true
     },
@@ -99,6 +107,7 @@
     "@changesets/changelog-github": "^1.0.1",
     "@changesets/cli": "^3.0.3",
     "@nats-io/jetstream": "^3.4.0",
+    "@nats-io/kv": "^3.4.0",
     "@nats-io/services": "^3.4.0",
     "@nats-io/transport-node": "^3.4.0",
     "@nestjs/common": "^12.1.2",
