@@ -77,10 +77,12 @@ export class RestartSupervisor {
     }
     if (this.current !== 'running') return;
     clearTimeout(this.stableTimer);
-    if (!this.restartable) {
+    if (this.deps.policy === false || this.deps.isConnectionClosed()) {
+      // The adapter's own error line already says no more messages will be received.
       this.setState('failed');
       return;
     }
+    // Gives up, with a log line, when the attempts are used up.
     this.schedule();
   }
 

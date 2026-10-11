@@ -98,6 +98,22 @@ describe('RestartSupervisor', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('gives up when the reopened intake dies after the last attempt', async () => {
+    const { supervisor, logger, states, reopen } = setup({ policy: { maxAttempts: 1 } });
+    supervisor.started();
+    supervisor.ended();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(logger.log).toHaveBeenCalledWith('Restarted L (attempt 1)');
+    expect(supervisor.restartable).toBe(false);
+    supervisor.ended();
+    expect(logger.error).toHaveBeenCalledWith(
+      'Gave up restarting L after 1 attempts; no more messages will be received',
+    );
+    expect(states).toEqual(['running', 'restarting', 'running', 'failed']);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(reopen).toHaveBeenCalledTimes(1);
+  });
+
   it('fails without scheduling when the connection is closed at the end', () => {
     const { supervisor, logger, reopen } = setup({ closed: () => true });
     supervisor.started();
