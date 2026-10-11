@@ -490,3 +490,71 @@ describe('JetStream', () => {
     }
   });
 });
+
+describe('JetStream removed fields', () => {
+  let srv: NatsTestServer;
+  let url: string;
+
+  beforeAll(async () => {
+    srv = await startNats();
+    url = srv.url;
+  });
+
+  afterAll(async () => {
+    await srv?.stop();
+  });
+
+  async function boot(extra: Record<string, unknown>) {
+    return createTestApp({
+      imports: [NatsModule.forRoot({ connection: { servers: url }, logger: false, ...extra })],
+    });
+  }
+
+  it('resets a stream field removed from the declaration', async () => {
+    const first = await boot({
+      streams: [{ name: 'RM', subjects: ['rm.>'], max_age: 60_000_000_000 }],
+    });
+    await first.close();
+    const app = await boot({ streams: [{ name: 'RM', subjects: ['rm.>'] }] });
+    try {
+      const jsm = await app.get<NatsStreamManager>(getStreamManagerToken()).jsm();
+      const { config } = await jsm.streams.info('RM');
+      expect(config.max_age).toBe(0);
+      expect(config.metadata?.['nestjs-nats.declared']).toBe('subjects');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('resets a consumer field removed from the declaration', async () => {
+    const streams = [{ name: 'RC', subjects: ['rc.>'] }];
+    const first = await boot({
+      streams,
+      consumers: [{ stream: 'RC', config: { durable_name: 'c', max_ack_pending: 5 } }],
+    });
+    await first.close();
+    const app = await boot({
+      streams,
+      consumers: [{ stream: 'RC', config: { durable_name: 'c' } }],
+    });
+    try {
+      const jsm = await app.get<NatsStreamManager>(getStreamManagerToken()).jsm();
+      expect((await jsm.consumers.info('RC', 'c')).config.max_ack_pending).not.toBe(5);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('fails verify for a removed field', async () => {
+    const first = await boot({
+      streams: [{ name: 'RV', subjects: ['rv.>'], max_age: 60_000_000_000 }],
+    });
+    await first.close();
+    await expect(
+      boot({
+        jetstream: { sync: 'verify' },
+        streams: [{ name: 'RV', subjects: ['rv.>'] }],
+      }),
+    ).rejects.toThrow(/max_age \(removed from the declaration/);
+  });
+});
