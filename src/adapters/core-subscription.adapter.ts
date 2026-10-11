@@ -12,7 +12,7 @@ import {
   type InboundMessage,
   type InternalDelivery,
 } from '../pipeline/delivery.js';
-import { type ServiceError, toServiceError } from '../pipeline/reply.js';
+import { batchRequestError, type ServiceError, toServiceError } from '../pipeline/reply.js';
 import { errorMessage, errorTrace } from '../util/errors.js';
 import type { ForceStopResult, HandlerAdapter } from './adapter.js';
 import { Dispatcher, type DispatchItem } from './dispatcher.js';
@@ -32,6 +32,8 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
   private readonly batch?: ResolvedBatchOptions;
   private sub?: Subscription;
   private loop?: Promise<void>;
+  /** Whether a request rejected by this batch handler was already logged. */
+  private warnedBatchRequest = false;
 
   constructor(
     private readonly def: SubscribeDefinition,
@@ -96,7 +98,10 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
 
   private async consume(sub: Subscription): Promise<void> {
     try {
-      for await (const msg of sub) await this.dispatcher.push(msg);
+      for await (const msg of sub) {
+        if (this.batch && msg.reply) this.rejectBatchRequest(msg);
+        else await this.dispatcher.push(msg);
+      }
     } catch (err) {
       this.entry.logger.error(`Subscription of ${this.label} failed`, errorTrace(err));
     } finally {
@@ -132,7 +137,19 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
     });
   }
 
-  /** A batch never replies, even to requests. */
+  /**
+   * A batch handler cannot answer a request: the request is not handled and gets a `400`
+   * at once, instead of its requester waiting for a reply that never comes.
+   */
+  private rejectBatchRequest(msg: Msg): void {
+    this.respondWith(msg, batchRequestError(this.def));
+    if (this.warnedBatchRequest) return;
+    this.warnedBatchRequest = true;
+    this.entry.logger.warn(
+      `Rejected a request on "${msg.subject}" for ${this.label} with 400: batch handlers do not reply to requests`,
+    );
+  }
+
   private async handleBatch(items: DispatchItem<Msg>[]): Promise<void> {
     const parts = items.map((item) => this.part(item));
     try {
@@ -179,7 +196,11 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
 
   private respondError(msg: Msg, err: unknown): ServiceError {
     const error = toServiceError(err);
-    const { code, description } = error;
+    this.respondWith(msg, error);
+    return error;
+  }
+
+  private respondWith(msg: Msg, { code, description }: ServiceError): void {
     this.respond(msg, () => {
       const h = headers();
       // Header values must not contain CR/LF.
@@ -187,7 +208,6 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
       h.set(ServiceErrorCodeHeader, String(code));
       return msg.respond(EMPTY, { headers: h });
     });
-    return error;
   }
 
   private respond(msg: Msg, send: () => boolean): void {

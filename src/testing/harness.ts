@@ -22,7 +22,12 @@ import {
   type InboundMessage,
   type MessageOutcome,
 } from '../pipeline/delivery.js';
-import { isReplyDelivery, type ServiceError, toServiceError } from '../pipeline/reply.js';
+import {
+  batchRequestError,
+  isReplyDelivery,
+  type ServiceError,
+  toServiceError,
+} from '../pipeline/reply.js';
 import { DLQ_HEADERS } from '../settlement/dlq.js';
 import type { PublishedMessage } from './fake-connection.js';
 import { fakeConnectionOf } from './mock-clients.js';
@@ -179,6 +184,15 @@ export class NatsTestHarness {
       );
     }
     const payloads: unknown[] = batch ? (payload as unknown[]) : [payload];
+    // As the adapter does: a batch handler answers a request with a 400, unhandled.
+    if (batch && def.kind === 'subscribe' && options.request) {
+      return {
+        settlement: 'none',
+        outcomes: payloads.map(() => ({ action: 'none' })),
+        reply: { error: batchRequestError(def) },
+        dlq: [],
+      };
+    }
     const subject =
       options.subject ?? ('subject' in target ? target.subject : this.defaultSubject(def));
     const parts = payloads.map((p, index) =>

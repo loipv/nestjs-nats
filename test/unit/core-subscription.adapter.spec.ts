@@ -225,9 +225,31 @@ describe('CoreSubscriptionAdapter', () => {
   });
 
   describe('batch', () => {
-    it('delivers batches of maxSize and never replies', async () => {
+    it('delivers batches of maxSize', async () => {
       const batches: unknown[] = [];
       const { adapter, fake } = setup(
+        async (payload) => {
+          batches.push(payload);
+        },
+        [],
+        {},
+        { batch: { maxSize: 2, maxWait: 60_000 } },
+      );
+      await adapter.start();
+      for (const n of [1, 2, 3, 4]) fake.push(fakeMsg(n));
+      await tick();
+      await tick();
+      expect(batches).toEqual([
+        [1, 2],
+        [3, 4],
+      ]);
+      await adapter.stop();
+      await adapter.idle();
+    });
+
+    it('rejects requests with a 400 reply without handling them, warning once', async () => {
+      const batches: unknown[] = [];
+      const { adapter, fake, logger } = setup(
         async (payload) => {
           batches.push(payload);
           return 'reply';
@@ -237,15 +259,30 @@ describe('CoreSubscriptionAdapter', () => {
         { batch: { maxSize: 2, maxWait: 60_000 } },
       );
       await adapter.start();
-      const msgs = [1, 2, 3, 4].map((n) => ({ ...fakeMsg(n), reply: `_INBOX.${n}` }));
-      for (const m of msgs) fake.push(m);
+      const requests = [1, 2].map((n) => ({ ...fakeMsg(n), reply: `_INBOX.${n}` }));
+      fake.push(requests[0]);
+      fake.push(fakeMsg(3));
+      fake.push(requests[1]);
+      fake.push(fakeMsg(4));
       await tick();
       await tick();
-      expect(batches).toEqual([
-        [1, 2],
-        [3, 4],
-      ]);
-      for (const m of msgs) expect(m.respond).not.toHaveBeenCalled();
+      expect(batches).toEqual([[3, 4]]);
+      for (const request of requests) {
+        expect(request.respond).toHaveBeenCalledTimes(1);
+        const [data, opts] = request.respond.mock.calls[0] as unknown as [
+          Uint8Array,
+          { headers: { get(k: string): string } },
+        ];
+        expect(data).toHaveLength(0);
+        expect(opts.headers.get('Nats-Service-Error-Code')).toBe('400');
+        expect(opts.headers.get('Nats-Service-Error')).toBe(
+          'NATS handler C.m handles batches and does not reply to requests',
+        );
+      }
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Rejected a request on "a.b" for C.m on "a.b" with 400: batch handlers do not reply to requests',
+      );
       await adapter.stop();
       await adapter.idle();
     });

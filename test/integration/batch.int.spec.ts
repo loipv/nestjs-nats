@@ -33,6 +33,7 @@ class Handlers {
   readonly retried: Array<Array<[number, number]>> = [];
   readonly mixed: Item[][] = [];
   readonly core: Item[][] = [];
+  readonly coreRequests: Item[][] = [];
   private failedOnce = false;
 
   @Consume({
@@ -84,6 +85,12 @@ class Handlers {
   @Subscribe('batch.core', { batch: { maxSize: 3, maxWait: 5000 } })
   onCore(@Payload() items: Item[]) {
     this.core.push(items);
+  }
+
+  // Outside every stream, so a request is not answered by a stream's PubAck.
+  @Subscribe('core-batch.req', { batch: { maxSize: 3, maxWait: 5000 } })
+  onCoreRequests(@Payload() items: Item[]) {
+    this.coreRequests.push(items);
   }
 }
 
@@ -195,6 +202,19 @@ describe('batch processing', () => {
     await rawNc.flush();
     await eventually(() => expect(handlers.core.map((b) => b.length)).toEqual([3, 3]));
     expect(handlers.core.flat().map((i) => i.n)).toEqual([0, 1, 2, 3, 4, 5]);
+  });
+
+  it('answers a request to a core batch handler with a 400, without handling it', async () => {
+    const reply = await rawNc.request('core-batch.req', json({ n: 99 }), { timeout: 2000 });
+    expect(reply.headers?.get('Nats-Service-Error-Code')).toBe('400');
+    expect(reply.headers?.get('Nats-Service-Error')).toBe(
+      'NATS handler Handlers.onCoreRequests handles batches and does not reply to requests',
+    );
+    for (let n = 10; n < 13; n++) rawNc.publish('core-batch.req', json({ n }));
+    await rawNc.flush();
+    await eventually(() =>
+      expect(handlers.coreRequests).toEqual([[{ n: 10 }, { n: 11 }, { n: 12 }]]),
+    );
   });
 
   it('flushes the pending batch on shutdown', async () => {

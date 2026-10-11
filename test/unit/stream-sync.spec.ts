@@ -229,3 +229,71 @@ describe('NatsStreamManager.ensureConsumer create defaults', () => {
     expect(consumers.update).not.toHaveBeenCalled();
   });
 });
+
+describe('NatsStreamManager: a declared null is an omitted field', () => {
+  const notFound = (err_code: number) =>
+    Promise.reject(new JetStreamApiError({ code: 404, err_code, description: 'not found' }));
+
+  function manager(current?: { stream?: object; consumer?: object }) {
+    const streams = {
+      info: vi.fn(() =>
+        current?.stream
+          ? Promise.resolve({ config: current.stream })
+          : notFound(JetStreamApiCodes.StreamNotFound),
+      ),
+      add: vi.fn((cfg: unknown) => Promise.resolve({ config: cfg })),
+      update: vi.fn(() => Promise.resolve({})),
+    };
+    const consumers = {
+      info: vi.fn(() =>
+        current?.consumer
+          ? Promise.resolve({ config: current.consumer })
+          : notFound(JetStreamApiCodes.ConsumerNotFound),
+      ),
+      add: vi.fn((_stream: string, cfg: unknown) => Promise.resolve({ config: cfg })),
+      update: vi.fn(() => Promise.resolve({})),
+    };
+    const entry = {
+      options: {},
+      logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      jsm: () => Promise.resolve({ streams, consumers }),
+    } as unknown as ConnectionEntry;
+    return { sm: new NatsStreamManager(entry), streams, consumers };
+  }
+
+  it('creates a stream without it', async () => {
+    const { sm, streams } = manager();
+    await sm.ensureStream({ name: 'S', subjects: ['a'], duplicate_window: null } as never);
+    expect(streams.add).toHaveBeenCalledExactlyOnceWith({ name: 'S', subjects: ['a'] });
+  });
+
+  it('does not count it as stream drift', async () => {
+    const { sm, streams } = manager({
+      stream: { name: 'S', subjects: ['a'], duplicate_window: 120_000_000_000 },
+    });
+    const declared = { name: 'S', subjects: ['a'], duplicate_window: null } as never;
+    await sm.ensureStream(declared);
+    expect(streams.update).not.toHaveBeenCalled();
+    await expect(sm.ensureStream(declared, 'verify')).resolves.toBeDefined();
+  });
+
+  it('creates a consumer without it', async () => {
+    const { sm, consumers } = manager();
+    await sm.ensureConsumer('S', { durable_name: 'D', description: null } as never);
+    expect(consumers.add).toHaveBeenCalledExactlyOnceWith('S', {
+      durable_name: 'D',
+      ack_policy: AckPolicy.Explicit,
+      max_deliver: -1,
+    });
+  });
+
+  it('does not count it as consumer drift', async () => {
+    const { sm, consumers } = manager({
+      consumer: { durable_name: 'D', ack_policy: AckPolicy.Explicit, max_deliver: -1 },
+    });
+    const declared = { durable_name: 'D', max_deliver: null } as never;
+    await sm.ensureConsumer('S', declared);
+    expect(consumers.update).not.toHaveBeenCalled();
+    await expect(sm.ensureConsumer('S', declared, 'verify')).resolves.toBeDefined();
+  });
+});

@@ -20,6 +20,7 @@ import {
   diffConfig,
   STREAM_IMMUTABLE_FIELDS,
   withConsumerDefaults,
+  withoutNulls,
 } from './stream-sync.js';
 
 function isApiError(err: unknown, errCode: number): boolean {
@@ -53,10 +54,11 @@ export class NatsStreamManager {
   }
 
   async ensureStream(
-    cfg: StreamDeclaration,
+    declared: StreamDeclaration,
     mode: StreamSyncMode = this.defaultMode,
   ): Promise<StreamInfo | undefined> {
     if (mode === 'none') return undefined;
+    const cfg = withoutNulls(declared);
     const jsm = await this.jsm();
     let current: StreamInfo;
     try {
@@ -98,12 +100,13 @@ export class NatsStreamManager {
 
   async ensureConsumer(
     stream: string,
-    cfg: ConsumerDeclaration['config'],
+    declared: ConsumerDeclaration['config'],
     mode: StreamSyncMode = this.defaultMode,
     /** Merged under `cfg` only when the consumer is created; never compared for drift. */
     createDefaults?: Partial<ConsumerConfig>,
   ): Promise<ConsumerInfo | undefined> {
     if (mode === 'none') return undefined;
+    const cfg = withoutNulls(declared);
     const jsm = await this.jsm();
     const durable = cfg.durable_name;
     const label = `${stream}/${durable}`;
