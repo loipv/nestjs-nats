@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NatsClient } from '../../src/client/nats-client.js';
 import { jsonCodec } from '../../src/codec/codec.js';
 import { ConnectionRegistry } from '../../src/connection/connection-registry.js';
-import { NatsConnectionError } from '../../src/errors/errors.js';
+import { NatsConnectionError, NatsModuleError } from '../../src/errors/errors.js';
 import type { NatsPlugin } from '../../src/pipeline/types.js';
 import { FakeNatsConnection } from '../../src/testing/fake-connection.js';
 
@@ -219,5 +219,35 @@ describe('NatsClient at close', () => {
     client.publish('o', 1);
     await mgr.closeAll();
     expect(events).toEqual(['publish o', 'drain']);
+  });
+});
+
+describe('ConnectionRegistry handler states', () => {
+  async function open(...names: string[]) {
+    const mgr = new FakeConnectionManager(new FakeNatsConnection(jsonCodec()));
+    for (const n of names) await mgr.connect(n, { connection: {}, logger: false });
+    return mgr;
+  }
+
+  it('tracks handler states per connection, one entry per call', async () => {
+    const mgr = await open('default', 'other');
+    const setA = mgr.trackHandler('default', 'A');
+    mgr.trackHandler('default', 'A');
+    mgr.trackHandler('other', 'B');
+    expect(mgr.handlerStates('default')).toEqual([
+      { handler: 'A', state: 'running' },
+      { handler: 'A', state: 'running' },
+    ]);
+    setA('failed');
+    expect(mgr.handlerStates('default')).toEqual([
+      { handler: 'A', state: 'failed' },
+      { handler: 'A', state: 'running' },
+    ]);
+    expect(mgr.handlerStates('other')).toEqual([{ handler: 'B', state: 'running' }]);
+    expect(mgr.handlerStates('nope')).toEqual([]);
+    expect(() => mgr.trackHandler('nope', 'A')).toThrow(NatsModuleError);
+    mgr.clearHandlers();
+    expect(mgr.handlerStates('default')).toEqual([]);
+    expect(mgr.handlerStates('other')).toEqual([]);
   });
 });
