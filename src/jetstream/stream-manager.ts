@@ -44,6 +44,18 @@ const isConsumerNotFound = (err: unknown): boolean =>
  */
 const metadataUnsupported = new WeakSet<ConnectionEntry>();
 
+/**
+ * Whether a server version keeps stream/consumer metadata: 2.10.0 or later, the threshold
+ * nats.js uses (it refuses to send `metadata` to an older server). A pre-release suffix is
+ * ignored, and an unknown version counts as supported (the response check still applies).
+ */
+function keepsMetadata(version: string | undefined): boolean {
+  const match = /^v?(\d+)\.(\d+)/.exec(version ?? '');
+  if (!match) return true;
+  const [major, minor] = [Number(match[1]), Number(match[2])];
+  return major > 2 || (major === 2 && minor >= 10);
+}
+
 /** Fields removed from a declaration: `reset` to the server default, or kept as `immutable`. */
 interface Removed {
   reset: string[];
@@ -253,9 +265,15 @@ export class NatsStreamManager {
     return updated;
   }
 
-  /** Whether removed fields are detected on this connection (its server keeps metadata). */
+  /**
+   * Whether removed fields are detected on this connection: off, with one warning, when its
+   * server is older than 2.10 (decided up front) or once a response lost the snapshot.
+   */
   private get tracksMetadata(): boolean {
-    return !metadataUnsupported.has(this.entry);
+    if (metadataUnsupported.has(this.entry)) return false;
+    if (keepsMetadata(this.entry.nc?.info?.version)) return true;
+    this.markMetadataUnsupported();
+    return false;
   }
 
   /**
@@ -263,7 +281,12 @@ export class NatsStreamManager {
    * update response lacks the snapshot just sent: the server does not keep metadata.
    */
   private checkMetadataKept(metadata: Record<string, string> | undefined, snapshot: string): void {
-    if (metadata?.[SNAPSHOT_KEY] === snapshot || metadataUnsupported.has(this.entry)) return;
+    if (metadata?.[SNAPSHOT_KEY] === snapshot) return;
+    this.markMetadataUnsupported();
+  }
+
+  private markMetadataUnsupported(): void {
+    if (metadataUnsupported.has(this.entry)) return;
     metadataUnsupported.add(this.entry);
     this.entry.logger.warn(
       `JetStream on connection "${this.entry.name}" does not keep stream/consumer metadata (NATS server 2.10 or later is needed); removed fields are not detected`,
