@@ -68,24 +68,43 @@ function setup(
     const iterators = new Map<string, ReturnType<typeof fakeIterator>>();
     let resolveStopped!: (err: Error | null) => void;
     const stopped = new Promise<Error | null>((resolve) => (resolveStopped = resolve));
-    return {
+    const endAll = () => {
+      for (const it of iterators.values()) it.end();
+    };
+    // Like `@nats-io/services`: stopping twice returns the first stop's result.
+    const svc = {
       iterators,
+      isStopped: false,
       addEndpoint: vi.fn((name: string) => {
         const it = fakeIterator();
         iterators.set(name, it);
         return it.iterator;
       }),
       stop: vi.fn(() => {
-        for (const it of iterators.values()) it.end();
-        resolveStopped(null);
-        return Promise.resolve(null);
+        if (!svc.isStopped) {
+          svc.isStopped = true;
+          endAll();
+          resolveStopped(null);
+        }
+        return stopped;
       }),
       stopped,
       /** What `@nats-io/services` does when a subscription fails: the iterators never end. */
       fail(err: Error) {
+        svc.isStopped = true;
         resolveStopped(err);
       },
+      /**
+       * A denied subscription with a real server: the other endpoints' iterators end first
+       * (their subscriptions drain), `stopped` resolves with the error once they are drained.
+       */
+      failAfterDrain(err: Error) {
+        svc.isStopped = true;
+        endAll();
+        setTimeout(() => resolveStopped(err), 5);
+      },
     };
+    return svc;
   };
   const service = makeService();
   const services = [service];
@@ -317,6 +336,40 @@ describe('NatsServiceAdapter', () => {
     await adapter.idle();
     expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0 });
   });
+  it('reports why the service stopped when its iterators end before it reports stopped', async () => {
+    const { service, logger, entry, endpoint } = setup();
+    const adapter = new NatsServiceAdapter(
+      { name: 'svc', version: '1' },
+      [endpoint('a'), endpoint('b')],
+      entry,
+    );
+    await adapter.start();
+    service.failAfterDrain(new Error('Permissions Violation for Subscription to "svc.a"'));
+    await vi.waitFor(() => expect(logger.error).toHaveBeenCalled());
+    await adapter.stop();
+    await adapter.idle();
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledWith(
+      'NATS service "svc" stopped: Permissions Violation for Subscription to "svc.a"; no more requests will be received',
+      expect.stringContaining('Permissions Violation'),
+    );
+  });
+
+  it('does not report a stop failure for a service that stopped by itself', async () => {
+    const { service, logger, entry, endpoint } = setup();
+    const adapter = new NatsServiceAdapter({ name: 'svc', version: '1' }, [endpoint('a')], entry);
+    await adapter.start();
+    service.fail(new Error('Permissions Violation'));
+    await vi.waitFor(() => expect(logger.error).toHaveBeenCalled());
+    await adapter.stop();
+    await adapter.idle();
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    expect(logger.error).not.toHaveBeenCalledWith(
+      expect.stringContaining('Failed to stop'),
+      expect.anything(),
+    );
+  });
+
   describe('restart', () => {
     const policy = {
       initialDelay: 10,
@@ -328,6 +381,30 @@ describe('NatsServiceAdapter', () => {
     const restart: RestartBinding = { policy, track: () => () => {} };
     const restarts = (warn: ReturnType<typeof vi.fn>) =>
       warn.mock.calls.filter(([m]) => String(m).startsWith('Restarting service "svc"')).length;
+
+    it('restarts once, with the reason, when the iterators end before stopped', async () => {
+      const { service, services, logger, entry, endpoint } = setup();
+      const adapter = new NatsServiceAdapter(
+        { name: 'svc', version: '1' },
+        [endpoint('a'), endpoint('b')],
+        entry,
+        restart,
+      );
+      await adapter.start();
+      service.failAfterDrain(new Error('Permissions Violation'));
+      await vi.waitFor(() => expect(services[1]?.addEndpoint).toHaveBeenCalledTimes(2));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(svcm.add).toHaveBeenCalledTimes(2);
+      expect(restarts(logger.warn)).toBe(1);
+      expect(logger.error).toHaveBeenCalledTimes(1);
+      expect(logger.error).toHaveBeenCalledWith(
+        'NATS service "svc" stopped: Permissions Violation',
+        expect.stringContaining('Permissions Violation'),
+      );
+      await adapter.stop();
+      await adapter.idle();
+      expect(logger.error).toHaveBeenCalledTimes(1);
+    });
 
     it('recreates the service when it stops with an error', async () => {
       const { service, services, logger, entry, endpoint } = setup((p) =>

@@ -197,7 +197,8 @@ export class NatsServiceAdapter implements HandlerAdapter {
   private async stopService(instance: ServiceInstance): Promise<void> {
     if (instance.closed) return;
     instance.closed = true;
-    if (this.entry.nc.isClosed()) return;
+    // `stop()` on a service that stopped by itself resolves with the error it stopped with.
+    if (this.entry.nc.isClosed() || instance.service.isStopped) return;
     try {
       const err = await instance.service.stop();
       if (err) throw err;
@@ -229,6 +230,9 @@ export class NatsServiceAdapter implements HandlerAdapter {
       failed = true;
       error = err;
     }
+    // A service that closes itself (a subscription failed) ends the endpoints' iterators
+    // before `stopped` reports why: let `onServiceStopped` handle it, with the reason.
+    if (instance.service.isStopped && !instance.closed) await instance.service.stopped;
     // A service that was stopped or replaced is not this handler's intake anymore; one that
     // stopped by itself was already reported.
     if (

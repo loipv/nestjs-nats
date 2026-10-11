@@ -293,7 +293,7 @@ describe('@NatsService killed by a subscription error', () => {
     });
     await eventually(() =>
       expect(errors).toContainEqual(
-        expect.stringMatching(/service "denied" stopped: .*den\.forbidden.*no more requests/i),
+        expect.stringMatching(/service "denied" stopped: .*den\.forbidden/i),
       ),
     );
     const started = Date.now();
