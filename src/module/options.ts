@@ -5,6 +5,7 @@ import type { Codec } from '../codec/codec.js';
 import type { IdempotencyStore } from '../idempotency/store.js';
 import type { NatsPlugin } from '../pipeline/types.js';
 import type { DlqOptions } from '../settlement/dlq.js';
+import type { RestartOptions } from '../settlement/restart.js';
 import type { RetryOptions } from '../settlement/retry.js';
 
 type WithRequired<T, K extends keyof T> = T & { [P in K]-?: T[P] };
@@ -29,6 +30,8 @@ export interface NatsModuleOptions {
   cloudEvents?: { source?: string };
   plugins?: NatsPlugin[];
   retry?: RetryOptions | false;
+  /** Backoff for restarting handler loops that end on their own; `false` disables restarts. */
+  restart?: RestartOptions | false;
   dlq?: DlqOptions | boolean;
   /** Defaults for handlers that enable idempotency: the store and the key TTL (ms, default 300_000). */
   idempotency?: { store?: IdempotencyStore; ttl?: number };
