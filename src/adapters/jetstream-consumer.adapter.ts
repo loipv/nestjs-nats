@@ -23,9 +23,15 @@ import {
 import { backoffDelay, DEFAULT_RETRY, type RetryPolicy } from '../settlement/retry.js';
 import { errorTrace } from '../util/errors.js';
 import { isPowerOfTwo } from '../util/power-of-two.js';
-import type { ForceStopResult, HandlerAdapter } from './adapter.js';
+import {
+  type ForceStopResult,
+  type HandlerAdapter,
+  NO_RESTART,
+  type RestartBinding,
+} from './adapter.js';
 import { Dispatcher, type DispatchItem } from './dispatcher.js';
 import { createHandlerPipeline, defaultPipelineDeps } from './handler-pipeline.js';
+import { RestartSupervisor } from './restart-supervisor.js';
 
 type ConsumeDefinition = HandlerDefinition & { kind: 'consume' };
 
@@ -70,11 +76,13 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
    */
   private readonly unsettled = new Map<JsMsg, NatsJetStreamContext | undefined>();
   private heartbeat?: ReturnType<typeof setInterval>;
+  private readonly supervisor: RestartSupervisor;
 
   constructor(
     private readonly def: ConsumeDefinition,
     private readonly entry: ConnectionEntry,
     private readonly streams: NatsStreamManager,
+    restart: RestartBinding = NO_RESTART,
   ) {
     this.concurrency = def.options.concurrency ?? 1;
     const pipeline = createHandlerPipeline(def, entry, defaultPipelineDeps);
@@ -86,6 +94,21 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     this.label = `${def.className}.${def.methodName} on "${def.options.stream}/${def.options.durable}"${this.push ? ' (push)' : ''}`;
     this.batch = resolveBatchOptions(def.options.batch);
     this.capacity = this.batch ? Math.max(this.batch.maxSize, this.concurrency) : this.concurrency;
+    this.supervisor = new RestartSupervisor({
+      policy: restart.policy,
+      label: this.label,
+      logger: entry.logger,
+      isConnectionClosed: () => entry.nc.isClosed(),
+      reopen: () => this.open(false),
+      onState: (() => {
+        const track = restart.track(this.label);
+        return (state) => {
+          track(state);
+          // Nothing will be pushed anymore: let the batch being collected settle.
+          if (state === 'failed') void this.dispatcher.stop();
+        };
+      })(),
+    });
     this.dispatcher = new Dispatcher<JsMsg>({
       concurrency: this.concurrency,
       ...(this.batch ? { batch: this.batch } : {}),
@@ -102,15 +125,25 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
 
   async start(): Promise<void> {
     if (this.messages) return;
+    await this.open(true);
+    this.supervisor.started();
+  }
+
+  /**
+   * Binds the consumer and starts reading it. The dispatcher, the heartbeat and the
+   * messages received so far are kept across a reopen; config warnings are logged on
+   * the `first` open only.
+   */
+  private async open(first: boolean): Promise<void> {
     const intake = this.push ? await this.openPush() : await this.openPull();
     const { config: actual } = intake;
-    this.checkMaxDeliver(actual.max_deliver);
+    if (first) this.checkMaxDeliver(actual.max_deliver);
     // `ack_wait` is in nanoseconds.
     const ackWaitMs = (actual.ack_wait ?? 0) / 1e6;
-    this.checkBatchWait(ackWaitMs);
+    if (first) this.checkBatchWait(ackWaitMs);
     const messages = await intake.consume();
     if (this.stopping) {
-      // stop() ran while start() was awaiting: nothing will ever read these messages.
+      // stop() ran while opening: nothing will ever read these messages.
       await messages.close();
       return;
     }
@@ -122,6 +155,7 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
 
   stop(): Promise<void> {
     this.stopping = true;
+    this.supervisor.stop();
     // Messages still being processed keep their heartbeat until `idle()` / `forceStop()`.
     if (this.unsettled.size === 0) this.stopHeartbeat();
     // Hands the batch being collected to the handler; `idle()` waits for it.
@@ -139,6 +173,7 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
   }
 
   async idle(): Promise<void> {
+    await this.supervisor.settled();
     await this.loop;
     await this.dispatcher.idle();
     if (this.stopping) this.stopHeartbeat();
@@ -364,6 +399,8 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
   }
 
   private async consume(messages: ConsumerMessages): Promise<void> {
+    let error: unknown;
+    let failed = false;
     try {
       for await (const msg of messages) {
         // Heartbeated from now on, while it waits for a slot or a batch.
@@ -384,16 +421,18 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
           );
       }
     } catch (err) {
-      if (!this.stopping) {
-        this.entry.logger.error(`Consumer of ${this.label} failed`, errorTrace(err));
-      }
-      return;
+      failed = true;
+      error = err;
     }
-    if (!this.stopping) {
-      this.entry.logger.error(
-        `Consumer of ${this.label} ended unexpectedly; no more messages will be received`,
-      );
+    // Messages that were replaced are not this handler's intake anymore.
+    if (this.stopping || messages !== this.messages) return;
+    const tail = this.supervisor.restartable ? '' : '; no more messages will be received';
+    if (failed) {
+      this.entry.logger.error(`Consumer of ${this.label} failed${tail}`, errorTrace(error));
+    } else {
+      this.entry.logger.error(`Consumer of ${this.label} ended unexpectedly${tail}`);
     }
+    this.supervisor.ended(error);
   }
 
   /** Surfaces consumer problems the library only reports through `status()` while it retries. */

@@ -1,5 +1,6 @@
 import type { ConsumerMessages, JsMsg } from '@nats-io/jetstream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { HandlerState, RestartBinding } from '../../src/adapters/adapter.js';
 import { JetStreamConsumerAdapter } from '../../src/adapters/jetstream-consumer.adapter.js';
 import type { ConnectionEntry } from '../../src/connection/connection-registry.js';
 import type { NatsJetStreamContext } from '../../src/context/nats-context.js';
@@ -14,6 +15,7 @@ function fakeMessages() {
   const queue: JsMsg[] = [];
   let wake: (() => void) | undefined;
   let closed = false;
+  let failure: Error | undefined;
   const statusQueue: unknown[] = [];
   let statusWake: (() => void) | undefined;
   const messages = {
@@ -29,6 +31,7 @@ function fakeMessages() {
       for (;;) {
         const next = queue.shift();
         if (next) yield next;
+        else if (failure) throw failure;
         else if (closed) return;
         else await new Promise<void>((resolve) => (wake = resolve));
       }
@@ -53,6 +56,11 @@ function fakeMessages() {
     /** Ends the iterator without anybody calling stop() on the adapter. */
     end() {
       void messages.close();
+    },
+    /** Makes the iterator throw once its buffered messages are yielded. */
+    fail(err: Error) {
+      failure = err;
+      wake?.();
     },
   };
 }
@@ -98,6 +106,7 @@ function setup(
     dlq?: unknown;
     /** `js().publish` (DLQ publishes). */
     publish?: () => Promise<unknown>;
+    restart?: RestartBinding;
   } = {},
 ) {
   const fake = fakeMessages();
@@ -117,6 +126,7 @@ function setup(
     name: 'default',
     options: { plugins: opts.plugins },
     logger,
+    nc: { isClosed: () => false },
     js: () => ({
       consumers: {
         get: () => Promise.resolve({ consume, info }),
@@ -150,7 +160,7 @@ function setup(
     ensureConsumer,
     jsm: () => Promise.resolve({ consumers: { info: opts.jsmInfo ?? info } }),
   } as unknown as NatsStreamManager;
-  const adapter = new JetStreamConsumerAdapter(def, entry, streams);
+  const adapter = new JetStreamConsumerAdapter(def, entry, streams, opts.restart);
   return { adapter, fake, consume, info, logger, ensureConsumer };
 }
 
@@ -1167,6 +1177,155 @@ describe('JetStreamConsumerAdapter', () => {
       for (let i = 1; i <= 10; i++) fake.push(fakeMsg(i) as unknown as JsMsg);
       await vi.waitFor(() => expect(handled).toHaveLength(10));
       expect(handled).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+      await adapter.stop();
+      await adapter.idle();
+    });
+  });
+
+  describe('restart', () => {
+    const policy = { initialDelay: 10, factor: 1, maxDelay: 10, jitter: 0, maxAttempts: Infinity };
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    /** `consume()` resolves a new fake `messages` on each call, unless `override` handles it. */
+    function setupRestart(
+      invoke: (payload: unknown, ctx: unknown) => Promise<unknown>,
+      opts: Parameters<typeof setup>[1] & {
+        /** Handles the n-th `consume()` call (0-based) when it returns something. */
+        override?: (call: number) => Promise<ConsumerMessages> | undefined;
+      } = {},
+    ) {
+      const fakes: ReturnType<typeof fakeMessages>[] = [];
+      const states: HandlerState[] = [];
+      let calls = 0;
+      const ctx = setup(invoke, {
+        ...opts,
+        consume: () => {
+          const overridden = opts.override?.(calls++);
+          if (overridden) return overridden;
+          const fake = fakeMessages();
+          fakes.push(fake);
+          return Promise.resolve(fake.messages);
+        },
+        restart: { policy, track: () => (state) => states.push(state) },
+      });
+      return { ...ctx, fakes, states };
+    }
+
+    it('reopens a pull consumer whose messages iterator fails, and keeps heartbeating held messages', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const handled: unknown[] = [];
+      const { adapter, fakes, states, consume, logger } = setupRestart(
+        async (payload) => {
+          handled.push(payload);
+          if (payload === 1) await gate;
+        },
+        { consumerConfig: { ack_wait: 100_000_000, max_deliver: -1 } },
+      );
+      await adapter.start();
+      const held = fakeMsg(1);
+      fakes[0]?.push(held as unknown as JsMsg);
+      await vi.waitFor(() => expect(handled).toEqual([1]));
+
+      fakes[0]?.fail(new Error('iterator boom'));
+      await vi.waitFor(() => expect(consume).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(states).toEqual(['running', 'restarting', 'running']));
+      expect(logger.error).toHaveBeenCalledWith(
+        'Consumer of C.m on "ORD/d" failed',
+        expect.stringContaining('iterator boom'),
+      );
+      expect(logger.log).toHaveBeenCalledWith('Restarted C.m on "ORD/d" (attempt 1)');
+
+      // The held message is still heartbeated after the reopen.
+      const beats = held.working.mock.calls.length;
+      await sleep(120);
+      expect(held.working.mock.calls.length).toBeGreaterThan(beats);
+
+      const next = fakeMsg(2);
+      fakes[1]?.push(next as unknown as JsMsg);
+      release();
+      await vi.waitFor(() => expect(handled).toEqual([1, 2]));
+      await vi.waitFor(() => expect(next.ack).toHaveBeenCalledTimes(1));
+      expect(held.ack).toHaveBeenCalledTimes(1);
+      await adapter.stop();
+      await adapter.idle();
+    });
+
+    it('warns about max_deliver only on the first open', async () => {
+      const { adapter, fakes, states, consume, logger } = setupRestart(() => Promise.resolve(), {
+        consumerConfig: { ack_wait: 30_000_000_000, max_deliver: 3 },
+        retry: { maxRetries: 5 },
+      });
+      await adapter.start();
+      fakes[0]?.end();
+      await vi.waitFor(() => expect(consume).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(states).toEqual(['running', 'restarting', 'running']));
+      const warnings = logger.warn.mock.calls.filter(([m]) => String(m).includes('max_deliver'));
+      expect(warnings).toHaveLength(1);
+      await adapter.stop();
+      await adapter.idle();
+    });
+
+    it('counts an already-bound push consumer on reopen as a failed attempt', async () => {
+      const bound = Object.assign(new Error('consumer is already bound'), {
+        name: 'InvalidOperationError',
+      });
+      const { adapter, fakes, states, consume, logger } = setupRestart(() => Promise.resolve(), {
+        delivery: 'push',
+        override: (call) => (call === 1 ? Promise.reject(bound) : undefined),
+      });
+      await adapter.start();
+      fakes[0]?.end();
+      await vi.waitFor(() => expect(consume).toHaveBeenCalledTimes(3));
+      await vi.waitFor(() => expect(states.at(-1)).toBe('running'));
+      expect(states).toEqual(['running', 'restarting', 'restarting', 'running']);
+      expect(logger.error).toHaveBeenCalledWith(
+        'Consumer of C.m on "ORD/d" (push) ended unexpectedly',
+      );
+      const failure = logger.warn.mock.calls.find(([m]) =>
+        String(m).startsWith('Restart of C.m on "ORD/d" (push) failed (attempt 1)'),
+      );
+      expect(failure?.[0]).toMatch(/already bound/);
+      expect(logger.log).toHaveBeenCalledWith('Restarted C.m on "ORD/d" (push) (attempt 2)');
+      await adapter.stop();
+      await adapter.idle();
+    });
+
+    it('closes messages opened by a reopen that finishes after stop()', async () => {
+      const late = fakeMessages();
+      const closeSpy = vi.spyOn(late.messages, 'close');
+      let resolveConsume!: () => void;
+      const { adapter, fakes, states, consume } = setupRestart(() => Promise.resolve(), {
+        override: (call) =>
+          call === 1
+            ? new Promise<ConsumerMessages>((resolve) => {
+                resolveConsume = () => resolve(late.messages);
+              })
+            : undefined,
+      });
+      await adapter.start();
+      fakes[0]?.end();
+      await vi.waitFor(() => expect(consume).toHaveBeenCalledTimes(2));
+      await adapter.stop();
+      resolveConsume();
+      await vi.waitFor(() => expect(closeSpy).toHaveBeenCalledTimes(1));
+      await adapter.idle();
+      expect(states).toEqual(['running', 'restarting']);
+      expect(consume).toHaveBeenCalledTimes(2);
+    });
+
+    it('stays down and logs the tail when restart is disabled', async () => {
+      const states: HandlerState[] = [];
+      const { adapter, fake, logger } = setup(() => Promise.resolve(), {
+        restart: { policy: false, track: () => (state) => states.push(state) },
+      });
+      await adapter.start();
+      fake.fail(new Error('boom'));
+      await vi.waitFor(() => expect(states).toEqual(['running', 'failed']));
+      expect(logger.error).toHaveBeenCalledWith(
+        'Consumer of C.m on "ORD/d" failed; no more messages will be received',
+        expect.stringContaining('boom'),
+      );
       await adapter.stop();
       await adapter.idle();
     });
