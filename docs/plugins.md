@@ -42,6 +42,30 @@ An outbound plugin must pass the message on (call `next()`) within the timeout o
 
 Once the message is sent, the call settles with the outcome of the send (the `PubAck`, the reply, or the send's own error such as a `NatsRequestError`) without waiting for the plugins to return, so a plugin that never settles after `next()` does not hold the caller. A plugin that throws after that is logged as an error on the connection's logger and does not change the result; rethrowing the error `next()` rejected with is not logged. A plugin that throws before calling `next()` makes the call reject with that error (`NatsClient.publish()` logs it). [`publishAtomic()`](./publishing.md#atomic-batches) applies the same rule to a whole batch, and rejects with a `NatsAtomicPublishError` where these calls reject with a `NatsModuleError`.
 
+## Dead letters
+
+Every dead letter the library publishes (see [Retry and DLQ](./retry-and-dlq.md)) goes through the connection's outbound plugins, like any other publish. Its `OutgoingMessage` has `kind` `'jetstream'` in `jetstream` DLQ mode and `'publish'` in `core` mode, `data` is the original body and `headers` are the DLQ headers, and `deadLetter` is set to `{ subject, handler, error }`: the subject the failed message arrived on, the `HandlerInfo` of the handler that failed and the error. There is no option to opt out, so a plugin that must not touch dead letters checks `message.deadLetter`.
+
+```ts
+import type { NatsPlugin } from '@loipv/nestjs-nats';
+
+const tagDeadLetters: NatsPlugin = {
+  name: 'tag-dead-letters',
+  outbound: {
+    async handle(message, next) {
+      if (message.deadLetter) {
+        message.headers.set('x-failed-handler', message.deadLetter.handler.methodName);
+      }
+      await next();
+    },
+  },
+};
+```
+
+- **Call `next()`.** A plugin that returns without calling it drops the dead letter: nothing is published, but the failed message counts as dead-lettered. Its outcome is `'dlq'`, a JetStream message is `term`'d, and a warning is logged. Drop one only on purpose.
+- **Timeout.** The plugins get the JetStream client's timeout in `jetstream` mode and 5000 ms in `core` mode. A plugin that throws before `next()`, or does not pass the dead letter on in time, makes the DLQ publish fail: the existing failure behavior applies (a `@Consume` or `@ConsumePush` message is `nak`'d with the backoff delay, a `@ConsumeOrdered` message is retried in place without limit, a `@Subscribe` message is logged and dropped).
+- **`Nats-Msg-Id`.** The DLQ stream de-duplicates on it. A plugin that changes or deletes `Nats-Msg-Id` on a dead letter loses that de-duplication.
+
 ## Observing outcomes
 
 `delivery.outcomes` is a `Map` from each message of the delivery (`delivery.messages`) to a `MessageOutcome` that says what became of it. The settlement and idempotency middlewares fill it in, so it is complete once the `next()` of an `outer` plugin has resolved or rejected. Read it there, after awaiting `next()`:

@@ -480,6 +480,56 @@ describe('NatsTestHarness with plugins', () => {
   });
 });
 
+describe('NatsTestHarness dead letters and outbound plugins', () => {
+  @Injectable()
+  class H {
+    @Consume({ stream: 'S', durable: 'dead', dlq: true })
+    dead() {
+      throw new Error('dead');
+    }
+  }
+
+  const harness = async (plugin: NatsPlugin) => {
+    const moduleRef = await Test.createTestingModule({
+      imports: [NatsTestingModule.forRoot({ plugins: [plugin], logger: false })],
+      providers: [H],
+    }).compile();
+    return { moduleRef, h: NatsTestHarness.create(moduleRef) };
+  };
+
+  it('lists the dead letter as the outbound plugins left it', async () => {
+    const { moduleRef, h } = await harness({
+      name: 'mark',
+      outbound: {
+        async handle(m, next) {
+          if (m.deadLetter) m.headers.set('x-dl', '1');
+          await next();
+        },
+      },
+    });
+    const r = await h.dispatch({ handler: 'H.dead' }, { id: 1 }, { deliveryCount: 6 });
+    expect(r.settlement).toBe('dlq');
+    expect(r.dlq).toHaveLength(1);
+    expect(r.dlq[0]?.headers['x-dl']).toBe('1');
+    await moduleRef.close();
+  });
+
+  it('leaves out a dead letter a plugin dropped', async () => {
+    const { moduleRef, h } = await harness({
+      name: 'drop',
+      outbound: {
+        async handle(m, next) {
+          if (!m.deadLetter) await next();
+        },
+      },
+    });
+    const r = await h.dispatch({ handler: 'H.dead' }, { id: 1 }, { deliveryCount: 6 });
+    expect(r.dlq).toEqual([]);
+    expect(r.outcomes).toMatchObject([{ action: 'dlq' }]);
+    await moduleRef.close();
+  });
+});
+
 describe('NatsTestHarness fake messages', () => {
   it('builds JetStream and core messages as the adapters receive them', async () => {
     const seen: { js?: NatsJetStreamContext; core?: NatsContext } = {};

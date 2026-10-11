@@ -123,7 +123,6 @@ These are tracked for upcoming releases:
 
 - **Core retries are in-process.** Retries of `@Subscribe` messages are timers inside the process, so pending retries are lost if the process dies or shuts down. Use `@Consume` when a message must survive that.
 - **Retries can reorder messages**, even with `concurrency: 1`: a failed message is redelivered after the delay, behind messages that arrived meanwhile.
-- **DLQ publishing bypasses outbound plugins.** Dead letters are published directly, without going through `plugins[].outbound`.
 - **Pulled messages are not all heartbeated.** With `concurrency` above 1, or with `batch`, a few messages the NATS client has pulled but not yet handed over are not kept alive. See [Heartbeats](./docs/retry-and-dlq.md#what-happens-to-a-failed-message).
 - **Messages at shutdown.** Messages the server delivers while shutdown is stopping a consumer, and messages a `@Consume` NATS client has pulled but not yet handed over when a handler never finishes, are redelivered only after the consumer's `ack_wait` (30 s by default). Messages the library holds (queued for a slot, collected or waiting with a batch) are `nak`'d at the forced stop. See [Lifecycle](./docs/lifecycle.md).
 - **Ordered consumers can drop a message at shutdown.** An ordered consumer acknowledges nothing, so a message it has not finished when the application stops is not redelivered, unless the next start replays it through `deliverPolicy`. See [Consumers](./docs/consumers.md#ordered-consumeordered).

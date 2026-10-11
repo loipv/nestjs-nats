@@ -14,9 +14,10 @@ import { ConnectionRegistry } from '../../src/connection/connection-registry.js'
 import type { NatsContext, NatsJetStreamContext } from '../../src/context/nats-context.js';
 import { Consume, Subscribe } from '../../src/decorators/handler.decorators.js';
 import { Ctx } from '../../src/decorators/param.decorators.js';
-import { NatsRequestError } from '../../src/errors/errors.js';
+import { NatsRequestError, NonRetryableError } from '../../src/errors/errors.js';
 import { NatsModule } from '../../src/module/nats.module.js';
 import type { InboundMessage } from '../../src/pipeline/delivery.js';
+import type { NatsPlugin } from '../../src/pipeline/types.js';
 import { sendToDlq } from '../../src/settlement/dlq.js';
 import { createTestApp } from './support/app.js';
 import { eventually, sleep } from './support/eventually.js';
@@ -166,6 +167,19 @@ class QueuedSlowHandlers {
     this.calls.push(`${ctx.seq}#${ctx.deliveryCount}`);
     await sleep(5000);
     this.done++;
+  }
+}
+
+@Injectable()
+class PluginDlqHandlers {
+  @Consume({
+    stream: 'ORD',
+    durable: 'plugin-dl',
+    dlq: true,
+    config: { filter_subject: 'ord.1' },
+  })
+  on(): never {
+    throw new NonRetryableError('poison');
   }
 }
 
@@ -413,5 +427,56 @@ describe('retry, backoff and DLQ', () => {
       ]),
     );
     expect(lines(logger.error).filter((l) => l.includes('rpc.fail'))).toEqual([]);
+  });
+});
+
+describe('dead letters and outbound plugins', () => {
+  it('dead letters go through the outbound plugins', async () => {
+    const srv = await startNats();
+    const rawNc = await connect({ servers: srv.url });
+    const jsm = await jetstreamManager(rawNc);
+    const plugin: NatsPlugin = {
+      name: 'mark-dead-letter',
+      outbound: {
+        async handle(m, next) {
+          if (m.deadLetter) m.headers.set('x-dead-letter-by', 'plugin');
+          await next();
+        },
+      },
+    };
+    const app = await createTestApp(
+      {
+        imports: [
+          NatsModule.forRoot({
+            connection: { servers: srv.url },
+            logger: false,
+            plugins: [plugin],
+            streams: [
+              { name: 'ORD', subjects: ['ord.>'] },
+              { name: 'DLQ', subjects: ['dlq.>'] },
+            ],
+          }),
+        ],
+        providers: [PluginDlqHandlers],
+      },
+      { silent: true },
+    );
+    try {
+      await jetstream(rawNc).publish('ord.1', json({ id: 1 }));
+      const m = await eventually<StoredMsg>(
+        async () => {
+          const got = await jsm.streams.getMessage('DLQ', { last_by_subj: 'dlq.ORD.plugin-dl' });
+          if (!got) throw new Error('no dead letter yet');
+          return got;
+        },
+        { timeout: 10_000, interval: 50 },
+      );
+      expect(m.header.get('x-dead-letter-by')).toBe('plugin');
+      expect(m.header.get('Nats-DLQ-Subject')).toBe('ord.1');
+    } finally {
+      await app.close();
+      await rawNc.close();
+      await srv.stop();
+    }
   });
 });

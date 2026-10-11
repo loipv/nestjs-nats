@@ -254,6 +254,23 @@ describe('tracing()', () => {
     expect(span.spanContext().traceId).toBe(parent.spanContext().traceId);
   });
 
+  it('gives a dead letter its own publish span, a child of the consume span', async () => {
+    const d = delivery(consumeHandler, [jsPart()]);
+    const m = outgoing('jetstream');
+    m.subject = 'dlq.ORD.billing';
+    m.deadLetter = { subject: 'o.c', handler: consumeHandler, error: new Error('dead') };
+    await inbound(d, async () => {
+      await outbound(m);
+    });
+    const consume = spans().find((s) => s.kind === SpanKind.CONSUMER) as ReadableSpan;
+    const publish = spans().find((s) => s.name === 'publish dlq.ORD.billing') as ReadableSpan;
+    expect(publish.kind).toBe(SpanKind.PRODUCER);
+    expect(publish.parentSpanContext?.spanId).toBe(consume.spanContext().spanId);
+    const tp = m.headers.get('traceparent');
+    expect(tp).toContain(publish.spanContext().traceId);
+    expect(tp).toContain(publish.spanContext().spanId);
+  });
+
   it('records outbound errors and rethrows', async () => {
     const boom = new Error('down');
     await expect(

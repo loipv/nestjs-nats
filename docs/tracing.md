@@ -50,7 +50,7 @@ NatsModule.forRoot({
 - **Span scope.** The `process` span covers the handler and the settlement (ack, retry, dead-lettering), and spans you create in the handler are its children.
 - **Span end.** A `publish` or `send` span ends when the message was sent and its outcome (the ack, the reply or the error) is known. It can end just after `publish()` or `request()` has settled: they do not wait for the outbound plugins to return (see [Outbound timing](./plugins.md#outbound-timing)). If a plugin after the tracing plugin never passes the message on, the call rejects at its timeout, but the `publish` or `send` span never ends: the tracing plugin is still waiting for that plugin.
 - **Atomic batches.** Each message of a `publishAtomic()` batch has its own `publish` span, and each span ends when the batch settles: with the commit's result once it is sent (or its error), or, for a batch aborted before sending (an outbound plugin failed, or staging outlasted the timeout), with the abort error. A span can end after `publishAtomic()` has already settled: once the batch is sent, `publishAtomic()` does not wait for the plugins to return. They carry `messaging.batch.message_count`.
-- **Dead letters.** DLQ publishes do not go through plugins, so they have no `publish` span.
+- **Dead letters.** A dead letter goes through the outbound plugins, so it has its own `publish <dlq subject>` span, a child of the `process` span of the message that failed. See [Dead letters](./plugins.md#dead-letters).
 
 ## Attributes
 
