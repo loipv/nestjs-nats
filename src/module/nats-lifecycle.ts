@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { DiscoveryService } from '@nestjs/core';
 import type { InstanceWrapper } from '@nestjs/core/injector/instance-wrapper.js';
-import type { HandlerAdapter } from '../adapters/adapter.js';
+import { type HandlerAdapter, type RestartBinding } from '../adapters/adapter.js';
 import { CoreSubscriptionAdapter } from '../adapters/core-subscription.adapter.js';
 import { JetStreamConsumerAdapter } from '../adapters/jetstream-consumer.adapter.js';
 import { OrderedConsumerAdapter } from '../adapters/ordered-consumer.adapter.js';
@@ -23,6 +23,7 @@ import { validateHandlers } from '../discovery/handler-validator.js';
 import { NatsConfigError } from '../errors/errors.js';
 import type { IdempotencyStore } from '../idempotency/store.js';
 import { NatsStreamManager } from '../jetstream/stream-manager.js';
+import { type RestartPolicy, resolveRestartPolicy } from '../settlement/restart.js';
 import { errorMessage, errorTrace } from '../util/errors.js';
 import { settlesWithin } from '../util/timeout.js';
 import type { ConsumerDeclaration, NatsFeatureOptions, StreamDeclaration } from './options.js';
@@ -126,6 +127,7 @@ export class NatsLifecycle
     await this.closeIdempotencyStores(
       Math.max(closeDeadline - Date.now(), Math.min(MIN_STORE_CLOSE_TIMEOUT, drainTimeout)),
     );
+    this.manager.clearHandlers();
   }
 
   private createAdapters(defs: HandlerDefinition[]): ManagedAdapter[] {
@@ -135,20 +137,36 @@ export class NatsLifecycle
       InstanceWrapper,
       { service: NatsServiceOptions; endpoints: ServiceEndpointDefinition[] }
     >();
+    // Resolved, and so validated, once per connection before any adapter is built or started.
+    const policies = new Map<string, RestartPolicy | false>();
+    const bindingFor = (entry: ConnectionEntry): RestartBinding => {
+      let policy = policies.get(entry.name);
+      if (policy === undefined) {
+        policy = resolveRestartPolicy(entry.options.restart, entry.name);
+        policies.set(entry.name, policy);
+      }
+      return { policy, track: (label) => this.manager.trackHandler(entry.name, label) };
+    };
     for (const def of defs) {
       const entry = this.manager.get(def.connection);
+      const restart = bindingFor(entry);
       switch (def.kind) {
         case 'subscribe':
-          adapters.push({ adapter: new CoreSubscriptionAdapter(def, entry), entry });
+          adapters.push({ adapter: new CoreSubscriptionAdapter(def, entry, restart), entry });
           break;
         case 'consume':
           adapters.push({
-            adapter: new JetStreamConsumerAdapter(def, entry, new NatsStreamManager(entry)),
+            adapter: new JetStreamConsumerAdapter(
+              def,
+              entry,
+              new NatsStreamManager(entry),
+              restart,
+            ),
             entry,
           });
           break;
         case 'ordered':
-          adapters.push({ adapter: new OrderedConsumerAdapter(def, entry), entry });
+          adapters.push({ adapter: new OrderedConsumerAdapter(def, entry, restart), entry });
           break;
         case 'service-endpoint': {
           // `validateHandlers` already rejected endpoints of classes without `@NatsService`.
@@ -164,7 +182,10 @@ export class NatsLifecycle
       const [first] = endpoints;
       if (!first) continue;
       const entry = this.manager.get(first.connection);
-      adapters.push({ adapter: new NatsServiceAdapter(service, endpoints, entry), entry });
+      adapters.push({
+        adapter: new NatsServiceAdapter(service, endpoints, entry, bindingFor(entry)),
+        entry,
+      });
     }
     return adapters;
   }
