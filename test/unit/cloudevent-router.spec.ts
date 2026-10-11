@@ -157,13 +157,15 @@ function logger() {
 }
 
 function fakeEntry() {
+  const jsPublish = vi.fn((..._args: unknown[]) => Promise.resolve({ seq: 1 }));
   return {
+    jsPublish,
     name: 'default',
     options: {},
     logger: logger(),
     nc: { publish: vi.fn() },
-    js: () => ({ publish: vi.fn(() => Promise.resolve({ seq: 1 })) }),
-  } as unknown as ConnectionEntry;
+    js: () => ({ publish: jsPublish }),
+  } as unknown as ConnectionEntry & { jsPublish: typeof jsPublish };
 }
 
 function ceHeaders(attrs: Record<string, string>) {
@@ -226,7 +228,7 @@ async function run(
   retry: RetryPolicy | false = false,
 ) {
   const entry = fakeEntry();
-  const kind = def.kind === 'consume' ? 'consume' : 'subscribe';
+  const kind = def.kind === 'service-endpoint' ? 'subscribe' : def.kind;
   const settlement = createSettlement({
     entry,
     retry,
@@ -349,7 +351,9 @@ describe('@CloudEventRouter discovery', () => {
       get: () => ({ options: {} }),
     } as unknown as ConnectionRegistry;
     const wrapper = { isDependencyTreeStatic: () => true, isTransient: false };
-    expect(() => validateHandlers([{ ...def, wrapper } as never], mgr)).toThrow(NatsConfigError);
+    expect(() => validateHandlers([{ ...def, wrapper } as never], mgr)).toThrow(
+      /conflicts with config.deliver_group/,
+    );
   });
 
   it.each([
@@ -533,18 +537,41 @@ describe('@CloudEventRouter dispatch', () => {
   it('settles an ordered router without acks', async () => {
     const def = await routerDef({ consumeOrdered: { stream: 'S' } });
     calls.length = 0;
-    const ok = await run(def, jsPart({ ...BASE, type: 'com.o.created' }).part);
+    const matched = jsPart({ ...BASE, type: 'com.o.created' });
+    const ok = await run(def, matched.part);
     expect(calls).toHaveLength(1);
     expect(ok.outcome).toEqual({ action: 'none' });
+    expect(matched.raw.ack).not.toHaveBeenCalled();
+    expect(matched.raw.term).not.toHaveBeenCalled();
 
     const term = await routerDef({ consumeOrdered: { stream: 'S' }, unmatched: 'term' });
-    const dropped = await run(term, jsPart({ ...BASE, type: 'com.other' }).part);
+    const other = jsPart({ ...BASE, type: 'com.other' });
+    const dropped = await run(term, other.part);
     expect(dropped.outcome).toMatchObject({ action: 'drop' });
+    expect(other.raw.ack).not.toHaveBeenCalled();
+    expect(other.raw.term).not.toHaveBeenCalled();
 
     const dlqDef = await routerDef({ consumeOrdered: { stream: 'S' }, unmatched: 'dlq' });
-    const dead = await run(dlqDef, jsPart({ ...BASE, type: 'com.other' }).part, true);
-    expect(dead.outcome).toMatchObject({ action: 'dlq' });
-    expect(dead.d.result).toBeUndefined();
+    const deadPart = jsPart({ ...BASE, type: 'com.other' });
+    const dead = await run(dlqDef, deadPart.part, true);
+    expect(dead.outcome).toMatchObject({
+      action: 'dlq',
+      subject: 'dlq.S.ordered.R.@CloudEventRouter',
+    });
+    expect(deadPart.raw.ack).not.toHaveBeenCalled();
+    expect(deadPart.raw.term).not.toHaveBeenCalled();
+    // An ordered consumer's dead letter goes through JetStream, not core publish.
+    expect(dead.entry.nc.publish).not.toHaveBeenCalled();
+    expect(dead.entry.jsPublish).toHaveBeenCalledTimes(1);
+    const [subject, , opts] = dead.entry.jsPublish.mock.calls[0] as [
+      string,
+      unknown,
+      { headers: { get(k: string): string } },
+    ];
+    expect(subject).toBe('dlq.S.ordered.R.@CloudEventRouter');
+    expect(opts.headers.get('Nats-DLQ-Subject')).toBe('events.o');
+    expect(opts.headers.get('Nats-DLQ-Stream')).toBe('S');
+    expect(opts.headers.get('Nats-DLQ-Error')).toContain('com.other');
 
     const noDlq = await run(dlqDef, jsPart({ ...BASE, type: 'com.other' }).part, false);
     expect(noDlq.outcome).toMatchObject({ action: 'drop' });
