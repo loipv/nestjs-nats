@@ -78,6 +78,12 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
   private readonly unsettled = new Map<JsMsg, NatsJetStreamContext | undefined>();
   private heartbeat?: ReturnType<typeof setInterval>;
   private readonly supervisor: RestartSupervisor;
+  /**
+   * Restarts are on: a missing consumer (or stream) ends the intake, for the supervisor
+   * to reopen it (recreating a consumer declared with `config`), instead of nats.js
+   * waiting for it to come back.
+   */
+  private readonly abortOnMissing: boolean;
 
   constructor(
     private readonly def: ConsumeDefinition,
@@ -95,6 +101,7 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     this.label = `${def.className}.${def.methodName} on "${def.options.stream}/${def.options.durable}"${this.push ? ' (push)' : ''}`;
     this.batch = resolveBatchOptions(def.options.batch);
     this.capacity = this.batch ? Math.max(this.batch.maxSize, this.concurrency) : this.concurrency;
+    this.abortOnMissing = restart.policy !== false;
     this.supervisor = new RestartSupervisor({
       policy: restart.policy,
       label: this.label,
@@ -220,7 +227,11 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
       // for a slot meanwhile. The heartbeat covers every message the client has handed
       // over; while every slot is busy, up to `max_messages - 1` more can still sit in the
       // client's own buffer, out of its reach.
-      consume: () => consumer.consume({ max_messages: this.capacity }),
+      consume: () =>
+        consumer.consume({
+          max_messages: this.capacity,
+          ...(this.abortOnMissing ? { abort_on_missing_resource: true } : {}),
+        }),
     };
   }
 
@@ -273,7 +284,9 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
       config: actual,
       consume: async () => {
         try {
-          return await consumer.consume();
+          return await (this.abortOnMissing
+            ? consumer.consume({ abort_on_missing_resource: true })
+            : consumer.consume());
         } catch (err) {
           // Without a deliver group, nats.js binds one subscriber only.
           if (isAlreadyBound(err) && !deliverGroup) {

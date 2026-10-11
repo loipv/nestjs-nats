@@ -1,3 +1,4 @@
+import { jetstreamManager } from '@nats-io/jetstream';
 import { connect, type NatsConnection } from '@nats-io/transport-node';
 import { Injectable, type LoggerService, type Provider } from '@nestjs/common';
 import { TerminusModule } from '@nestjs/terminus';
@@ -42,6 +43,16 @@ class Worker {
   readonly got: unknown[] = [];
 
   @Consume({ stream: 'RST', durable: 'w', config: { filter_subject: 'rst.>' } })
+  handle(@Payload() p: unknown) {
+    this.got.push(p);
+  }
+}
+
+@Injectable()
+class DeletedWorker {
+  readonly got: unknown[] = [];
+
+  @Consume({ stream: 'RST', durable: 'del', config: { filter_subject: 'rst.del.>' } })
   handle(@Payload() p: unknown) {
     this.got.push(p);
   }
@@ -137,6 +148,30 @@ describe('restarting handlers', () => {
 
     nc.publish('rst.2', enc.encode('2'));
     await eventually(() => expect(worker.got).toEqual([1, 2]));
+  });
+
+  it('recreates a deleted pull consumer declared with config', async () => {
+    srv = await startNats([], { config: ALLOW });
+    const { lines, logger } = collectingLogger();
+    const started = await startApp(srv, { initialDelay: 100, maxDelay: 500 }, logger, [
+      DeletedWorker,
+    ]);
+    const worker = started.get(DeletedWorker);
+    nc = await connect({ servers: srv.url, user: 'a', pass: 'pw' });
+
+    nc.publish('rst.del.1', enc.encode('1'));
+    await eventually(() => expect(worker.got).toEqual([1]));
+
+    const jsm = await jetstreamManager(nc);
+    await jsm.consumers.delete('RST', 'del');
+    await eventually(
+      () => expect(lines.log).toContainEqual(expect.stringMatching(/^Restarted .*RST\/del/)),
+      { timeout: 10_000 },
+    );
+
+    // The recreated consumer starts from its deliver policy (all): message 1 comes again.
+    nc.publish('rst.del.2', enc.encode('2'));
+    await eventually(() => expect(worker.got).toEqual([1, 1, 2]));
   });
 
   it('gives up on a denied core subscription after maxAttempts and reports it', async () => {
