@@ -10,7 +10,10 @@ import type { NatsStreamManager } from '../../src/jetstream/stream-manager.js';
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-/** Push-driven async iterable whose `close()` ends iteration after buffered items (like nats.js). */
+/**
+ * Push-driven async iterable whose `close()` ends iteration after buffered items, and
+ * resolves only once the iterator has been read to the end (like nats.js).
+ */
 function fakeMessages() {
   const queue: JsMsg[] = [];
   let wake: (() => void) | undefined;
@@ -18,6 +21,9 @@ function fakeMessages() {
   let failure: Error | undefined;
   const statusQueue: unknown[] = [];
   let statusWake: (() => void) | undefined;
+  let markEnded!: () => void;
+  /** Resolves once the iterator has been read to its end. */
+  const ended = new Promise<void>((resolve) => (markEnded = resolve));
   const messages = {
     async *status() {
       for (;;) {
@@ -28,23 +34,28 @@ function fakeMessages() {
       }
     },
     async *[Symbol.asyncIterator]() {
-      for (;;) {
-        const next = queue.shift();
-        if (next) yield next;
-        else if (failure) throw failure;
-        else if (closed) return;
-        else await new Promise<void>((resolve) => (wake = resolve));
+      try {
+        for (;;) {
+          const next = queue.shift();
+          if (next) yield next;
+          else if (failure) throw failure;
+          else if (closed) return;
+          else await new Promise<void>((resolve) => (wake = resolve));
+        }
+      } finally {
+        markEnded();
       }
     },
     close: () => {
       closed = true;
       wake?.();
       statusWake?.();
-      return Promise.resolve();
+      return ended;
     },
   };
   return {
     messages: messages as unknown as ConsumerMessages,
+    ended,
     push(msg: JsMsg) {
       queue.push(msg);
       wake?.();
@@ -246,6 +257,8 @@ describe('JetStreamConsumerAdapter', () => {
     await starting;
     expect(closeSpy).toHaveBeenCalledTimes(1);
     await adapter.idle();
+    // Read to its end, so nats.js releases it.
+    await fake.ended;
   });
 
   it('naks received-but-unstarted messages on stop and lets in-flight ones finish', async () => {
@@ -1291,11 +1304,12 @@ describe('JetStreamConsumerAdapter', () => {
       await adapter.idle();
     });
 
-    it('closes messages opened by a reopen that finishes after stop()', async () => {
+    it('closes and drains messages opened by a reopen that finishes after stop()', async () => {
       const late = fakeMessages();
       const closeSpy = vi.spyOn(late.messages, 'close');
+      const invoke = vi.fn(() => Promise.resolve());
       let resolveConsume!: () => void;
-      const { adapter, fakes, states, consume } = setupRestart(() => Promise.resolve(), {
+      const { adapter, fakes, states, consume } = setupRestart(invoke, {
         override: (call) =>
           call === 1
             ? new Promise<ConsumerMessages>((resolve) => {
@@ -1307,9 +1321,22 @@ describe('JetStreamConsumerAdapter', () => {
       fakes[0]?.end();
       await vi.waitFor(() => expect(consume).toHaveBeenCalledTimes(2));
       await adapter.stop();
+      // idle() waits on the reopen in flight.
+      let idled = false;
+      const idle = adapter.idle().then(() => {
+        idled = true;
+      });
+      await tick();
+      expect(idled).toBe(false);
+      // Already buffered when the late messages arrive: handed back, not handled.
+      const buffered = fakeMsg(1);
+      late.push(buffered as unknown as JsMsg);
       resolveConsume();
-      await vi.waitFor(() => expect(closeSpy).toHaveBeenCalledTimes(1));
-      await adapter.idle();
+      await idle;
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+      await late.ended;
+      expect(buffered.nak).toHaveBeenCalledExactlyOnceWith();
+      expect(invoke).not.toHaveBeenCalled();
       expect(states).toEqual(['running', 'restarting']);
       expect(consume).toHaveBeenCalledTimes(2);
     });

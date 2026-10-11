@@ -32,6 +32,7 @@ import {
   NO_RESTART,
   type RestartBinding,
 } from './adapter.js';
+import { discardMessages } from './discard-messages.js';
 import { createHandlerPipeline, defaultPipelineDeps } from './handler-pipeline.js';
 import { RestartSupervisor } from './restart-supervisor.js';
 
@@ -121,8 +122,14 @@ export class OrderedConsumerAdapter implements HandlerAdapter {
     // no heartbeat while they wait.
     const messages = await consumer.consume();
     if (this.stopping) {
-      // stop() ran while opening: nothing will ever read these messages.
-      this.close(messages);
+      // stop() ran while opening: nothing will handle these messages, and an ordered
+      // consumer has nothing to hand back.
+      await discardMessages(
+        messages,
+        () => {},
+        (err) =>
+          this.entry.logger.error(`Failed to close consumer of ${this.label}`, errorTrace(err)),
+      );
       return;
     }
     this.messages = messages;
