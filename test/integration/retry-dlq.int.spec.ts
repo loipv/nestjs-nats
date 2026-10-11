@@ -16,7 +16,7 @@ import { Consume, Subscribe } from '../../src/decorators/handler.decorators.js';
 import { Ctx } from '../../src/decorators/param.decorators.js';
 import { NatsRequestError, NonRetryableError } from '../../src/errors/errors.js';
 import { NatsModule } from '../../src/module/nats.module.js';
-import type { InboundMessage } from '../../src/pipeline/delivery.js';
+import type { HandlerInfo, InboundMessage } from '../../src/pipeline/delivery.js';
 import type { NatsPlugin } from '../../src/pipeline/types.js';
 import { sendToDlq } from '../../src/settlement/dlq.js';
 import { createTestApp } from './support/app.js';
@@ -326,11 +326,16 @@ describe('retry, backoff and DLQ', () => {
         raw: { info: { stream: 'ORD', consumer: 'billing', streamSequence: ack.seq } } as never,
         attempt: 1,
       };
-      await sendToDlq(entry, 'dlq.ORD.billing', 'jetstream', again, new Error('again'), 1, {
+      const handler: HandlerInfo = {
         kind: 'consume',
+        connection: 'default',
+        className: 'SharedDlqHandlers',
+        methodName: 'billing',
         stream: 'ORD',
         durable: 'billing',
-      } as never);
+        delivery: 'pull',
+      };
+      await sendToDlq(entry, 'dlq.ORD.billing', 'jetstream', again, new Error('again'), 1, handler);
       expect(await counts()).toMatchObject({ 'dlq.ORD.billing': 1, 'dlq.ORD.shipping': 1 });
       expect(sharedApp.get(SharedDlqHandlers).attempts('billing:ord.poison')).toEqual([1]);
       expect(sharedApp.get(SharedDlqHandlers).attempts('shipping:ord.poison')).toEqual([1]);

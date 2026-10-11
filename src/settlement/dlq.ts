@@ -145,8 +145,15 @@ export function isNoResponders(err: unknown): boolean {
   return false;
 }
 
-/** What `skipped` rejects with: the outbound plugins dropped the dead letter. */
-const DROPPED = new Error('the outbound plugins dropped the dead letter');
+/**
+ * What `skipped` rejects with (one per call, so its stack is the call's): the outbound
+ * plugins dropped the dead letter. A plugin calling `next()` after returning gets it too.
+ */
+class DeadLetterDropped extends NatsModuleError {
+  constructor(subject: string) {
+    super(`Dead letter to "${subject}": next() was called after the outbound plugins returned`);
+  }
+}
 
 /**
  * Internal: sends a dead letter to an already resolved subject, through the outbound
@@ -175,7 +182,7 @@ export async function sendToDlq(
     deadLetter: { subject: msg.subject, handler, error: err },
   };
   const what = `DLQ publish to "${subject}"`;
-  const skipped = (): Error => DROPPED;
+  const skipped = (): Error => new DeadLetterDropped(subject);
   try {
     if (mode === 'core') {
       await sendOutbound(
@@ -213,7 +220,7 @@ export async function sendToDlq(
     );
     return 'sent';
   } catch (error) {
-    if (error === DROPPED) return 'dropped';
+    if (error instanceof DeadLetterDropped) return 'dropped';
     throw error;
   }
 }

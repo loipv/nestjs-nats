@@ -63,7 +63,7 @@ const tagDeadLetters: NatsPlugin = {
 ```
 
 - **Call `next()`.** A plugin that returns without calling it drops the dead letter: nothing is published, but the failed message counts as dead-lettered. Its outcome is `'dlq'`, a JetStream message is `term`'d, and a warning is logged. Drop one only on purpose.
-- **Timeout.** The plugins get the JetStream client's timeout in `jetstream` mode and 5000 ms in `core` mode. A plugin that throws before `next()`, or does not pass the dead letter on in time, makes the DLQ publish fail: the existing failure behavior applies (a `@Consume` or `@ConsumePush` message is `nak`'d with the backoff delay, a `@ConsumeOrdered` message is retried in place without limit, a `@Subscribe` message is logged and dropped).
+- **Timeout.** The plugins get the `timeout` option of the JetStream client (5000 ms when it sets none) in `jetstream` mode and 5000 ms in `core` mode. A plugin that throws before `next()`, or does not pass the dead letter on in time, makes the DLQ publish fail: the existing failure behavior applies (a `@Consume` or `@ConsumePush` message is `nak`'d with the backoff delay, a `@ConsumeOrdered` message is retried in place without limit, a `@Subscribe` message is logged and dropped).
 - **`Nats-Msg-Id`.** The DLQ stream de-duplicates on it; a dead letter of a core message has none. A plugin that changes or deletes `Nats-Msg-Id` on a dead letter loses that de-duplication.
 
 ## Observing outcomes

@@ -874,7 +874,9 @@ describe('publishToDlq', () => {
 
     it('hands the dead letter to the outbound plugins, marked', async () => {
       const seen: OutgoingMessage[] = [];
+      const codec = jsonCodec();
       const { entry } = fakeEntry({
+        codec,
         plugins: plugin(async (m, next) => {
           seen.push(m);
           await next();
@@ -886,6 +888,7 @@ describe('publishToDlq', () => {
       expect(seen).toHaveLength(1);
       const m = seen[0] as OutgoingMessage;
       expect(m.kind).toBe('jetstream');
+      expect(m.codec).toBe(codec);
       expect(m.subject).toBe('dlq.ORD.d');
       expect(m.data).toEqual(msg.data);
       expect(m.headers.get('Nats-DLQ-Stream')).toBe('ORD');
@@ -974,6 +977,26 @@ describe('publishToDlq', () => {
       expect(core.ncPublish).not.toHaveBeenCalled();
     });
 
+    it('refuses a next() called after the plugins returned, with a fresh error naming the subject', async () => {
+      const nexts: Array<() => Promise<void>> = [];
+      const { entry, jsPublish } = fakeEntry({
+        plugins: plugin(async (_m, next) => {
+          nexts.push(next);
+        }),
+      });
+      const { msg } = consumeDelivery(1);
+      await publishToDlq(entry, consumeDlq, handlerInfo, msg, new Error('x'), 1);
+      await publishToDlq(entry, consumeDlq, handlerInfo, msg, new Error('x'), 1);
+      const first = await (nexts[0] as () => Promise<void>)().catch((e: unknown) => e);
+      const second = await (nexts[1] as () => Promise<void>)().catch((e: unknown) => e);
+      expect(first).toBeInstanceOf(NatsModuleError);
+      expect((first as Error).message).toBe(
+        'Dead letter to "dlq.ORD.d": next() was called after the outbound plugins returned',
+      );
+      expect(second).not.toBe(first);
+      expect(jsPublish).not.toHaveBeenCalled();
+    });
+
     it('rejects with the error of a plugin that throws before next()', async () => {
       const boom = new Error('boom');
       const { entry, jsPublish } = fakeEntry({
@@ -1004,6 +1027,68 @@ describe('publishToDlq', () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    describe('in core mode', () => {
+      const published = (ncPublish: { mock: { calls: unknown[][] } }) =>
+        ncPublish.mock.calls[0] as unknown as [string, Uint8Array, { headers: MsgHdrs }];
+
+      it('rejects with the error of a plugin that throws before next()', async () => {
+        const boom = new Error('boom');
+        const { entry, ncPublish } = fakeEntry({
+          plugins: plugin(async () => {
+            throw boom;
+          }),
+        });
+        const { msg } = consumeDelivery(1);
+        await expect(publishToDlq(entry, coreDlq, coreInfo, msg, new Error('x'), 1)).rejects.toBe(
+          boom,
+        );
+        expect(ncPublish).not.toHaveBeenCalled();
+      });
+
+      it('rejects when the plugins do not pass the dead letter on in time', async () => {
+        vi.useFakeTimers();
+        try {
+          const { entry, ncPublish } = fakeEntry({
+            plugins: plugin(() => new Promise<void>(() => {})),
+          });
+          const { msg } = consumeDelivery(1);
+          const p = publishToDlq(entry, coreDlq, coreInfo, msg, new Error('x'), 1);
+          const assertion = expect(p).rejects.toThrow(/did not pass the message on within/);
+          await vi.advanceTimersByTimeAsync(5000);
+          await assertion;
+          expect(ncPublish).not.toHaveBeenCalled();
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('encodes data a plugin replaced', async () => {
+        const { entry, ncPublish } = fakeEntry({
+          plugins: plugin(async (m, next) => {
+            m.data = { a: 1 };
+            await next();
+          }),
+        });
+        const { msg } = consumeDelivery(1);
+        await publishToDlq(entry, coreDlq, coreInfo, msg, new Error('x'), 1);
+        expect(jsonCodec().decode(published(ncPublish)[1])).toEqual({ a: 1 });
+      });
+
+      it('still publishes when a plugin deletes Nats-Msg-Id', async () => {
+        const { entry, ncPublish } = fakeEntry({
+          plugins: plugin(async (m, next) => {
+            m.headers.delete('Nats-Msg-Id');
+            await next();
+          }),
+        });
+        const { msg } = consumeDelivery(1);
+        await expect(publishToDlq(entry, coreDlq, coreInfo, msg, new Error('x'), 1)).resolves.toBe(
+          'sent',
+        );
+        expect(published(ncPublish)[2].headers.has('Nats-Msg-Id')).toBe(false);
+      });
     });
   });
 });
@@ -1049,9 +1134,32 @@ describe('createSettlement — a dead letter dropped by an outbound plugin', () 
     expect(log.warn).toHaveBeenCalledWith(
       `H.on on "ord.created": ${err.message}; its dead letter to dlq.ORD.d was dropped by an outbound plugin (unmatched: 'dlq')`,
     );
+    expect(log.warn).toHaveBeenCalledTimes(1);
   });
 
-  it('retries an ordered dead letter in place while a plugin throws', async () => {
+  it('dead-letters an ordered message whose dead letter a plugin dropped, without a retry', async () => {
+    const { entry, jsPublish } = fakeEntry({ plugins: dropping });
+    const { d, msg, log, schedule } = orderedDelivery({ attempt: 3 });
+    const twoRetries = resolveRetryPolicy({
+      initialDelay: 100,
+      jitter: 0,
+      maxRetries: 2,
+    }) as RetryPolicy;
+    await createSettlement({ entry, retry: twoRetries, dlq: orderedDlq }).handle(
+      d,
+      nextWith(new Error('boom')),
+    );
+    expect(jsPublish).not.toHaveBeenCalled();
+    expect(schedule).not.toHaveBeenCalled();
+    expect(d.outcomes.get(msg)).toMatchObject({ action: 'dlq' });
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.stringContaining('was dropped by an outbound plugin after 3 attempts: boom'),
+    );
+    expect(log.error).not.toHaveBeenCalled();
+  });
+
+  it('retries an ordered dead letter in place until the plugin lets the publish through', async () => {
     vi.useFakeTimers();
     let calls = 0;
     const plugins = [
