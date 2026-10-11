@@ -42,7 +42,7 @@ class AppModule {}
 | `connection` | `'default'` | Name of the connection to check |
 | `rttTimeout` | `1000` | Longest wait, in ms, for the round trip to the server and, separately, for the JetStream check. A finite number above `0`, at most `2147483647` (2^31 - 1) |
 | `jetstream` | `false` | Also require JetStream to answer an account info request |
-| `handlers` | `false` | Also report the connection's message handlers: `down` when one gave up restarting. See [Handlers](#handlers) |
+| `handlers` | `false` | Also report the connection's message handlers: `down` when one has `failed` (it gave up restarting, or ended with restarts off or the connection closed). See [Handlers](#handlers) |
 
 When the connection is up, the result is `{ nats: { status: 'up', connection, server, rtt } }`, where `rtt` is the round trip time in ms. Otherwise it is `{ nats: { status: 'down', connection, reason } }`, and `HealthCheckService` turns that into a `503` response. `reason` is one of:
 
@@ -57,7 +57,7 @@ The indicator never throws for an unhealthy connection; only an invalid `rttTime
 
 ## Handlers
 
-A subscription, consumer or service whose loop ends on its own is restarted with a backoff, and a handler that gives up is reported as `failed`. See [Restarting handlers](./connections.md#restarting-handlers). Without `handlers`, the indicator checks the connection (and JetStream) only, as described above. With `handlers: true`, it checks the handlers of the connection last, once the connection, the round trip and JetStream (if asked) are fine:
+A subscription, consumer or service whose loop ends on its own is restarted with a backoff. A handler is reported as `failed` when it gives up restarting, when its loop ends with `restart: false`, or when its loop ends (or its restart comes due) while the connection is closed. See [Restarting handlers](./connections.md#restarting-handlers). Without `handlers`, the indicator checks the connection (and JetStream) only, as described above. With `handlers: true`, it checks the handlers of the connection last, once the connection, the round trip and JetStream (if asked) are fine:
 
 - When at least one handler has `failed`, the result is `down`, and the details list the handlers that failed and the ones restarting:
 
