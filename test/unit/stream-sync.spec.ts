@@ -4,9 +4,15 @@ import type { ConnectionEntry } from '../../src/connection/connection-registry.j
 import { NatsStreamManager } from '../../src/jetstream/stream-manager.js';
 import {
   CONSUMER_IMMUTABLE_FIELDS,
+  declaredFields,
   diffConfig,
+  parseSnapshot,
   pushConsumerDefaults,
+  removedFields,
+  SNAPSHOT_KEY,
   STREAM_IMMUTABLE_FIELDS,
+  snapshotOf,
+  syncMetadata,
   withConsumerDefaults,
 } from '../../src/jetstream/stream-sync.js';
 
@@ -295,5 +301,98 @@ describe('NatsStreamManager: a declared null is an omitted field', () => {
     await sm.ensureConsumer('S', declared);
     expect(consumers.update).not.toHaveBeenCalled();
     await expect(sm.ensureConsumer('S', declared, 'verify')).resolves.toBeDefined();
+  });
+
+  describe('snapshot helpers', () => {
+    it('declaredFields lists sorted defined fields without metadata or excluded ones', () =>
+      expect(
+        declaredFields(
+          {
+            name: 'S',
+            subjects: ['a'],
+            max_age: 5,
+            metadata: { x: '1' },
+            description: undefined,
+            max_msgs: null as never,
+          },
+          ['name'],
+        ),
+      ).toEqual(['max_age', 'subjects']));
+
+    it('snapshotOf joins the names', () => {
+      expect(snapshotOf(['a', 'b'])).toBe('a,b');
+      expect(snapshotOf([])).toBe('');
+    });
+
+    it('parseSnapshot reads the metadata key', () => {
+      expect(parseSnapshot(undefined)).toBeUndefined();
+      expect(parseSnapshot({})).toBeUndefined();
+      expect(parseSnapshot({ [SNAPSHOT_KEY]: '' })).toEqual([]);
+      expect(parseSnapshot({ [SNAPSHOT_KEY]: 'a,b' })).toEqual(['a', 'b']);
+    });
+
+    it('removedFields splits reset and immutable, skipping fields absent on the server', () =>
+      expect(
+        removedFields(
+          { max_age: 5, storage: 'file', subjects: ['a'] },
+          ['max_age', 'storage', 'subjects', 'description'],
+          ['subjects'],
+          STREAM_IMMUTABLE_FIELDS,
+        ),
+      ).toEqual({ reset: ['max_age'], immutable: ['storage'] }));
+
+    it('removedFields is empty without a previous snapshot', () =>
+      expect(removedFields({ max_age: 5 }, undefined, [], STREAM_IMMUTABLE_FIELDS)).toEqual({
+        reset: [],
+        immutable: [],
+      }));
+
+    it('syncMetadata replaces declared metadata and keeps current otherwise', () => {
+      const s = 'a,b';
+      const current = { a: '0', b: '2', '_nats.ver': 'x' };
+      expect(syncMetadata({ a: '1' }, current, s)).toEqual({
+        a: '1',
+        [SNAPSHOT_KEY]: s,
+      });
+      expect(syncMetadata(undefined, current, s)).toEqual({
+        a: '0',
+        b: '2',
+        [SNAPSHOT_KEY]: s,
+      });
+      expect(syncMetadata(undefined, undefined, s)).toEqual({
+        [SNAPSHOT_KEY]: s,
+      });
+    });
+
+    it('diffConfig ignores the snapshot key and compares declared metadata exactly', () => {
+      expect(
+        diffConfig(
+          { metadata: { '_nats.ver': 'x', [SNAPSHOT_KEY]: 'a', team: 'x' } },
+          { metadata: { team: 'x' } },
+          STREAM_IMMUTABLE_FIELDS,
+        ),
+      ).toEqual([]);
+      expect(
+        diffConfig(
+          {
+            metadata: {
+              '_nats.ver': 'x',
+              [SNAPSHOT_KEY]: 'a',
+              team: 'x',
+              old: '1',
+            },
+          },
+          { metadata: { team: 'x' } },
+          STREAM_IMMUTABLE_FIELDS,
+        ),
+      ).toEqual([
+        {
+          field: 'metadata',
+          current: { team: 'x', old: '1' },
+          declared: { team: 'x' },
+          immutable: false,
+        },
+      ]);
+    });
   });
 });
