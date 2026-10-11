@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import 'reflect-metadata';
 import { Payload, Subscribe } from '@loipv/nestjs-nats';
 import { NatsHealthIndicator } from '@loipv/nestjs-nats/health';
+import { KvIdempotencyStore } from '@loipv/nestjs-nats/kv';
 import { tracing } from '@loipv/nestjs-nats/otel';
 import { NatsTestHarness, NatsTestingModule } from '@loipv/nestjs-nats/testing';
 import { Injectable, Module } from '@nestjs/common';
@@ -29,6 +30,7 @@ Module({ imports: [NatsTestingModule.forRoot()], providers: [Handlers] })(AppMod
 
 assert.equal(typeof tracing, 'function');
 assert.equal(typeof NatsHealthIndicator, 'function');
+assert.equal(typeof new KvIdempotencyStore().claim, 'function');
 
 const app = await NestFactory.createApplicationContext(AppModule, { logger: false });
 let failure;

@@ -4,6 +4,7 @@
   "type": "module",
   "dependencies": {
     "@nats-io/jetstream": "^3",
+    "@nats-io/kv": "^3",
     "@nats-io/services": "^3",
     "@nats-io/transport-node": "^3",
     "@nestjs/common": "^12",
