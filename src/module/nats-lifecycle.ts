@@ -26,6 +26,7 @@ import { NatsStreamManager } from '../jetstream/stream-manager.js';
 import { type RestartPolicy, resolveRestartPolicy } from '../settlement/restart.js';
 import { errorMessage, errorTrace } from '../util/errors.js';
 import { settlesWithin } from '../util/timeout.js';
+import { consumerKey, mergeConsumers, mergeStreams, resetsRemovedFields } from './declarations.js';
 import type { ConsumerDeclaration, NatsFeatureOptions, StreamDeclaration } from './options.js';
 import { DEFAULT_CONNECTION, NATS_FEATURE_TOKEN_PREFIX } from './tokens.js';
 
@@ -54,6 +55,11 @@ export class NatsLifecycle
   implements OnModuleInit, OnApplicationBootstrap, BeforeApplicationShutdown
 {
   private adapters: ManagedAdapter[] = [];
+  /**
+   * The consumers declared in the module options of each connection that resets removed
+   * fields (`consumerKey`): a handler must not declare them again.
+   */
+  private readonly moduleConsumers = new Map<string, Set<string>>();
   /** Stores already closed: a failed bootstrap followed by `app.close()` shuts down twice. */
   private readonly closedStores = new WeakSet<IdempotencyStore>();
 
@@ -82,6 +88,7 @@ export class NatsLifecycle
     try {
       const defs = this.explorer.explore();
       validateHandlers(defs, this.manager);
+      this.rejectConsumersDeclaredTwice(defs);
       for (const managed of this.createAdapters(defs)) {
         this.adapters.push(managed);
         await managed.adapter.start();
@@ -270,10 +277,17 @@ export class NatsLifecycle
     return timeouts.length > 0 ? Math.max(...timeouts) : DEFAULT_DRAIN_TIMEOUT;
   }
 
+  /**
+   * The declarations of each connection: `forRoot`, then every `forFeature`. With removed
+   * fields reset, the declarations of one stream, or of one consumer, are merged into one.
+   */
   private collectDeclarations(): Map<string, Declarations> {
     const result = new Map<string, Declarations>();
+    const resets = new Set<string>();
     for (const name of this.manager.names()) {
-      const { streams = [], consumers = [] } = this.manager.get(name).options;
+      const { options } = this.manager.get(name);
+      if (resetsRemovedFields(name, options)) resets.add(name);
+      const { streams = [], consumers = [] } = options;
       result.set(name, { streams: [...streams], consumers: [...consumers] });
     }
     for (const wrapper of this.discovery.getProviders()) {
@@ -291,7 +305,31 @@ export class NatsLifecycle
       target.streams.push(...(feature.streams ?? []));
       target.consumers.push(...(feature.consumers ?? []));
     }
+    this.moduleConsumers.clear();
+    for (const name of resets) {
+      const declarations = result.get(name) as Declarations;
+      const streams = mergeStreams(declarations.streams);
+      const consumers = mergeConsumers(declarations.consumers);
+      result.set(name, { streams, consumers });
+      this.moduleConsumers.set(name, new Set(consumers.map(consumerKey)));
+    }
     return result;
+  }
+
+  /**
+   * With removed fields reset, a consumer declared in the module options and by a handler's
+   * `config` would reset the other's fields on every boot: rejected before any handler starts.
+   */
+  private rejectConsumersDeclaredTwice(defs: HandlerDefinition[]): void {
+    for (const def of defs) {
+      if (def.kind !== 'consume' || def.options.config === undefined) continue;
+      const { stream, durable } = def.options;
+      const key = consumerKey({ stream, config: { durable_name: durable } });
+      if (!this.moduleConsumers.get(def.connection)?.has(key)) continue;
+      throw new NatsConfigError(
+        `JetStream consumer "${stream}/${durable}" is declared both in the module options and by ${def.className}.${def.methodName}; declare it in one place`,
+      );
+    }
   }
 }
 
