@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { RestartBinding } from '../../src/adapters/adapter.js';
 import {
   NatsServiceAdapter,
   type ServiceEndpointDefinition,
@@ -62,28 +63,40 @@ function setup(
   invoke: (payload: unknown) => Promise<unknown> = () => Promise.resolve(),
   plugins: unknown[] = [],
 ) {
-  const iterators = new Map<string, ReturnType<typeof fakeIterator>>();
-  let resolveStopped!: (err: Error | null) => void;
-  const stopped = new Promise<Error | null>((resolve) => (resolveStopped = resolve));
-  const service = {
-    addEndpoint: vi.fn((name: string) => {
-      const it = fakeIterator();
-      iterators.set(name, it);
-      return it.iterator;
-    }),
-    stop: vi.fn(() => {
-      for (const it of iterators.values()) it.end();
-      resolveStopped(null);
-      return Promise.resolve(null);
-    }),
-    stopped,
-    /** What `@nats-io/services` does when a subscription fails: the iterators never end. */
-    fail(err: Error) {
-      resolveStopped(err);
-    },
+  /** A fake service per `add()` call, as `@nats-io/services` creates. */
+  const makeService = () => {
+    const iterators = new Map<string, ReturnType<typeof fakeIterator>>();
+    let resolveStopped!: (err: Error | null) => void;
+    const stopped = new Promise<Error | null>((resolve) => (resolveStopped = resolve));
+    return {
+      iterators,
+      addEndpoint: vi.fn((name: string) => {
+        const it = fakeIterator();
+        iterators.set(name, it);
+        return it.iterator;
+      }),
+      stop: vi.fn(() => {
+        for (const it of iterators.values()) it.end();
+        resolveStopped(null);
+        return Promise.resolve(null);
+      }),
+      stopped,
+      /** What `@nats-io/services` does when a subscription fails: the iterators never end. */
+      fail(err: Error) {
+        resolveStopped(err);
+      },
+    };
   };
+  const service = makeService();
+  const services = [service];
   svcm.add.mockReset();
-  svcm.add.mockResolvedValue(service);
+  svcm.add.mockImplementation(() => {
+    // The first call returns `service`; later ones (restarts) a new fake.
+    const next = svcm.add.mock.calls.length === 1 ? service : makeService();
+    if (next !== service) services.push(next);
+    return Promise.resolve(next);
+  });
+  const { iterators } = service;
   const logger = { log: vi.fn(), error: vi.fn(), warn: vi.fn() };
   const entry = {
     name: 'default',
@@ -101,7 +114,7 @@ function setup(
       options,
       invoke,
     }) as unknown as ServiceEndpointDefinition;
-  return { service, iterators, logger, entry, endpoint };
+  return { service, services, iterators, logger, entry, endpoint };
 }
 
 describe('NatsServiceAdapter', () => {
@@ -303,5 +316,101 @@ describe('NatsServiceAdapter', () => {
     await adapter.stop();
     await adapter.idle();
     expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0 });
+  });
+  describe('restart', () => {
+    const policy = {
+      initialDelay: 10,
+      factor: 1,
+      maxDelay: 10,
+      jitter: 0,
+      maxAttempts: Infinity,
+    };
+    const restart: RestartBinding = { policy, track: () => () => {} };
+    const restarts = (warn: ReturnType<typeof vi.fn>) =>
+      warn.mock.calls.filter(([m]) => String(m).startsWith('Restarting service "svc"')).length;
+
+    it('recreates the service when it stops with an error', async () => {
+      const { service, services, logger, entry, endpoint } = setup((p) =>
+        Promise.resolve({ echo: p }),
+      );
+      const adapter = new NatsServiceAdapter(
+        { name: 'svc', version: '1' },
+        [endpoint('a'), endpoint('b')],
+        entry,
+        restart,
+      );
+      await adapter.start();
+      service.fail(new Error('Permissions Violation'));
+      await vi.waitFor(() => expect(services[1]?.addEndpoint).toHaveBeenCalledTimes(2));
+      expect(svcm.add).toHaveBeenCalledTimes(2);
+      expect(services[1]?.addEndpoint).toHaveBeenNthCalledWith(1, 'a', {});
+      expect(services[1]?.addEndpoint).toHaveBeenNthCalledWith(2, 'b', {});
+      expect(logger.error).toHaveBeenCalledWith(
+        'NATS service "svc" stopped: Permissions Violation',
+        expect.stringContaining('Permissions Violation'),
+      );
+      const msg = fakeMsg('hi');
+      services[1]?.iterators.get('a')?.push(msg);
+      await vi.waitFor(() =>
+        expect(msg.respond).toHaveBeenCalledWith(new TextEncoder().encode('{"echo":"hi"}')),
+      );
+      await vi.waitFor(() =>
+        expect(logger.log).toHaveBeenCalledWith('Restarted service "svc" (attempt 1)'),
+      );
+      await adapter.stop();
+      await adapter.idle();
+      expect(services[1]?.stop).toHaveBeenCalledTimes(1);
+    });
+
+    it('schedules one restart when every endpoint ends at once', async () => {
+      const { iterators, services, logger, entry, endpoint } = setup();
+      const adapter = new NatsServiceAdapter(
+        { name: 'svc', version: '1' },
+        [endpoint('a'), endpoint('b')],
+        entry,
+        restart,
+      );
+      await adapter.start();
+      iterators.get('a')?.end();
+      iterators.get('b')?.end();
+      await vi.waitFor(() => expect(services[1]?.addEndpoint).toHaveBeenCalledTimes(2));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(svcm.add).toHaveBeenCalledTimes(2);
+      expect(restarts(logger.warn)).toBe(1);
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringMatching(/S\.a.*svc.*ended unexpectedly$/),
+      );
+      expect(services[0]?.stop).toHaveBeenCalledTimes(1);
+      await adapter.stop();
+      await adapter.idle();
+    });
+
+    it("an old service's loop ending does not restart the new one", async () => {
+      let release!: () => void;
+      const slow = new Promise<void>((resolve) => (release = resolve));
+      const { iterators, services, logger, entry, endpoint } = setup((p) =>
+        p === 'slow' ? slow : Promise.resolve(),
+      );
+      const adapter = new NatsServiceAdapter(
+        { name: 'svc', version: '1' },
+        [endpoint('a'), endpoint('b')],
+        entry,
+        restart,
+      );
+      await adapter.start();
+      // b's loop waits for its limiter while 'slow' is handled, so it outlives its service.
+      iterators.get('b')?.push(fakeMsg('slow'));
+      iterators.get('b')?.push(fakeMsg('next'));
+      await tick();
+      iterators.get('a')?.end();
+      await vi.waitFor(() => expect(services[1]?.addEndpoint).toHaveBeenCalledTimes(2));
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(svcm.add).toHaveBeenCalledTimes(2);
+      expect(services[1]?.stop).not.toHaveBeenCalled();
+      expect(restarts(logger.warn)).toBe(1);
+      await adapter.stop();
+      await adapter.idle();
+    });
   });
 });
