@@ -111,6 +111,8 @@ export class KvIdempotencyStore implements IdempotencyStore {
   private kv?: KV;
   /** The bound bucket's max age in ms, 0 for none. */
   private bucketMaxAge = 0;
+  /** Bumped by every bind and close, so a bind that outlives a close can tell. */
+  private generation = 0;
   private warnedOrdered = false;
   private warnedMaxAge = false;
 
@@ -161,13 +163,19 @@ export class KvIdempotencyStore implements IdempotencyStore {
     }
     // Taken before the first await, so a concurrent bind is refused too.
     this.connection = connection;
+    const generation = ++this.generation;
     try {
       // On the connection's JetStream client, so its jetstream.options (domain, prefix) apply.
       const { kv, maxAge } = await this.openBucket(new Kvm(js));
+      // A close during the open released this bind: its result is discarded.
+      if (generation !== this.generation) {
+        throw new NatsModuleError('KvIdempotencyStore was closed while binding');
+      }
       this.kv = kv;
       this.bucketMaxAge = maxAge;
     } catch (err) {
-      this.connection = undefined;
+      // A stale bind must not clear a newer one.
+      if (generation === this.generation) this.connection = undefined;
       throw err;
     }
   }
@@ -221,6 +229,7 @@ export class KvIdempotencyStore implements IdempotencyStore {
    * connection belongs to the module: it is not closed.
    */
   async close(): Promise<void> {
+    this.generation++;
     this.connection = undefined;
     this.kv = undefined;
     this.bucketMaxAge = 0;

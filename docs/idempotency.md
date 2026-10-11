@@ -83,7 +83,7 @@ const store = new InMemoryIdempotencyStore({ maxKeys: 10_000 });
 
 `claim` returns `'claimed'` when the caller should process the message, `'duplicate'` when it was already processed and `'in-progress'` when another delivery holds the key. A store may also implement `close()`. The library calls it at shutdown, for the stores it created and for the one given in the module options.
 
-A store may also implement `bind({ connection, nc, js })`. The library calls it once at module init, before any message is handled, with the name, the `NatsConnection` and the `JetStreamClient` (with the connection's `jetstream.options`) of the connection whose `idempotency.store` it is. An error from `bind` fails startup, and the library then does not call `close()` on that store: it may be bound to another application. The KV store below uses `bind` to open its bucket on that connection.
+A store may also implement `bind({ connection, nc, js })`. The library calls it once at module init, before any message is handled, with the name, the `NatsConnection` and the `JetStreamClient` (with the connection's `jetstream.options`) of the connection whose `idempotency.store` it is. An error from `bind` fails startup. A store whose every bind in this application failed is not closed by the library (it may belong to another running application), so a bind that allocates resources and then fails must release them itself. The KV store below uses `bind` to open its bucket on that connection.
 
 ### JetStream KV store
 
