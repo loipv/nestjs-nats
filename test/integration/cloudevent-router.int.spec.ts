@@ -213,3 +213,97 @@ describe('@CloudEventRouter', () => {
     );
   });
 });
+
+const orderedLog: Array<[string, unknown]> = [];
+
+@CloudEventRouter({
+  consumePush: {
+    stream: 'CEP',
+    durable: 'cep-r',
+    deliverGroup: 'g',
+    config: { filter_subject: 'cep.>' },
+  },
+})
+@Injectable()
+class PushRouter {
+  readonly received: Array<[string, unknown]> = [];
+
+  @OnCloudEvent('a.created')
+  created(@Payload() data: unknown) {
+    this.received.push(['a.created', data]);
+  }
+
+  @OnCloudEvent('a.deleted')
+  deleted(@Payload() data: unknown) {
+    this.received.push(['a.deleted', data]);
+  }
+}
+
+@CloudEventRouter({ consumeOrdered: { stream: 'CEO' } })
+@Injectable()
+class OrderedRouter {
+  @OnCloudEvent('x.one')
+  one(@Payload() data: unknown) {
+    orderedLog.push(['x.one', data]);
+  }
+
+  @OnCloudEvent('x.two')
+  two(@Payload() data: unknown) {
+    orderedLog.push(['x.two', data]);
+  }
+}
+
+describe('@CloudEventRouter on push and ordered consumers', () => {
+  let srv: NatsTestServer;
+  let app: TestingModule;
+  let js: JetStreamClient;
+
+  beforeAll(async () => {
+    srv = await startNats();
+    app = await createTestApp({
+      imports: [
+        NatsModule.forRoot({
+          connection: { servers: srv.url },
+          logger: false,
+          cloudEvents: { source: 'urn:router-test' },
+          streams: [
+            { name: 'CEP', subjects: ['cep.>'] },
+            { name: 'CEO', subjects: ['ceo.>'] },
+          ],
+        }),
+      ],
+      providers: [PushRouter, OrderedRouter],
+    });
+    js = app.get(getJetStreamClientToken());
+  });
+
+  afterAll(async () => {
+    await app?.close();
+    await srv?.stop();
+  });
+
+  it('routes CloudEvents from a push consumer router', async () => {
+    const router = app.get(PushRouter);
+    await js.publish('cep.a', 1, { cloudEvent: { type: 'a.created' } });
+    await js.publish('cep.b', 2, { cloudEvent: { type: 'a.deleted' } });
+    await eventually(() =>
+      expect([...router.received].sort()).toEqual([
+        ['a.created', 1],
+        ['a.deleted', 2],
+      ]),
+    );
+  });
+
+  it('routes CloudEvents from an ordered consumer router in stream order', async () => {
+    await js.publish('ceo.a', 1, { cloudEvent: { type: 'x.one' } });
+    await js.publish('ceo.a', 2, { cloudEvent: { type: 'x.two' } });
+    await js.publish('ceo.a', 3, { cloudEvent: { type: 'x.one' } });
+    await eventually(() =>
+      expect(orderedLog).toEqual([
+        ['x.one', 1],
+        ['x.two', 2],
+        ['x.one', 3],
+      ]),
+    );
+  });
+});

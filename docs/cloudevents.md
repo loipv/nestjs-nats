@@ -68,7 +68,7 @@ class OrderEvents {
 
 ## Receiving CloudEvents
 
-A `@CloudEventRouter()` class receives CloudEvents on one core subscription (`subscribe`) or one JetStream pull consumer (`consume`; push and ordered consumers are not supported), and hands each event to the `@OnCloudEvent(typePattern)` method whose pattern matches the event's `type` best. In those methods `@Payload()` is the event's `data` and `@CloudEvent()` is its attributes, a `CloudEventMeta`. Pipes, guards, interceptors and exception filters work as for any handler.
+A `@CloudEventRouter()` class receives CloudEvents from one source: a core subscription (`subscribe`) or a JetStream pull (`consume`), push (`consumePush`) or ordered (`consumeOrdered`) consumer. It hands each event to the `@OnCloudEvent(typePattern)` method whose pattern matches the event's `type` best. In those methods `@Payload()` is the event's `data` and `@CloudEvent()` is its attributes, a `CloudEventMeta`. Pipes, guards, interceptors and exception filters work as for any handler.
 
 ```ts
 import { Injectable } from '@nestjs/common';
@@ -113,15 +113,47 @@ class OrderProjector {
 
 | Option | Description |
 |---|---|
-| `subscribe`, `queue` | Receive on a core subject (with an optional queue group). Set exactly one of `subscribe` or `consume` |
-| `consume` | `{ stream, durable, config? }`: receive from a JetStream consumer, as for `@Consume` |
+| `subscribe`, `queue` | Receive on a core subject (with an optional queue group). Set exactly one of `subscribe`, `consume`, `consumePush` or `consumeOrdered` |
+| `consume` | `{ stream, durable, config? }`: receive from a JetStream pull consumer, as for `@Consume` |
+| `consumePush` | `{ stream, durable, config?, deliverGroup? }`: receive from a JetStream push consumer, as for `@ConsumePush` |
+| `consumeOrdered` | `{ stream, filterSubjects?, deliverPolicy?, headersOnly? }`: receive from an ordered consumer, as for `@ConsumeOrdered`. `concurrency` is not supported |
 | `unmatched` | What to do with an event no `@OnCloudEvent` matches: `'ack'` (default), `'term'` or `'dlq'` |
+
+```ts
+import { Injectable } from '@nestjs/common';
+import { CloudEventRouter, OnCloudEvent, Payload } from '@loipv/nestjs-nats';
+
+@Injectable()
+@CloudEventRouter({
+  consumePush: { stream: 'EVENTS', durable: 'audit', deliverGroup: 'audit' },
+})
+class AuditPush {
+  @OnCloudEvent('com.example.order.>')
+  audit(@Payload() data: unknown) {}
+}
+
+@Injectable()
+@CloudEventRouter({ consumeOrdered: { stream: 'EVENTS', filterSubjects: ['events.orders.>'] } })
+class OrderTimeline {
+  @OnCloudEvent('com.example.order.*')
+  apply(@Payload() data: unknown) {}
+}
+```
 
 - **Patterns.** A type is split on `.`. `*` matches exactly one segment, and a trailing `>` matches one or more. When several patterns match, an exact type wins over a pattern with `*`, which wins over one ending in `>`; among patterns of the same kind, the one with more literal segments wins, then the one declared first. An empty segment, a `>` that is not last or a repeated pattern fails startup with a `NatsConfigError`.
 - **Data.** `@Payload()` is the event's data. Inline structured `data` (a JSON value) is handed over as it is. Otherwise (the body of a binary event, or the `data_base64` of a structured one) the data is decoded with the handler's codec, unless the event declares a `datacontenttype` that is neither JSON (`application/json`, `text/json` or a `+json` suffix, in any case, parameters ignored) nor the codec's content type: then `@Payload()` is the raw bytes, a `Uint8Array`. So with the default JSON codec, an event with `datacontenttype: text/plain` gets its text as bytes (decode it with `new TextDecoder().decode(data)`), and an event without `datacontenttype` is decoded as JSON. The codec gets the declared type as the `Content-Type` header.
 - **Attributes first.** The router reads the attributes and picks the method before it decodes the event's data. An unmatched event follows `unmatched` even if its data cannot be decoded. If the data of a matched event cannot be decoded, that is a `NatsDecodeError`, handled like any decode failure.
 - **Not a CloudEvent.** A message without the required attributes (`id`, `source`, `type`, `specversion`), or with a structured body that is not a JSON object, fails with a `NatsDecodeError`. It is not retried: it is dead-lettered if a DLQ is configured, else terminated (JetStream) or dropped (core), and a request gets a `400` reply.
-- **Unmatched events.** `'ack'` acknowledges and skips the event (logged at debug level). `'term'` terminates a JetStream message, or drops a core one. `'dlq'` sends it to the [dead-letter queue](./retry-and-dlq.md#dead-letter-queue); if none is configured, it behaves like `'term'` and logs a warning. An unmatched event is never retried. A request (a core message with a reply subject) that is unmatched gets a `404` error reply with the message `No handler for CloudEvent type "<type>"`, whatever the `unmatched` policy.
+- **Unmatched events.** `'ack'` acknowledges and skips the event (logged at debug level). `'term'` terminates a JetStream message, or drops a core one. `'dlq'` sends it to the [dead-letter queue](./retry-and-dlq.md#dead-letter-queue); if none is configured, it behaves like `'term'` and logs a warning. An unmatched event is never retried. A request (a core message with a reply subject) that is unmatched gets a `404` error reply with the message `No handler for CloudEvent type "<type>"`, whatever the `unmatched` policy. What `unmatched` does depends on the source:
+
+  | `unmatched` | Push | Ordered |
+  |---|---|---|
+  | `'ack'` (default) | ack, logged at debug level | skipped, logged at debug level |
+  | `'term'` | `term` | the message is dropped, as for core |
+  | `'dlq'` | dead-lettered, then `term`; without a DLQ it behaves like `'term'` and logs a warning | dead-lettered, retried in place if publishing fails; without a DLQ it is dropped with a warning |
+
+  Push and ordered consumers carry no request, so there is no `404` reply. The default DLQ subject of an ordered router is `dlq.<stream>.ordered.<Class>.@CloudEventRouter`.
+- **Ordered and `headersOnly`.** With `headersOnly: true` the message has no body, so only binary-mode events can be routed, and their `data` is empty. A structured event is unmatched or fails to decode.
 - **Rules.** A router has no `batch` or `ack` option: it handles one event at a time and settles it automatically. It needs at least one `@OnCloudEvent` method, and an `@OnCloudEvent` method cannot also be a `@Subscribe`, `@Consume` or `@ServiceEndpoint`. Breaking these rules fails startup with a `NatsConfigError`.
 - **Idempotency.** With `idempotency` enabled, the key of an event is its `Nats-Msg-Id` header if it has one (the `id` of an event published with `JetStreamClient`), else `<source>|<id>` with `<source>` percent-encoded (`encodeURIComponent`). See [Idempotency](./idempotency.md).
 - **Outside a router.** In any other handler `@CloudEvent()` and `ctx.cloudEvent` give the attributes of the message, or `undefined` when it is not a valid CloudEvent. In a batch handler `@CloudEvent()` is an array aligned with the payloads. `@Payload()` is not unwrapped there: for a structured event it is the whole envelope.
