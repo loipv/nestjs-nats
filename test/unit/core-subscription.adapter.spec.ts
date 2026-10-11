@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { HandlerState, RestartBinding } from '../../src/adapters/adapter.js';
 import { CoreSubscriptionAdapter } from '../../src/adapters/core-subscription.adapter.js';
 import type { ConnectionEntry } from '../../src/connection/connection-registry.js';
 import type { HandlerDefinition } from '../../src/discovery/handler-explorer.js';
@@ -10,9 +11,11 @@ function fakeSubscription() {
   const queue: unknown[] = [];
   let wake: (() => void) | undefined;
   let closed = false;
+  let failure: Error | undefined;
   const sub = {
     async *[Symbol.asyncIterator]() {
       for (;;) {
+        if (failure) throw failure;
         const next = queue.shift();
         if (next) yield next;
         else if (closed) return;
@@ -30,6 +33,10 @@ function fakeSubscription() {
     sub,
     push(msg: unknown) {
       queue.push(msg);
+      wake?.();
+    },
+    fail(err: Error) {
+      failure = err;
       wake?.();
     },
   };
@@ -372,5 +379,131 @@ describe('CoreSubscriptionAdapter', () => {
       await adapter.idle();
       expect(invoke).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('CoreSubscriptionAdapter restart', () => {
+  const policy = { initialDelay: 10, factor: 1, maxDelay: 10, jitter: 0, maxAttempts: Infinity };
+
+  function setupRestart(
+    invoke: (payload: unknown) => Promise<unknown> = () => Promise.resolve(),
+    handlerRetry: Record<string, unknown> = {},
+    restartPolicy: RestartBinding['policy'] = policy,
+  ) {
+    const fakes: ReturnType<typeof fakeSubscription>[] = [];
+    const states: HandlerState[] = [];
+    const logger = { log: vi.fn(), error: vi.fn(), warn: vi.fn() };
+    const conn = { closed: false };
+    const entry = {
+      name: 'default',
+      options: { plugins: [], ...handlerRetry },
+      logger,
+      nc: {
+        subscribe: vi.fn(() => {
+          const fake = fakeSubscription();
+          fakes.push(fake);
+          return fake.sub;
+        }),
+        flush: () => Promise.resolve(),
+        isClosed: () => conn.closed,
+      },
+    } as unknown as ConnectionEntry;
+    const def = {
+      kind: 'subscribe',
+      connection: 'default',
+      className: 'C',
+      methodName: 'm',
+      subject: 'a.b',
+      options: {},
+      invoke,
+    } as unknown as HandlerDefinition & { kind: 'subscribe' };
+    const restart: RestartBinding = {
+      policy: restartPolicy,
+      track: () => (state) => states.push(state),
+    };
+    const adapter = new CoreSubscriptionAdapter(def, entry, restart);
+    return { adapter, fakes, states, logger, conn, entry };
+  }
+
+  it('resubscribes after the subscription fails and handles new messages', async () => {
+    const invoke = vi.fn(() => Promise.resolve());
+    const { adapter, fakes, states, entry } = setupRestart(invoke);
+    await adapter.start();
+    fakes[0]?.fail(new Error('boom'));
+    await vi.waitFor(() => expect(entry.nc.subscribe).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(states).toEqual(['running', 'restarting', 'running']));
+    fakes[1]?.push(fakeMsg(1));
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+    await adapter.stop();
+    await adapter.idle();
+  });
+
+  it('keeps a pending retry across the restart', async () => {
+    const invoke = vi
+      .fn<(p: unknown) => Promise<unknown>>()
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValue(undefined);
+    const { adapter, fakes, entry } = setupRestart(invoke, {
+      retry: { initialDelay: 50, jitter: 0 },
+    });
+    await adapter.start();
+    fakes[0]?.push(fakeMsg(1));
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+    fakes[0]?.fail(new Error('gone'));
+    await vi.waitFor(() => expect(entry.nc.subscribe).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+    await adapter.stop();
+    await adapter.idle();
+  });
+
+  it('does not restart when the connection is closed', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { adapter, fakes, states, logger, conn, entry } = setupRestart();
+    await adapter.start();
+    const timers = vi.getTimerCount();
+    conn.closed = true;
+    fakes[0]?.fail(new Error('boom'));
+    await vi.waitFor(() => expect(states).toEqual(['running', 'failed']));
+    expect(entry.nc.subscribe).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(timers);
+    vi.useRealTimers();
+    expect(logger.error).toHaveBeenCalledWith(
+      'Subscription of C.m on "a.b" failed; no more messages will be received',
+      expect.anything(),
+    );
+    await adapter.stop();
+    await adapter.idle();
+  });
+
+  it('logs as before and stays down without a restart binding', async () => {
+    const { adapter, fake, logger } = setup(() => Promise.resolve());
+    await adapter.start();
+    fake.fail(new Error('boom'));
+    await vi.waitFor(() =>
+      expect(logger.error).toHaveBeenCalledWith(
+        'Subscription of C.m on "a.b" failed; no more messages will be received',
+        expect.anything(),
+      ),
+    );
+    await adapter.stop();
+    await adapter.idle();
+  });
+
+  it('stop() during the restart delay prevents the resubscribe', async () => {
+    const { adapter, fakes, states, entry } = setupRestart(
+      undefined,
+      {},
+      {
+        ...policy,
+        initialDelay: 10_000,
+        maxDelay: 10_000,
+      },
+    );
+    await adapter.start();
+    fakes[0]?.fail(new Error('boom'));
+    await vi.waitFor(() => expect(states).toEqual(['running', 'restarting']));
+    await adapter.stop();
+    await adapter.idle();
+    expect(entry.nc.subscribe).toHaveBeenCalledTimes(1);
   });
 });

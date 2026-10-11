@@ -14,9 +14,15 @@ import {
 } from '../pipeline/delivery.js';
 import { batchRequestError, type ServiceError, toServiceError } from '../pipeline/reply.js';
 import { errorMessage, errorTrace } from '../util/errors.js';
-import type { ForceStopResult, HandlerAdapter } from './adapter.js';
+import {
+  type ForceStopResult,
+  type HandlerAdapter,
+  NO_RESTART,
+  type RestartBinding,
+} from './adapter.js';
 import { Dispatcher, type DispatchItem } from './dispatcher.js';
 import { createHandlerPipeline, defaultPipelineDeps } from './handler-pipeline.js';
+import { RestartSupervisor } from './restart-supervisor.js';
 
 type SubscribeDefinition = HandlerDefinition & { kind: 'subscribe' };
 
@@ -32,12 +38,15 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
   private readonly batch?: ResolvedBatchOptions;
   private sub?: Subscription;
   private loop?: Promise<void>;
+  private stopping = false;
+  private readonly supervisor: RestartSupervisor;
   /** Whether a request rejected by this batch handler was already logged. */
   private warnedBatchRequest = false;
 
   constructor(
     private readonly def: SubscribeDefinition,
     private readonly entry: ConnectionEntry,
+    restart: RestartBinding = NO_RESTART,
   ) {
     const pipeline = createHandlerPipeline(def, entry, defaultPipelineDeps);
     this.codec = pipeline.codec;
@@ -45,6 +54,14 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
     this.run = pipeline.run;
     this.label = `${def.className}.${def.methodName} on "${def.subject}"`;
     this.batch = resolveBatchOptions(def.options.batch);
+    this.supervisor = new RestartSupervisor({
+      policy: restart.policy,
+      label: this.label,
+      logger: entry.logger,
+      isConnectionClosed: () => entry.nc.isClosed(),
+      reopen: () => this.open(),
+      onState: restart.track(this.label),
+    });
     this.dispatcher = new Dispatcher<Msg>({
       concurrency: def.options.concurrency ?? 1,
       ...(this.batch ? { batch: this.batch } : {}),
@@ -61,6 +78,12 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
 
   async start(): Promise<void> {
     if (this.sub) return;
+    await this.open();
+    this.supervisor.started();
+  }
+
+  private async open(): Promise<void> {
+    if (this.stopping) return;
     const { queue } = this.def.options;
     const sub = this.entry.nc.subscribe(this.def.subject, queue ? { queue } : {});
     this.sub = sub;
@@ -70,6 +93,8 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
   }
 
   async stop(): Promise<void> {
+    this.stopping = true;
+    this.supervisor.stop();
     const sub = this.sub;
     if (!sub || sub.isClosed() || this.entry.nc.isClosed()) return;
     try {
@@ -80,6 +105,7 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
   }
 
   async idle(): Promise<void> {
+    await this.supervisor.settled();
     // The loop ends once the drained subscription has yielded its buffered messages.
     await this.loop;
     await this.dispatcher.idle();
@@ -97,18 +123,29 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
   }
 
   private async consume(sub: Subscription): Promise<void> {
+    let error: unknown;
+    let failed = false;
     try {
       for await (const msg of sub) {
         if (this.batch && msg.reply) this.rejectBatchRequest(msg);
         else await this.dispatcher.push(msg);
       }
     } catch (err) {
-      this.entry.logger.error(`Subscription of ${this.label} failed`, errorTrace(err));
-    } finally {
-      // The subscription has yielded its last message; nothing more will be pushed. The
-      // batch being collected is handed to the handler; `idle()` waits for it.
-      void this.dispatcher.stop();
+      failed = true;
+      error = err;
     }
+    if (!this.stopping) {
+      const tail = this.supervisor.restartable ? '' : '; no more messages will be received';
+      if (failed) {
+        this.entry.logger.error(`Subscription of ${this.label} failed${tail}`, errorTrace(error));
+      } else {
+        this.entry.logger.error(`Subscription of ${this.label} ended unexpectedly${tail}`);
+      }
+      this.supervisor.ended(error);
+    }
+    // Nothing more will be pushed unless the subscription is reopened. The batch being
+    // collected is handed to the handler; `idle()` waits for it.
+    if (this.stopping || this.supervisor.state === 'failed') void this.dispatcher.stop();
   }
 
   private async process(items: DispatchItem<Msg>[]): Promise<void> {
