@@ -1,6 +1,7 @@
 import type { ConsumerMessages, JsMsg } from '@nats-io/jetstream';
 import { JetStreamApiCodes, JetStreamApiError } from '@nats-io/jetstream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { RestartBinding } from '../../src/adapters/adapter.js';
 import { OrderedConsumerAdapter } from '../../src/adapters/ordered-consumer.adapter.js';
 import type { ConnectionEntry } from '../../src/connection/connection-registry.js';
 import { NatsOrderedContext } from '../../src/context/nats-ordered-context.js';
@@ -14,6 +15,7 @@ function fakeMessages() {
   const queue: JsMsg[] = [];
   let wake: (() => void) | undefined;
   let closed = false;
+  let failure: Error | undefined;
   const statusQueue: unknown[] = [];
   let statusWake: (() => void) | undefined;
   const messages = {
@@ -29,6 +31,7 @@ function fakeMessages() {
       for (;;) {
         const next = queue.shift();
         if (next) yield next;
+        else if (failure) throw failure;
         else if (closed) return;
         else await new Promise<void>((resolve) => (wake = resolve));
       }
@@ -45,6 +48,10 @@ function fakeMessages() {
     close: messages.close,
     push(msg: unknown) {
       queue.push(msg as JsMsg);
+      wake?.();
+    },
+    fail(err: Error) {
+      failure = err;
       wake?.();
     },
     notify(n: unknown) {
@@ -82,16 +89,25 @@ function setup(
     get?: () => Promise<unknown>;
     /** `js().publish` (DLQ publishes). */
     publish?: () => Promise<unknown>;
+    restart?: RestartBinding;
   } = {},
 ) {
   const fake = fakeMessages();
-  const consume = vi.fn(() => Promise.resolve(fake.messages));
+  const fakes = [fake];
+  let calls = 0;
+  const consume = vi.fn(() => {
+    if (calls++ === 0) return Promise.resolve(fake.messages);
+    const next = fakeMessages();
+    fakes.push(next);
+    return Promise.resolve(next.messages);
+  });
   const get = vi.fn(opts.get ?? (() => Promise.resolve({ consume })));
   const logger = { log: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn() };
   const entry = {
     name: 'default',
     options: { plugins: opts.plugins },
     logger,
+    nc: { isClosed: () => false },
     js: () => ({
       consumers: { get },
       publish: opts.publish ?? (() => Promise.resolve({ stream: 'DLQ', seq: 1 })),
@@ -112,8 +128,8 @@ function setup(
     },
     invoke,
   } as unknown as HandlerDefinition & { kind: 'ordered' };
-  const adapter = new OrderedConsumerAdapter(def, entry);
-  return { adapter, fake, get, consume, logger };
+  const adapter = new OrderedConsumerAdapter(def, entry, opts.restart);
+  return { adapter, fake, fakes, get, consume, logger };
 }
 
 describe('OrderedConsumerAdapter', () => {
@@ -384,5 +400,76 @@ describe('OrderedConsumerAdapter', () => {
     void fake.messages.close();
     await adapter.idle();
     expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/C\.m.*ended unexpectedly/));
+  });
+
+  describe('restart', () => {
+    const policy = {
+      initialDelay: 10,
+      factor: 1,
+      maxDelay: 10,
+      jitter: 0,
+      maxAttempts: Infinity,
+    };
+    const restart: RestartBinding = { policy, track: () => () => {} };
+
+    it('reopens after the last handled message', async () => {
+      const handled: unknown[] = [];
+      const { adapter, fake, fakes, get } = setup(
+        async (payload) => {
+          handled.push(payload);
+        },
+        { deliverPolicy: 'all', filterSubjects: 'a.>', restart },
+      );
+      await adapter.start();
+      fake.push(fakeMsg(1));
+      fake.push(fakeMsg(2));
+      await vi.waitFor(() => expect(handled).toEqual([1, 2]));
+      fake.fail(new Error('boom'));
+      await vi.waitFor(() => expect(get).toHaveBeenCalledTimes(2));
+      expect(get.mock.calls[1]).toEqual([
+        'ORD',
+        {
+          filter_subjects: ['a.>'],
+          deliver_policy: 'by_start_sequence',
+          opt_start_seq: 3,
+        },
+      ]);
+      await vi.waitFor(() => expect(fakes).toHaveLength(2));
+      await adapter.stop();
+      await adapter.idle();
+    });
+
+    it('reopens with the declared options when nothing was handled', async () => {
+      const { adapter, fake, fakes, get } = setup(() => Promise.resolve(), {
+        deliverPolicy: { startTime: '2026-01-01T00:00:00Z' },
+        restart,
+      });
+      await adapter.start();
+      fake.fail(new Error('boom'));
+      await vi.waitFor(() => expect(get).toHaveBeenCalledTimes(2));
+      expect(get.mock.calls[1]).toEqual([
+        'ORD',
+        {
+          deliver_policy: 'by_start_time',
+          opt_start_time: '2026-01-01T00:00:00Z',
+        },
+      ]);
+      await vi.waitFor(() => expect(fakes).toHaveLength(2));
+      await adapter.stop();
+      await adapter.idle();
+    });
+
+    it('does not restart after stop()', async () => {
+      const { adapter, fake, get, logger } = setup(() => Promise.resolve(), {
+        restart,
+      });
+      await adapter.start();
+      await adapter.stop();
+      fake.fail(new Error('boom'));
+      await adapter.idle();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(get).toHaveBeenCalledTimes(1);
+      expect(logger.error).not.toHaveBeenCalled();
+    });
   });
 });
