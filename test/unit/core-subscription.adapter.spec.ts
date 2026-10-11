@@ -585,10 +585,31 @@ describe('CoreSubscriptionAdapter restart', () => {
     await vi.waitFor(() => expect(entry.nc.subscribe).toHaveBeenCalledTimes(3));
     await vi.waitFor(() => expect(states.at(-1)).toBe('running'));
     expect(logger.warn).toHaveBeenCalledWith(
-      'Restart of C.m on "a.b" failed (attempt 1): the subscription ended before the server confirmed it',
+      'Restart of C.m on "a.b" failed (attempt 1): the intake ended while restarting',
     );
     fakes[2]?.push(fakeMsg(1));
     await adapter.stop();
     await adapter.idle();
+  });
+
+  it('processes messages a draining in-flight reopen yields when stop() lands', async () => {
+    const invoke = vi.fn(() => Promise.resolve());
+    const { adapter, fakes, logger, entry } = setupRestart(invoke);
+    await adapter.start();
+    let release!: () => void;
+    vi.mocked(entry.nc.flush).mockImplementationOnce(
+      () =>
+        new Promise<void>((r) => {
+          release = r;
+        }),
+    );
+    fakes[0]?.fail(new Error('gone'));
+    await vi.waitFor(() => expect(entry.nc.subscribe).toHaveBeenCalledTimes(2));
+    fakes[1]?.push(fakeMsg(1));
+    await adapter.stop();
+    release();
+    await adapter.idle();
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('Dropped message'));
   });
 });

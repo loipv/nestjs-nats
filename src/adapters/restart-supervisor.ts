@@ -26,6 +26,10 @@ export class RestartSupervisor {
   private restartTimer: NodeJS.Timeout | undefined;
   private stableTimer: NodeJS.Timeout | undefined;
   private inFlight: Promise<void> | undefined;
+  /** A reopen was called and has not been handled yet. */
+  private reopening = false;
+  /** The intake ended while `reopening`. */
+  private endedWhileReopening = false;
 
   constructor(private readonly deps: RestartSupervisorDeps) {}
 
@@ -50,7 +54,13 @@ export class RestartSupervisor {
   }
 
   ended(_err?: unknown): void {
-    if (this.stopped || this.current !== 'running') return;
+    if (this.stopped) return;
+    if (this.reopening) {
+      // The reopened intake died before it was marked running: the reopen then counts as failed.
+      this.endedWhileReopening = true;
+      return;
+    }
+    if (this.current !== 'running') return;
     clearTimeout(this.stableTimer);
     if (!this.restartable) {
       this.setState('failed');
@@ -105,21 +115,36 @@ export class RestartSupervisor {
       this.fail(`Gave up restarting ${label}: the connection is closed`);
       return;
     }
-    this.inFlight = this.deps.reopen().then(
-      () => {
-        if (this.stopped) return;
-        this.setState('running');
-        logger.log(`Restarted ${label} (attempt ${this.attempts})`);
-        this.stableTimer = setTimeout(() => {
-          this.attempts = 0;
-        }, policy.maxDelay);
-        this.stableTimer.unref();
-      },
-      (err: unknown) => {
-        if (this.stopped) return;
-        logger.warn(`Restart of ${label} failed (attempt ${this.attempts}): ${errorMessage(err)}`);
-        this.schedule();
-      },
-    );
+    this.reopening = true;
+    this.endedWhileReopening = false;
+    this.inFlight = Promise.resolve()
+      .then(() => this.deps.reopen())
+      .then(
+        () => {
+          this.reopening = false;
+          if (this.stopped) return;
+          if (this.endedWhileReopening) {
+            logger.warn(
+              `Restart of ${label} failed (attempt ${this.attempts}): the intake ended while restarting`,
+            );
+            this.schedule();
+            return;
+          }
+          this.setState('running');
+          logger.log(`Restarted ${label} (attempt ${this.attempts})`);
+          this.stableTimer = setTimeout(() => {
+            this.attempts = 0;
+          }, policy.maxDelay);
+          this.stableTimer.unref();
+        },
+        (err: unknown) => {
+          this.reopening = false;
+          if (this.stopped) return;
+          logger.warn(
+            `Restart of ${label} failed (attempt ${this.attempts}): ${errorMessage(err)}`,
+          );
+          this.schedule();
+        },
+      );
   }
 }
