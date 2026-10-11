@@ -23,6 +23,10 @@ function fakeSubscription() {
       }
     },
     isClosed: () => closed,
+    unsubscribe: vi.fn(() => {
+      closed = true;
+      wake?.();
+    }),
     drain: vi.fn(() => {
       closed = true;
       wake?.();
@@ -404,7 +408,7 @@ describe('CoreSubscriptionAdapter restart', () => {
           fakes.push(fake);
           return fake.sub;
         }),
-        flush: () => Promise.resolve(),
+        flush: vi.fn(() => Promise.resolve()),
         isClosed: () => conn.closed,
       },
     } as unknown as ConnectionEntry;
@@ -505,5 +509,86 @@ describe('CoreSubscriptionAdapter restart', () => {
     await adapter.stop();
     await adapter.idle();
     expect(entry.nc.subscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a pending retry into onRejected when stop() lands during the restart delay', async () => {
+    const invoke = vi.fn(() => Promise.reject(new Error('boom')));
+    const { adapter, fakes, states, logger } = setupRestart(
+      invoke,
+      { retry: { initialDelay: 200, jitter: 0 } },
+      { ...policy, initialDelay: 10_000, maxDelay: 10_000 },
+    );
+    await adapter.start();
+    fakes[0]?.push(fakeMsg(1));
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+    fakes[0]?.fail(new Error('gone'));
+    await vi.waitFor(() => expect(states).toEqual(['running', 'restarting']));
+    await adapter.stop();
+    await adapter.idle();
+    await vi.waitFor(() =>
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Dropped message on "a.b" for C.m on "a.b": the subscription is stopping',
+      ),
+    );
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops the dispatcher when the supervisor gives up on its own', async () => {
+    const invoke = vi.fn(() => Promise.reject(new Error('boom')));
+    const { adapter, fakes, states, logger, conn } = setupRestart(
+      invoke,
+      { retry: { initialDelay: 400, jitter: 0 } },
+      { ...policy, initialDelay: 150, maxDelay: 150 },
+    );
+    await adapter.start();
+    fakes[0]?.push(fakeMsg(1));
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+    fakes[0]?.fail(new Error('gone'));
+    await vi.waitFor(() => expect(states).toEqual(['running', 'restarting']));
+    conn.closed = true;
+    await vi.waitFor(() => expect(states).toEqual(['running', 'restarting', 'failed']));
+    await adapter.idle();
+    await vi.waitFor(() =>
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Dropped message on "a.b" for C.m on "a.b": the subscription is stopping',
+      ),
+    );
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('unsubscribes a reopened subscription whose flush fails and ignores its loop', async () => {
+    const { adapter, fakes, states, logger, entry } = setupRestart();
+    await adapter.start();
+    vi.mocked(entry.nc.flush).mockRejectedValueOnce(new Error('flush failed'));
+    fakes[0]?.fail(new Error('gone'));
+    await vi.waitFor(() => expect(entry.nc.subscribe).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(states.at(-1)).toBe('running'));
+    expect(fakes[1]?.sub.unsubscribe).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Restart of C.m on "a.b" failed (attempt 1): flush failed',
+    );
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    expect(states).toEqual(['running', 'restarting', 'restarting', 'running']);
+    await adapter.stop();
+    await adapter.idle();
+  });
+
+  it('counts a reopen whose loop ended before the flush as a failed attempt', async () => {
+    const { adapter, fakes, states, logger, entry } = setupRestart();
+    await adapter.start();
+    vi.mocked(entry.nc.flush).mockImplementationOnce(async () => {
+      fakes[1]?.fail(new Error('gone again'));
+      await tick();
+      await tick();
+    });
+    fakes[0]?.fail(new Error('gone'));
+    await vi.waitFor(() => expect(entry.nc.subscribe).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(states.at(-1)).toBe('running'));
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Restart of C.m on "a.b" failed (attempt 1): the subscription ended before the server confirmed it',
+    );
+    fakes[2]?.push(fakeMsg(1));
+    await adapter.stop();
+    await adapter.idle();
   });
 });
