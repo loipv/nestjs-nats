@@ -530,6 +530,51 @@ describe('NatsLifecycle declarations', () => {
     expect(ensureStream).not.toHaveBeenCalled();
   });
 
+  it('merges inherited and __proto__ metadata keys without conflict', async () => {
+    const { ensureStream } = syncSpies();
+    const proto = JSON.parse('{"__proto__":"p"}') as Record<string, string>;
+    const { manager } = fakeManager({
+      default: { ...reset, streams: [{ name: 'S', metadata: { constructor: 'x' } }] },
+    });
+    await lifecycleWith(manager, [
+      { streams: [{ name: 'S', metadata: { team: 'a' } }] },
+      { streams: [{ name: 'S', metadata: proto }] },
+    ]).onModuleInit();
+    const stream = ensureStream.mock.calls[0]?.[0] as { metadata: Record<string, string> };
+    expect(Object.keys(stream.metadata)).toEqual(['constructor', 'team', '__proto__']);
+    expect(stream.metadata.constructor).toBe('x');
+    expect(Object.getOwnPropertyDescriptor(stream.metadata, '__proto__')?.value).toBe('p');
+  });
+
+  it("rejects a reserved metadata key in a module declaration, before any sync, with removedFields 'reset'", async () => {
+    const { ensureStream } = syncSpies();
+    const { manager } = fakeManager({
+      default: { ...reset, streams: [{ name: 'S' }, { name: 'T', metadata: { '_nats.x': '1' } }] },
+    });
+    await expect(lifecycleWith(manager, []).onModuleInit()).rejects.toThrow(
+      'JetStream stream "T" declares metadata key "_nats.x"',
+    );
+    expect(ensureStream).not.toHaveBeenCalled();
+  });
+
+  it("rejects a reserved metadata key in a module consumer, before any sync, with removedFields 'reset'", async () => {
+    const { ensureStream, ensureConsumer } = syncSpies();
+    const { manager } = fakeManager({
+      default: {
+        ...reset,
+        streams: [{ name: 'S' }],
+        consumers: [
+          { stream: 'S', config: { durable_name: 'D', metadata: { 'nestjs-nats.declared': 'x' } } },
+        ],
+      },
+    });
+    await expect(lifecycleWith(manager, []).onModuleInit()).rejects.toThrow(
+      'JetStream consumer "S/D" declares metadata key "nestjs-nats.declared"',
+    );
+    expect(ensureStream).not.toHaveBeenCalled();
+    expect(ensureConsumer).not.toHaveBeenCalled();
+  });
+
   it("syncs every declaration as given with removedFields 'ignore' (the default)", async () => {
     const { ensureStream } = syncSpies();
     const { manager } = fakeManager({ default: { streams: [{ name: 'S', subjects: ['a'] }] } });
@@ -541,14 +586,14 @@ describe('NatsLifecycle declarations', () => {
   });
 
   describe('consumers declared by handlers', () => {
-    function consumeDef(durable: string, config?: object) {
+    function consumeDef(durable: string, config?: object | null) {
       return {
         kind: 'consume',
         delivery: 'pull',
         connection: 'default',
         className: 'Svc',
         methodName: 'handle',
-        options: { stream: 'S', durable, ...(config ? { config } : {}) },
+        options: { stream: 'S', durable, ...(config === undefined ? {} : { config }) },
         wrapper: { isDependencyTreeStatic: () => true, isTransient: false },
       };
     }
@@ -613,6 +658,13 @@ describe('NatsLifecycle declarations', () => {
 
     it('accepts a durable also declared in the module options when the handler declares no config', async () => {
       const { lifecycle, start } = setup(reset, consumeDef('D'));
+      await lifecycle.onModuleInit();
+      await lifecycle.onApplicationBootstrap();
+      expect(start).toHaveBeenCalledOnce();
+    });
+
+    it('treats a handler config of null as no config', async () => {
+      const { lifecycle, start } = setup(reset, consumeDef('D', null));
       await lifecycle.onModuleInit();
       await lifecycle.onApplicationBootstrap();
       expect(start).toHaveBeenCalledOnce();

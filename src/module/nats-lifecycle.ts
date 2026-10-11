@@ -313,6 +313,13 @@ export class NatsLifecycle
       const declarations = result.get(name) as Declarations;
       const streams = mergeStreams(declarations.streams);
       const consumers = mergeConsumers(declarations.consumers);
+      for (const s of streams) rejectReservedMetadata(`stream "${s.name}"`, s.metadata);
+      for (const c of consumers) {
+        rejectReservedMetadata(
+          `consumer "${c.stream}/${c.config.durable_name}"`,
+          c.config.metadata,
+        );
+      }
       result.set(name, { streams, consumers });
       this.moduleConsumers.set(name, new Set(consumers.map(consumerKey)));
     }
@@ -327,7 +334,7 @@ export class NatsLifecycle
    */
   private checkHandlerConsumers(defs: HandlerDefinition[]): void {
     for (const def of defs) {
-      if (def.kind !== 'consume' || def.options.config === undefined) continue;
+      if (def.kind !== 'consume' || !def.options.config) continue;
       const declared = this.moduleConsumers.get(def.connection);
       if (!declared) continue;
       const { stream, durable, config } = def.options;
