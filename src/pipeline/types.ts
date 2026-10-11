@@ -28,7 +28,7 @@ export interface OutgoingMessage {
   /**
    * Set on a dead letter: the message a handler failed on, published to its DLQ subject
    * (`subject`). Its `data` is the original body (bytes) and its `headers` the dead letter's
-   * (`Nats-DLQ-*` and its `Nats-Msg-Id`).
+   * (`Nats-DLQ-*`, and a `Nats-Msg-Id` for a dead letter of a JetStream message).
    */
   deadLetter?: {
     /** Subject the failed message arrived on. */

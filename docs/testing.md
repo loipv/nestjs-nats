@@ -117,7 +117,7 @@ It rejects with a `NatsConfigError` when the handlers are misconfigured (as boot
 | `nakDelay` | The redelivery delay in ms when `settlement` is `'nak'` |
 | `retryDelay` | The delay in ms before the next attempt when `settlement` is `'retry'`, for a core or an ordered handler |
 | `reply` | For a request or service endpoint: `{ data }`, or `{ error: { code, description } }` |
-| `dlq` | The dead letters published while the messages were processed |
+| `dlq` | The dead letters published while the messages were processed. A dead letter an outbound plugin dropped is not listed, though the settlement is `'dlq'`. |
 
 Notes:
 
