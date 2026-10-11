@@ -1,4 +1,4 @@
-import { jetstreamManager } from '@nats-io/jetstream';
+import { JetStreamApiCodes, jetstreamManager } from '@nats-io/jetstream';
 import { Kvm } from '@nats-io/kv';
 import { connect, headers, type NatsConnection } from '@nats-io/transport-node';
 import { Injectable } from '@nestjs/common';
@@ -6,6 +6,7 @@ import type { TestingModule } from '@nestjs/testing';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { Subscribe } from '../../src/decorators/handler.decorators.js';
 import { Msg } from '../../src/decorators/param.decorators.js';
+import { NatsConfigError } from '../../src/errors/errors.js';
 import { KvIdempotencyStore } from '../../src/kv/index.js';
 import { NatsModule } from '../../src/module/nats.module.js';
 import { getConnectionToken } from '../../src/module/tokens.js';
@@ -19,9 +20,10 @@ const enc = new TextEncoder();
 const calls: string[] = [];
 
 /**
- * The handler of one replica. Keys are scoped by class and method names, so the replicas
- * share them as two deployments of one application would; their queue groups differ, so
- * both receive every message and only the store de-duplicates.
+ * The handler of one replica. Both classes are named `Handler` on purpose: keys are scoped by
+ * class and method names, so the replicas share them as two deployments of one application
+ * would. Their queue groups differ, so both receive every message and only the store
+ * de-duplicates.
  */
 function replicaHandler(queue: 'A' | 'B') {
   @Injectable()
@@ -107,6 +109,45 @@ describe('KvIdempotencyStore on a real server', () => {
     expect(await store.claim('k', 1_000)).toBe('in-progress');
   });
 
+  it('claims again after release, over the delete marker', async () => {
+    const store = new KvIdempotencyStore({ bucket: 'idem-release' });
+    await boot(store);
+    expect(await store.claim('k', 60_000)).toBe('claimed');
+    await store.release('k');
+
+    // A write expecting no revision fails on the marker, with the code the store matches.
+    const kv = await new Kvm(nc).open('idem-release');
+    const key = Buffer.from('k', 'utf8').toString('base64url');
+    expect((await kv.get(key))?.operation).toBe('DEL');
+    await expect(kv.put(key, '{}', { previousSeq: 0 })).rejects.toMatchObject({
+      code: JetStreamApiCodes.StreamWrongLastSequence,
+    });
+
+    expect(await store.claim('k', 60_000)).toBe('claimed');
+    expect(await store.claim('k', 60_000)).toBe('in-progress');
+  });
+
+  it('binds the same store again once its application closed', async () => {
+    const store = new KvIdempotencyStore({ bucket: 'idem-reuse' });
+    const first = await boot(store);
+    expect(await store.claim('a', 60_000)).toBe('claimed');
+    await first.close();
+    apps.splice(apps.indexOf(first), 1);
+    await expect(store.claim('b', 60_000)).rejects.toThrow(/not bound/);
+
+    await boot(store);
+    expect(await store.claim('b', 60_000)).toBe('claimed');
+    expect(await store.claim('a', 60_000)).toBe('in-progress');
+  });
+
+  it('refuses the store of a running application, which keeps it', async () => {
+    const store = new KvIdempotencyStore({ bucket: 'idem-taken' });
+    await boot(store);
+    await expect(boot(store)).rejects.toThrow(NatsConfigError);
+    // The failed application did not release the binding of the running one.
+    expect(await store.claim('k', 60_000)).toBe('claimed');
+  });
+
   it('creates the bucket with history 1 and max age', async () => {
     const jsm = await jetstreamManager(nc);
     await expect(jsm.streams.info('KV_idem2')).rejects.toThrow(/stream not found/);
@@ -122,6 +163,7 @@ describe('KvIdempotencyStore on a real server', () => {
     const app = await boot(new KvIdempotencyStore({ bucket: 'idem-long' }), [LongKeyHandler]);
     const appNc = app.get<NatsConnection>(getConnectionToken());
     const events: string[] = [];
+    // The iterator ends when the app closes its connection (afterEach).
     void (async () => {
       for await (const s of appNc.status()) events.push(s.type);
     })();
