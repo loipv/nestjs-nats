@@ -146,7 +146,7 @@ export class HandlerExplorer {
     return Reflect.getMetadata(NATS_ON_CLOUD_EVENT_METADATA, method) ?? [];
   }
 
-  /** The single subscribe/consume definition of a `@CloudEventRouter` class. */
+  /** The single subscribe/consume/ordered definition of a `@CloudEventRouter` class. */
   private defineRouter(
     wrapper: InstanceWrapper,
     instance: object,
@@ -170,15 +170,21 @@ export class HandlerExplorer {
         );
       }
     }
-    const hasSubscribe = 'subscribe' in options && options.subscribe !== undefined;
-    const hasConsume = 'consume' in options && options.consume !== undefined;
-    if (hasSubscribe === hasConsume) {
-      throw new NatsConfigError(`${label} must set exactly one of subscribe or consume`);
+    const set = (['subscribe', 'consume', 'consumePush', 'consumeOrdered'] as const).filter(
+      (key) => key in options && (options as Record<string, unknown>)[key] !== undefined,
+    );
+    if (set.length !== 1) {
+      throw new NatsConfigError(
+        `${label} must set exactly one of subscribe, consume, consumePush or consumeOrdered`,
+      );
     }
     const { connection, concurrency, codec, retry, dlq, idempotency } = options;
+    if (set[0] === 'consumeOrdered' && concurrency !== undefined) {
+      throw new NatsConfigError(`${label} with consumeOrdered does not support concurrency`);
+    }
     const common = defined({ connection, concurrency, codec, retry, dlq, idempotency });
     let spec: HandlerSpec;
-    if (hasSubscribe) {
+    if (set[0] === 'subscribe') {
       const { subscribe, queue } = options as Extract<
         CloudEventRouterOptions,
         { subscribe: string }
@@ -188,7 +194,7 @@ export class HandlerExplorer {
         subject: subscribe,
         options: { ...common, ...defined({ queue }) },
       };
-    } else {
+    } else if (set[0] === 'consume') {
       const { consume } = options as Extract<CloudEventRouterOptions, { consume: unknown }>;
       spec = {
         kind: 'consume',
@@ -198,6 +204,35 @@ export class HandlerExplorer {
           stream: consume.stream,
           durable: consume.durable,
           ...defined({ config: consume.config }),
+        },
+      };
+    } else if (set[0] === 'consumePush') {
+      const { consumePush } = options as Extract<CloudEventRouterOptions, { consumePush: unknown }>;
+      spec = {
+        kind: 'consume',
+        delivery: 'push',
+        options: {
+          ...common,
+          stream: consumePush.stream,
+          durable: consumePush.durable,
+          ...defined({ config: consumePush.config, deliverGroup: consumePush.deliverGroup }),
+        },
+      };
+    } else {
+      const { consumeOrdered } = options as Extract<
+        CloudEventRouterOptions,
+        { consumeOrdered: unknown }
+      >;
+      spec = {
+        kind: 'ordered',
+        options: {
+          ...common,
+          stream: consumeOrdered.stream,
+          ...defined({
+            filterSubjects: consumeOrdered.filterSubjects,
+            deliverPolicy: consumeOrdered.deliverPolicy,
+            headersOnly: consumeOrdered.headersOnly,
+          }),
         },
       };
     }

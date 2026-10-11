@@ -239,7 +239,10 @@ it('exports the CloudEvents types', () => {
     'ack' | 'term' | 'dlq' | undefined
   >();
   expectTypeOf<CloudEventRouterOptions>().toMatchTypeOf<
-    { subscribe: string } | { consume: { stream: string; durable: string } }
+    | { subscribe: string }
+    | { consume: { stream: string; durable: string } }
+    | { consumePush: { stream: string; durable: string; deliverGroup?: string } }
+    | { consumeOrdered: { stream: string; headersOnly?: boolean } }
   >();
 });
 

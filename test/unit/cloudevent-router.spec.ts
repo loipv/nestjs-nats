@@ -5,7 +5,10 @@ import { Test } from '@nestjs/testing';
 import { describe, expect, it, vi } from 'vitest';
 import type { CloudEventMeta } from '../../src/cloudevents/types.js';
 import { jsonCodec } from '../../src/codec/codec.js';
-import type { ConnectionEntry } from '../../src/connection/connection-registry.js';
+import type {
+  ConnectionEntry,
+  ConnectionRegistry,
+} from '../../src/connection/connection-registry.js';
 import { NatsContext, NatsJetStreamContext } from '../../src/context/nats-context.js';
 import {
   CloudEventRouter,
@@ -15,6 +18,7 @@ import {
 import { Subscribe } from '../../src/decorators/handler.decorators.js';
 import { CloudEvent, Payload } from '../../src/decorators/param.decorators.js';
 import { type HandlerDefinition, HandlerExplorer } from '../../src/discovery/handler-explorer.js';
+import { validateHandlers } from '../../src/discovery/handler-validator.js';
 import { NatsConfigError, NatsDecodeError } from '../../src/errors/errors.js';
 import { compose } from '../../src/pipeline/compose.js';
 import {
@@ -281,6 +285,73 @@ describe('@CloudEventRouter discovery', () => {
     expect(def.router?.unmatched).toBe('term');
   });
 
+  it('builds a push consumer definition from consumePush', async () => {
+    const def = await routerDef({
+      consumePush: { stream: 'S', durable: 'd', deliverGroup: 'g', config: { ack_wait: 1 } },
+    });
+    expect(def).toMatchObject({
+      kind: 'consume',
+      delivery: 'push',
+      methodName: '@CloudEventRouter',
+      options: { stream: 'S', durable: 'd', deliverGroup: 'g', config: { ack_wait: 1 } },
+    });
+  });
+
+  it('builds an ordered consumer definition from consumeOrdered', async () => {
+    const def = await routerDef({
+      consumeOrdered: {
+        stream: 'S',
+        filterSubjects: 'a.>',
+        deliverPolicy: 'new',
+        headersOnly: true,
+      },
+    });
+    expect(def).toMatchObject({
+      kind: 'ordered',
+      methodName: '@CloudEventRouter',
+      options: { stream: 'S', filterSubjects: 'a.>', deliverPolicy: 'new', headersOnly: true },
+    });
+  });
+
+  it.each([
+    ['subscribe and consumePush', { subscribe: 'x', consumePush: { stream: 'S', durable: 'd' } }],
+    [
+      'consumePush and consumeOrdered',
+      { consumePush: { stream: 'S', durable: 'd' }, consumeOrdered: { stream: 'S' } },
+    ],
+    ['no source', {}],
+  ])('rejects a router with %s', async (_, options) => {
+    await expect(routerDef(options as never)).rejects.toThrow(
+      /^@CloudEventRouter R must set exactly one of subscribe, consume, consumePush or consumeOrdered$/,
+    );
+  });
+
+  it('counts a source set to undefined as unset', async () => {
+    const def = await routerDef({
+      consume: undefined,
+      consumePush: { stream: 'S', durable: 'd' },
+    } as never);
+    expect(def).toMatchObject({ kind: 'consume', delivery: 'push' });
+  });
+
+  it('rejects concurrency with consumeOrdered', async () => {
+    await expect(routerDef({ consumeOrdered: { stream: 'S' }, concurrency: 2 })).rejects.toThrow(
+      new NatsConfigError('@CloudEventRouter R with consumeOrdered does not support concurrency'),
+    );
+  });
+
+  it('rejects a deliverGroup that conflicts with config.deliver_group', async () => {
+    const def = await routerDef({
+      consumePush: { stream: 'S', durable: 'd', deliverGroup: 'g', config: { deliver_group: 'h' } },
+    });
+    const mgr = {
+      has: () => true,
+      get: () => ({ options: {} }),
+    } as unknown as ConnectionRegistry;
+    const wrapper = { isDependencyTreeStatic: () => true, isTransient: false };
+    expect(() => validateHandlers([{ ...def, wrapper } as never], mgr)).toThrow(NatsConfigError);
+  });
+
   it.each([
     ['orphan @OnCloudEvent', OrphanHandlers],
     ['router without routes', EmptyRouter],
@@ -443,5 +514,40 @@ describe('@CloudEventRouter dispatch', () => {
     expect(entry.logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('No handler for CloudEvent type "com.other"'),
     );
+  });
+
+  it('settles a push router like a consume router', async () => {
+    const def = await routerDef({ consumePush: { stream: 'S', durable: 'd' }, unmatched: 'term' });
+    calls.length = 0;
+    const matched = jsPart({ ...BASE, type: 'com.o.created' });
+    const ok = await run(def, matched.part);
+    expect(calls).toHaveLength(1);
+    expect(ok.outcome).toEqual({ action: 'ack' });
+    expect(matched.raw.ack).toHaveBeenCalledTimes(1);
+    const other = jsPart({ ...BASE, type: 'com.other' });
+    const res = await run(def, other.part);
+    expect(res.outcome).toMatchObject({ action: 'term' });
+    expect(other.raw.term).toHaveBeenCalledTimes(1);
+  });
+
+  it('settles an ordered router without acks', async () => {
+    const def = await routerDef({ consumeOrdered: { stream: 'S' } });
+    calls.length = 0;
+    const ok = await run(def, jsPart({ ...BASE, type: 'com.o.created' }).part);
+    expect(calls).toHaveLength(1);
+    expect(ok.outcome).toEqual({ action: 'none' });
+
+    const term = await routerDef({ consumeOrdered: { stream: 'S' }, unmatched: 'term' });
+    const dropped = await run(term, jsPart({ ...BASE, type: 'com.other' }).part);
+    expect(dropped.outcome).toMatchObject({ action: 'drop' });
+
+    const dlqDef = await routerDef({ consumeOrdered: { stream: 'S' }, unmatched: 'dlq' });
+    const dead = await run(dlqDef, jsPart({ ...BASE, type: 'com.other' }).part, true);
+    expect(dead.outcome).toMatchObject({ action: 'dlq' });
+    expect(dead.d.result).toBeUndefined();
+
+    const noDlq = await run(dlqDef, jsPart({ ...BASE, type: 'com.other' }).part, false);
+    expect(noDlq.outcome).toMatchObject({ action: 'drop' });
+    expect(noDlq.entry.logger.warn).toHaveBeenCalledWith(expect.stringContaining('com.other'));
   });
 });
