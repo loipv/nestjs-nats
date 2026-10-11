@@ -9,9 +9,15 @@ import { NatsConfigError } from '../errors/errors.js';
 import { createDelivery, type HandlerInfo, type InternalDelivery } from '../pipeline/delivery.js';
 import { type ServiceError, toServiceError } from '../pipeline/reply.js';
 import { errorMessage, errorTrace } from '../util/errors.js';
-import type { ForceStopResult, HandlerAdapter } from './adapter.js';
+import {
+  type ForceStopResult,
+  type HandlerAdapter,
+  NO_RESTART,
+  type RestartBinding,
+} from './adapter.js';
 import { createHandlerPipeline, defaultPipelineDeps } from './handler-pipeline.js';
 import { createLimiter, type Limiter } from './limiter.js';
+import { RestartSupervisor } from './restart-supervisor.js';
 
 export type ServiceEndpointDefinition = HandlerDefinition & { kind: 'service-endpoint' };
 
@@ -24,23 +30,33 @@ interface EndpointRuntime {
   label: string;
 }
 
+/** One registration of the service: a restart creates a new one. */
+interface ServiceInstance {
+  service: Service;
+  iterators: Array<QueuedIterator<ServiceMsg>>;
+  /** The service stopped by itself because of an error (already logged). */
+  stoppedByItself: boolean;
+  /** This adapter asked the service to stop. */
+  closed: boolean;
+}
+
 /**
  * Registers one NATS service for a `@NatsService` class and runs each of its
  * `@ServiceEndpoint` handlers (one at a time per endpoint) on the service's endpoints.
  */
 export class NatsServiceAdapter implements HandlerAdapter {
   private readonly endpoints: EndpointRuntime[];
-  private service?: Service;
-  private loops: Array<Promise<void>> = [];
-  private readonly iterators: Array<QueuedIterator<ServiceMsg>> = [];
+  private instance?: ServiceInstance;
+  /** Endpoint loops still running, of the current service and of replaced ones. */
+  private readonly loops = new Set<Promise<void>>();
   private stopping = false;
-  /** Set when the service stopped by itself because of an error (already logged). */
-  private failed = false;
+  private readonly supervisor: RestartSupervisor;
 
   constructor(
     private readonly options: NatsServiceOptions,
     endpoints: ServiceEndpointDefinition[],
     private readonly entry: ConnectionEntry,
+    restart: RestartBinding = NO_RESTART,
   ) {
     this.endpoints = endpoints.map((def) => {
       // Requests are never retried: errors are answered with an error reply.
@@ -58,10 +74,25 @@ export class NatsServiceAdapter implements HandlerAdapter {
         label: `${def.className}.${def.methodName} on service "${options.name}" endpoint "${def.endpoint}"`,
       };
     });
+    const label = `service "${options.name}"`;
+    this.supervisor = new RestartSupervisor({
+      policy: restart.policy,
+      label,
+      logger: entry.logger,
+      isConnectionClosed: () => entry.nc.isClosed(),
+      reopen: () => this.open(),
+      onState: restart.track(label),
+    });
   }
 
   async start(): Promise<void> {
-    if (this.service) return;
+    if (this.instance) return;
+    await this.open();
+    this.supervisor.started();
+  }
+
+  /** Registers the service and its endpoints; a restart replaces the previous service. */
+  private async open(): Promise<void> {
     const { name, version, description, metadata, queue } = this.options;
     // Optional fields are only passed when set: the library validates what it receives.
     const config: ServiceConfig = {
@@ -72,45 +103,67 @@ export class NatsServiceAdapter implements HandlerAdapter {
       ...(queue !== undefined ? { queue } : {}),
     };
     const service = await new Svcm(this.entry.nc).add(config);
-    // Assigned before adding endpoints so a failure below still stops the service.
-    this.service = service;
+    const instance: ServiceInstance = {
+      service,
+      iterators: [],
+      stoppedByItself: false,
+      closed: false,
+    };
+    // Assigned before adding endpoints so `stop()` stops it even if what follows fails.
+    this.instance = instance;
     if (this.stopping) {
-      await this.stopService(service);
+      await this.stopService(instance);
       return;
     }
-    void service.stopped.then((err) => this.onServiceStopped(err));
-    for (const endpoint of this.endpoints) {
-      const { subject, queue: endpointQueue, metadata: endpointMetadata } = endpoint.def.options;
-      let iterator: QueuedIterator<ServiceMsg>;
-      try {
-        iterator = service.addEndpoint(endpoint.def.endpoint, {
-          ...(subject !== undefined ? { subject } : {}),
-          ...(endpointQueue !== undefined ? { queue: endpointQueue } : {}),
-          ...(endpointMetadata !== undefined ? { metadata: endpointMetadata } : {}),
-        });
-      } catch (err) {
-        // `this.service` is set, so the bootstrap cleanup stops the service.
-        const { className, methodName } = endpoint.def;
-        throw new NatsConfigError(
-          `Invalid @ServiceEndpoint ${className}.${methodName} ("${endpoint.def.endpoint}") of service "${name}": ${errorMessage(err)}`,
-          { cause: err },
-        );
+    void service.stopped.then((err) => this.onServiceStopped(instance, err));
+    try {
+      for (const endpoint of this.endpoints) {
+        instance.iterators.push(this.addEndpoint(instance, endpoint));
       }
-      this.iterators.push(iterator);
-      this.loops.push(this.consume(iterator, endpoint));
+      // Make sure the server knows about the subscriptions before bootstrap completes.
+      await this.entry.nc.flush();
+    } catch (err) {
+      // A partly registered service would serve some endpoints only.
+      await this.stopService(instance);
+      throw err;
     }
-    // Make sure the server knows about the subscriptions before bootstrap completes.
-    await this.entry.nc.flush();
+  }
+
+  /** Adds `endpoint` to the service of `instance` and starts serving it. */
+  private addEndpoint(
+    instance: ServiceInstance,
+    endpoint: EndpointRuntime,
+  ): QueuedIterator<ServiceMsg> {
+    const { subject, queue, metadata } = endpoint.def.options;
+    let iterator: QueuedIterator<ServiceMsg>;
+    try {
+      iterator = instance.service.addEndpoint(endpoint.def.endpoint, {
+        ...(subject !== undefined ? { subject } : {}),
+        ...(queue !== undefined ? { queue } : {}),
+        ...(metadata !== undefined ? { metadata } : {}),
+      });
+    } catch (err) {
+      const { className, methodName } = endpoint.def;
+      throw new NatsConfigError(
+        `Invalid @ServiceEndpoint ${className}.${methodName} ("${endpoint.def.endpoint}") of service "${this.options.name}": ${errorMessage(err)}`,
+        { cause: err },
+      );
+    }
+    const loop = this.consume(instance, iterator, endpoint).finally(() => this.loops.delete(loop));
+    this.loops.add(loop);
+    return iterator;
   }
 
   async stop(): Promise<void> {
+    this.supervisor.stop();
     this.stopping = true;
-    const service = this.service;
-    if (!service) return;
-    await this.stopService(service);
+    const instance = this.instance;
+    if (!instance) return;
+    await this.stopService(instance);
   }
 
   async idle(): Promise<void> {
+    await this.supervisor.settled();
     // Loops end once the stopped service's subscriptions have yielded their buffered messages.
     await Promise.all(this.loops);
     await Promise.all(this.endpoints.map((e) => e.limiter.idle()));
@@ -126,21 +179,27 @@ export class NatsServiceAdapter implements HandlerAdapter {
    * violation). The failed endpoint's iterator is then never ended by `@nats-io/services`,
    * so end them all here: otherwise shutdown would wait for it until `drainTimeout`.
    */
-  private onServiceStopped(err: Error | null): void {
-    if (err instanceof Error && !this.stopping) {
-      this.failed = true;
+  private onServiceStopped(instance: ServiceInstance, err: Error | null): void {
+    const byItself =
+      err instanceof Error && instance === this.instance && !instance.closed && !this.stopping;
+    if (byItself) {
+      instance.stoppedByItself = true;
+      const tail = this.supervisor.restartable ? '' : '; no more requests will be received';
       this.entry.logger.error(
-        `NATS service "${this.options.name}" stopped: ${errorMessage(err)}; no more requests will be received`,
+        `NATS service "${this.options.name}" stopped: ${errorMessage(err)}${tail}`,
         errorTrace(err),
       );
     }
-    for (const iterator of this.iterators) iterator.stop();
+    for (const iterator of instance.iterators) iterator.stop();
+    if (byItself) this.supervisor.ended(err);
   }
 
-  private async stopService(service: Service): Promise<void> {
+  private async stopService(instance: ServiceInstance): Promise<void> {
+    if (instance.closed) return;
+    instance.closed = true;
     if (this.entry.nc.isClosed()) return;
     try {
-      const err = await service.stop();
+      const err = await instance.service.stop();
       if (err) throw err;
     } catch (err) {
       this.entry.logger.error(`Failed to stop service "${this.options.name}"`, errorTrace(err));
@@ -148,9 +207,12 @@ export class NatsServiceAdapter implements HandlerAdapter {
   }
 
   private async consume(
+    instance: ServiceInstance,
     iterator: QueuedIterator<ServiceMsg>,
     endpoint: EndpointRuntime,
   ): Promise<void> {
+    let error: unknown;
+    let failed = false;
     try {
       for await (const msg of iterator) {
         await endpoint.limiter.acquire();
@@ -164,14 +226,29 @@ export class NatsServiceAdapter implements HandlerAdapter {
           .finally(() => endpoint.limiter.release());
       }
     } catch (err) {
-      this.entry.logger.error(`Endpoint of ${endpoint.label} failed`, errorTrace(err));
+      failed = true;
+      error = err;
+    }
+    // A service that was stopped or replaced is not this handler's intake anymore; one that
+    // stopped by itself was already reported.
+    if (
+      this.stopping ||
+      instance !== this.instance ||
+      instance.closed ||
+      instance.stoppedByItself
+    ) {
       return;
     }
-    if (!this.stopping && !this.failed) {
-      this.entry.logger.error(
-        `Endpoint of ${endpoint.label} ended unexpectedly; no more requests will be received`,
-      );
+    const restartable = this.supervisor.restartable;
+    const tail = restartable ? '' : '; no more requests will be received';
+    if (failed) {
+      this.entry.logger.error(`Endpoint of ${endpoint.label} failed${tail}`, errorTrace(error));
+    } else {
+      this.entry.logger.error(`Endpoint of ${endpoint.label} ended unexpectedly${tail}`);
     }
+    // The other endpoints keep serving unless the service is recreated with all of them.
+    if (restartable) void this.stopService(instance);
+    this.supervisor.ended(error);
   }
 
   private async handle(msg: ServiceMsg, endpoint: EndpointRuntime): Promise<void> {
