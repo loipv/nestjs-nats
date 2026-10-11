@@ -243,4 +243,20 @@ describe('RestartSupervisor', () => {
     expect(logger.warn).toHaveBeenCalledWith('Restart of L failed (attempt 1): sync boom');
     expect(logger.warn).toHaveBeenLastCalledWith('Restarting L in 2000 ms (attempt 2)');
   });
+
+  it('an intake that ended before started() is restarted at once', () => {
+    const { supervisor, logger, states } = setup();
+    supervisor.ended();
+    expect(states).toEqual([]);
+    supervisor.started();
+    expect(states).toEqual(['running', 'restarting']);
+    expect(logger.warn).toHaveBeenCalledWith('Restarting L in 1000 ms (attempt 1)');
+  });
+
+  it('an intake that ended before started() ends failed when not restartable', () => {
+    const { supervisor, states } = setup({ policy: false });
+    supervisor.ended();
+    supervisor.started();
+    expect(states).toEqual(['running', 'failed']);
+  });
 });

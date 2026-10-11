@@ -612,4 +612,54 @@ describe('CoreSubscriptionAdapter restart', () => {
     expect(invoke).toHaveBeenCalledTimes(1);
     expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('Dropped message'));
   });
+
+  it('stops the dispatcher when stop() lands during a reopen whose flush then fails', async () => {
+    const invoke = vi.fn(() => Promise.reject(new Error('boom')));
+    const { adapter, fakes, logger, entry } = setupRestart(invoke, {
+      retry: { initialDelay: 200, jitter: 0 },
+    });
+    await adapter.start();
+    fakes[0]?.push(fakeMsg(1));
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+    let reject!: (e: Error) => void;
+    vi.mocked(entry.nc.flush).mockImplementationOnce(
+      () =>
+        new Promise<void>((_, rej) => {
+          reject = rej;
+        }),
+    );
+    fakes[0]?.fail(new Error('gone'));
+    await vi.waitFor(() => expect(entry.nc.subscribe).toHaveBeenCalledTimes(2));
+    const stopped = adapter.stop();
+    reject(new Error('flush failed'));
+    await stopped;
+    await adapter.idle();
+    await vi.waitFor(() =>
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Dropped message on "a.b" for C.m on "a.b": the subscription is stopping',
+      ),
+    );
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('restarts a subscription whose loop ends during the first flush', async () => {
+    const { adapter, fakes, states, entry } = setupRestart();
+    let release!: () => void;
+    vi.mocked(entry.nc.flush).mockImplementationOnce(
+      () =>
+        new Promise<void>((r) => {
+          release = r;
+        }),
+    );
+    const started = adapter.start();
+    fakes[0]?.fail(new Error('denied'));
+    await tick();
+    await tick();
+    release();
+    await started;
+    await vi.waitFor(() => expect(entry.nc.subscribe).toHaveBeenCalledTimes(2));
+    expect(states.slice(0, 2)).toEqual(['running', 'restarting']);
+    await adapter.stop();
+    await adapter.idle();
+  });
 });
