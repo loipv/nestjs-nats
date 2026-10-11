@@ -71,6 +71,7 @@ export type {
   ConsumerDeclaration,
   NatsFeatureOptions,
   NatsModuleOptions,
+  RemovedFieldsMode,
   StreamDeclaration,
   StreamSyncMode,
 } from './module/options.js';

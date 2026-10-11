@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import {
   AckPolicy,
   type ConsumerConfig,
@@ -16,13 +17,16 @@ import { NatsConfigError, StreamConfigConflictError } from '../errors/errors.js'
 import type { ConsumerDeclaration, StreamDeclaration, StreamSyncMode } from '../module/options.js';
 import {
   CONSUMER_IMMUTABLE_FIELDS,
+  CONSUMER_KEPT_FIELDS,
   type ConfigDiff,
   declaredFields,
   diffConfig,
   parseSnapshot,
   removedFields,
+  reservedMetadataKey,
   SNAPSHOT_KEY,
   STREAM_IMMUTABLE_FIELDS,
+  STREAM_KEPT_FIELDS,
   snapshotOf,
   syncMetadata,
   withConsumerDefaults,
@@ -56,13 +60,17 @@ function keepsMetadata(version: string | undefined): boolean {
   return major > 2 || (major === 2 && minor >= 10);
 }
 
-/** Fields removed from a declaration: `reset` to the server default, or kept as `immutable`. */
+/** Fields removed from a declaration, and what happens to each. */
 interface Removed {
+  /** Reset to the server default. */
   reset: string[];
-  immutable: string[];
+  /** Reset to the library default (`createDefaults`), which the server does not have. */
+  toLibraryDefault: string[];
+  /** Kept: the server cannot change them. */
+  kept: string[];
 }
 
-const NOTHING_REMOVED: Removed = { reset: [], immutable: [] };
+const NOTHING_REMOVED: Removed = { reset: [], toLibraryDefault: [], kept: [] };
 
 /** The drift entries `verify` reports: the declared fields that differ, then the removed ones. */
 function describeDrift(diffs: ConfigDiff[], removed: Removed, current: object): string {
@@ -72,15 +80,33 @@ function describeDrift(diffs: ConfigDiff[], removed: Removed, current: object): 
       (d) =>
         `${d.field} (current: ${JSON.stringify(d.current)}, declared: ${JSON.stringify(d.declared)})`,
     ),
-    ...[...removed.reset, ...removed.immutable].map(
+    ...[...removed.reset, ...removed.toLibraryDefault, ...removed.kept].map(
       (f) => `${f} (removed from the declaration, current: ${JSON.stringify(cur[f])})`,
     ),
   ].join(', ');
 }
 
-/** Own `undefined` properties: merged into the current config, they drop it from the JSON. */
-const resetToDefaults = (fields: string[]): Record<string, undefined> =>
-  Object.fromEntries(fields.map((f) => [f, undefined]));
+/** An existing stream or consumer, and how `syncExisting` brings it in line with its declaration. */
+interface ExistingSync<I> {
+  /** `stream "<name>"` or `consumer "<stream>/<durable>"`. */
+  label: string;
+  mode: 'create-or-update' | 'verify';
+  current: I;
+  diffs: ConfigDiff[];
+  /** Removed fields are detected (`checkTracksRemovedFields()`). */
+  tracked: boolean;
+  /** The declared fields, and their `SNAPSHOT_KEY` value. */
+  fields: string[];
+  snapshot: string;
+  /** The declared `metadata`. */
+  metadata: Record<string, string> | undefined;
+  /** `STREAM_KEPT_FIELDS` or `CONSUMER_KEPT_FIELDS`. */
+  kept: readonly string[];
+  /** What a removed field goes back to instead of the server default (push `createDefaults`). */
+  libraryDefaults?: Record<string, unknown>;
+  /** Sends the declaration, with `changes` (metadata, resets) on top of it. */
+  update: (changes: Record<string, unknown>) => Promise<I>;
+}
 
 export class NatsStreamManager {
   /** Instances are provided by `NatsModule`; this constructor is not part of the public API. */
@@ -94,15 +120,20 @@ export class NatsStreamManager {
     return this.entry.options.jetstream?.sync ?? 'create-or-update';
   }
 
+  /** `jetstream.removedFields` is `'reset'` (validated at bootstrap). */
+  private get resetsRemovedFields(): boolean {
+    return this.entry.options.jetstream?.removedFields === 'reset';
+  }
+
   async ensureStream(
     declared: StreamDeclaration,
     mode: StreamSyncMode = this.defaultMode,
   ): Promise<StreamInfo | undefined> {
     if (mode === 'none') return undefined;
     const cfg = withoutNulls(declared);
+    this.rejectReservedMetadata(`stream "${cfg.name}"`, cfg.metadata);
     const jsm = await this.jsm();
-    const tracked = this.tracksMetadata;
-    const label = `stream "${cfg.name}"`;
+    const tracked = this.checkTracksRemovedFields();
     const fields = declaredFields(cfg, ['name']);
     const snapshot = snapshotOf(fields);
     let current: StreamInfo;
@@ -123,25 +154,10 @@ export class NatsStreamManager {
     }
     if (mode === 'create-only') return current;
 
-    const diffs = diffConfig(current.config, cfg, STREAM_IMMUTABLE_FIELDS);
-    const removed = tracked
-      ? removedFields(
-          current.config,
-          parseSnapshot(current.config.metadata),
-          fields,
-          STREAM_IMMUTABLE_FIELDS,
-        )
-      : NOTHING_REMOVED;
-    if (mode === 'verify') {
-      if (diffs.length > 0 || removed.reset.length > 0 || removed.immutable.length > 0) {
-        throw new NatsConfigError(
-          `JetStream ${label} differs from its declaration: ${describeDrift(diffs, removed, current.config)}`,
-        );
-      }
-      return current;
-    }
+    const diffs = diffConfig(current.config, cfg, STREAM_IMMUTABLE_FIELDS, tracked);
     const conflict = diffs.find((d) => d.immutable);
-    if (conflict) {
+    // `verify` reports a conflict as drift.
+    if (conflict && mode !== 'verify') {
       throw new StreamConfigConflictError(
         `JetStream stream "${cfg.name}" has a conflicting immutable field "${conflict.field}" (current: ${JSON.stringify(conflict.current)}, declared: ${JSON.stringify(conflict.declared)})`,
         {
@@ -152,39 +168,41 @@ export class NatsStreamManager {
         },
       );
     }
-    this.warnOnRemovedImmutable(label, current.config, removed);
-    const writesSnapshot = tracked && current.config.metadata?.[SNAPSHOT_KEY] !== snapshot;
-    if (diffs.length === 0 && removed.reset.length === 0 && !writesSnapshot) return current;
     const { name, ...update } = cfg;
-    const updated = await jsm.streams.update(
-      name,
-      (tracked
-        ? {
-            ...update,
-            metadata: syncMetadata(cfg.metadata, current.config.metadata, snapshot),
-            ...resetToDefaults(removed.reset),
-          }
-        : update) as Partial<StreamUpdateConfig>,
-    );
-    this.logResets(label, removed.reset);
-    if (tracked) this.checkMetadataKept(updated.config.metadata, snapshot);
-    return updated;
+    return this.syncExisting({
+      label: `stream "${name}"`,
+      mode,
+      current,
+      diffs,
+      tracked,
+      fields,
+      snapshot,
+      metadata: cfg.metadata,
+      kept: STREAM_KEPT_FIELDS,
+      update: (changes) =>
+        jsm.streams.update(name, { ...update, ...changes } as Partial<StreamUpdateConfig>),
+    });
   }
 
   async ensureConsumer(
     stream: string,
     declared: ConsumerDeclaration['config'],
     mode: StreamSyncMode = this.defaultMode,
-    /** Merged under `cfg` only when the consumer is created; never compared for drift. */
+    /**
+     * Merged under `cfg` only when the consumer is created; never compared for drift. With
+     * `removedFields: 'reset'`, also what a field removed from the declaration goes back to.
+     */
     createDefaults?: Partial<ConsumerConfig>,
   ): Promise<ConsumerInfo | undefined> {
     if (mode === 'none') return undefined;
     const cfg = withoutNulls(declared);
-    const jsm = await this.jsm();
     const durable = cfg.durable_name;
     const label = `${stream}/${durable}`;
-    const tracked = this.tracksMetadata;
-    const fields = declaredFields(cfg, ['durable_name']);
+    this.rejectReservedMetadata(`consumer "${label}"`, cfg.metadata);
+    const jsm = await this.jsm();
+    const tracked = this.checkTracksRemovedFields();
+    // `name` is the durable name again, when given.
+    const fields = declaredFields(cfg, ['durable_name', 'name']);
     const snapshot = snapshotOf(fields);
     let current: ConsumerInfo;
     try {
@@ -216,25 +234,10 @@ export class NatsStreamManager {
 
     // Existing consumers are compared with the declaration as written: library defaults
     // must not override what the server already has.
-    const diffs = diffConfig(current.config, cfg, CONSUMER_IMMUTABLE_FIELDS);
-    const removed = tracked
-      ? removedFields(
-          current.config,
-          parseSnapshot(current.config.metadata),
-          fields,
-          CONSUMER_IMMUTABLE_FIELDS,
-        )
-      : NOTHING_REMOVED;
-    if (mode === 'verify') {
-      if (diffs.length > 0 || removed.reset.length > 0 || removed.immutable.length > 0) {
-        throw new NatsConfigError(
-          `JetStream consumer "${label}" differs from its declaration: ${describeDrift(diffs, removed, current.config)}`,
-        );
-      }
-      return current;
-    }
+    const diffs = diffConfig(current.config, cfg, CONSUMER_IMMUTABLE_FIELDS, tracked);
     const conflict = diffs.find((d) => d.immutable);
-    if (conflict) {
+    // `verify` reports a conflict as drift.
+    if (conflict && mode !== 'verify') {
       throw new StreamConfigConflictError(
         `JetStream consumer "${label}" has a conflicting immutable field "${conflict.field}" (current: ${JSON.stringify(conflict.current)}, declared: ${JSON.stringify(conflict.declared)})`,
         {
@@ -246,32 +249,102 @@ export class NatsStreamManager {
         },
       );
     }
-    this.warnOnRemovedImmutable(`consumer "${label}"`, current.config, removed);
+    return this.syncExisting({
+      label: `consumer "${label}"`,
+      mode,
+      current,
+      diffs,
+      tracked,
+      fields,
+      snapshot,
+      metadata: cfg.metadata,
+      kept: CONSUMER_KEPT_FIELDS,
+      ...(createDefaults ? { libraryDefaults: createDefaults } : {}),
+      update: (changes) =>
+        jsm.consumers.update(stream, durable, { ...cfg, ...changes } as ConsumerUpdateConfig),
+    });
+  }
+
+  /**
+   * What `create-or-update` and `verify` do with an existing stream or consumer, once a
+   * conflict on a declared immutable field is ruled out: `verify` throws on drift, and
+   * `create-or-update` sends one update when a declared field differs, a removed field is to
+   * be reset, or the snapshot is stale.
+   */
+  private async syncExisting<I extends StreamInfo | ConsumerInfo>(s: ExistingSync<I>): Promise<I> {
+    const { label, current, diffs, tracked, snapshot } = s;
+    const removed = tracked ? this.removedFrom(s) : NOTHING_REMOVED;
+    const resets = removed.reset.length + removed.toLibraryDefault.length;
+    if (s.mode === 'verify') {
+      if (diffs.length > 0 || resets > 0 || removed.kept.length > 0) {
+        throw new NatsConfigError(
+          `JetStream ${label} differs from its declaration: ${describeDrift(diffs, removed, current.config)}`,
+        );
+      }
+      return current;
+    }
+    this.warnOnRemovedKept(label, current.config, removed.kept);
     const writesSnapshot = tracked && current.config.metadata?.[SNAPSHOT_KEY] !== snapshot;
-    if (diffs.length === 0 && removed.reset.length === 0 && !writesSnapshot) return current;
-    const updated = await jsm.consumers.update(
-      stream,
-      durable,
-      (tracked
+    if (diffs.length === 0 && resets === 0 && !writesSnapshot) return current;
+    const updated = await s.update(
+      tracked
         ? {
-            ...cfg,
-            metadata: syncMetadata(cfg.metadata, current.config.metadata, snapshot),
-            ...resetToDefaults(removed.reset),
+            metadata: syncMetadata(s.metadata, current.config.metadata, snapshot),
+            // Own `undefined` properties: merged into the current config, they drop it from
+            // the JSON, so the server applies its default.
+            ...Object.fromEntries(removed.reset.map((f) => [f, undefined])),
+            ...Object.fromEntries(removed.toLibraryDefault.map((f) => [f, s.libraryDefaults?.[f]])),
           }
-        : cfg) as ConsumerUpdateConfig,
+        : {},
     );
-    this.logResets(`consumer "${label}"`, removed.reset);
+    this.logResets(label, removed.reset, 'server');
+    this.logResets(label, removed.toLibraryDefault, 'library');
     if (tracked) this.checkMetadataKept(updated.config.metadata, snapshot);
     return updated;
   }
 
   /**
-   * Whether removed fields are detected on this connection: off, with one warning, when its
-   * server is older than 2.10 (decided up front) or once a response lost the snapshot.
+   * The fields of the previous snapshot no longer declared. One with a library default goes
+   * back to it, and is left alone when the server already has it.
    */
-  private get tracksMetadata(): boolean {
-    if (metadataUnsupported.has(this.entry)) return false;
-    if (keepsMetadata(this.entry.nc?.info?.version)) return true;
+  private removedFrom({
+    current,
+    fields,
+    kept,
+    libraryDefaults = {},
+  }: ExistingSync<StreamInfo | ConsumerInfo>): Removed {
+    const cur = current.config as unknown as Record<string, unknown>;
+    const removed = removedFields(cur, parseSnapshot(current.config.metadata), fields, kept);
+    return {
+      reset: removed.reset.filter((f) => libraryDefaults[f] === undefined),
+      toLibraryDefault: removed.reset.filter(
+        (f) => libraryDefaults[f] !== undefined && !isDeepStrictEqual(cur[f], libraryDefaults[f]),
+      ),
+      kept: removed.kept,
+    };
+  }
+
+  /**
+   * With `removedFields: 'reset'`, throws for declared metadata keys the library or the
+   * server sets: they would never match, so every boot would update.
+   */
+  private rejectReservedMetadata(label: string, metadata: Record<string, string> | undefined) {
+    if (!this.resetsRemovedFields) return;
+    const key = reservedMetadataKey(metadata);
+    if (key === undefined) return;
+    throw new NatsConfigError(
+      `JetStream ${label} declares metadata key "${key}", which the library or the server sets: declare no "_nats." key nor "${SNAPSHOT_KEY}"`,
+    );
+  }
+
+  /**
+   * Whether removed fields are detected on this connection: only with `removedFields: 'reset'`,
+   * and then not, with one warning, when its server is older than 2.10 (decided up front) or
+   * once a response lost the snapshot.
+   */
+  private checkTracksRemovedFields(): boolean {
+    if (!this.resetsRemovedFields || metadataUnsupported.has(this.entry)) return false;
+    if (keepsMetadata(this.entry.nc.info?.version)) return true;
     this.markMetadataUnsupported();
     return false;
   }
@@ -294,19 +367,19 @@ export class NatsStreamManager {
   }
 
   /** `label` is `stream "<name>"` or `consumer "<stream>/<durable>"`. */
-  private warnOnRemovedImmutable(label: string, current: object, removed: Removed): void {
+  private warnOnRemovedKept(label: string, current: object, kept: string[]): void {
     const cur = current as Record<string, unknown>;
-    for (const field of removed.immutable) {
+    for (const field of kept) {
       this.entry.logger.warn(
         `JetStream ${label} keeps ${field} ${JSON.stringify(cur[field])}: it cannot be changed (removed from the declaration)`,
       );
     }
   }
 
-  private logResets(label: string, fields: string[]): void {
+  private logResets(label: string, fields: string[], to: 'server' | 'library'): void {
     for (const field of fields) {
       this.entry.logger.log(
-        `JetStream ${label}: reset ${field} to the server default (removed from the declaration)`,
+        `JetStream ${label}: reset ${field} to the ${to} default (removed from the declaration)`,
       );
     }
   }
