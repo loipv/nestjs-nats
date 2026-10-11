@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ForceStopResult, HandlerAdapter } from '../../src/adapters/adapter.js';
+import type { ForceStopResult, HandlerAdapter, HandlerState } from '../../src/adapters/adapter.js';
+import { CoreSubscriptionAdapter } from '../../src/adapters/core-subscription.adapter.js';
 import type {
   ConnectionEntry,
   ConnectionRegistry,
@@ -48,6 +49,7 @@ function fakeManager(connections: Record<string, ConnectionOptions>) {
     ]),
   );
   const stores: UsedIdempotencyStore[] = [];
+  const handlers: Array<{ connection: string; label: string; state: HandlerState }> = [];
   const manager = {
     names: () => [...entries.keys()],
     has: (name: string) => entries.has(name),
@@ -58,6 +60,18 @@ function fakeManager(connections: Record<string, ConnectionOptions>) {
     },
     closeAll: vi.fn(async (_opts?: { timeoutMs?: number }) => {}),
     idempotencyStores: vi.fn(() => stores),
+    trackHandler: vi.fn((connection: string, label: string) => {
+      const state = { label, state: 'running' as HandlerState };
+      handlers.push({ connection, ...state });
+      const entry = handlers[handlers.length - 1];
+      return (next: HandlerState) => {
+        if (entry) entry.state = next;
+      };
+    }),
+    handlerStates: (connection: string) => handlers.filter((h) => h.connection === connection),
+    clearHandlers: vi.fn(() => {
+      handlers.length = 0;
+    }),
   };
   return { manager, entries, stores };
 }
@@ -345,5 +359,54 @@ describe('NatsLifecycle failed bootstrap', () => {
     ).rejects.toThrow('start failed');
     expect(order).toEqual(['stop', 'forceStop', 'closeAll', 'store']);
     expect(failing.forceStop).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('NatsLifecycle restart wiring', () => {
+  function lifecycleWith(manager: ReturnType<typeof fakeManager>['manager']) {
+    const def = {
+      kind: 'subscribe',
+      connection: 'default',
+      className: 'Svc',
+      methodName: 'on',
+      subject: 'a.b',
+      options: {},
+      wrapper: { isDependencyTreeStatic: () => true, isTransient: false },
+    };
+    return new NatsLifecycle(
+      manager as unknown as ConnectionRegistry,
+      {} as never,
+      { explore: () => [def] } as never,
+    );
+  }
+
+  it('fails bootstrap on an invalid restart option', async () => {
+    const { manager } = fakeManager({ default: { restart: { factor: 0 } } });
+    await expect(lifecycleWith(manager).onApplicationBootstrap()).rejects.toThrow(
+      /restart\.factor/,
+    );
+    expect(manager.trackHandler).not.toHaveBeenCalled();
+    expect(manager.closeAll).toHaveBeenCalled();
+  });
+
+  it('registers each handler as running after bootstrap', async () => {
+    const { manager } = fakeManager({ default: {} });
+    const lifecycle = lifecycleWith(manager);
+    vi.spyOn(CoreSubscriptionAdapter.prototype, 'start').mockResolvedValue();
+    await lifecycle.onApplicationBootstrap();
+    expect(manager.handlerStates('default')).toEqual([
+      { connection: 'default', label: 'Svc.on on "a.b"', state: 'running' },
+    ]);
+  });
+
+  it('clears handler states at shutdown', async () => {
+    const { manager } = fakeManager({ default: {} });
+    const lifecycle = lifecycleWith(manager);
+    vi.spyOn(CoreSubscriptionAdapter.prototype, 'start').mockResolvedValue();
+    vi.spyOn(CoreSubscriptionAdapter.prototype, 'stop').mockResolvedValue();
+    await lifecycle.onApplicationBootstrap();
+    expect(manager.handlerStates('default')).toHaveLength(1);
+    await lifecycle.beforeApplicationShutdown();
+    expect(manager.handlerStates('default')).toEqual([]);
   });
 });
