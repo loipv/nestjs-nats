@@ -29,6 +29,7 @@ import {
   NO_RESTART,
   type RestartBinding,
 } from './adapter.js';
+import { discardMessages } from './discard-messages.js';
 import { Dispatcher, type DispatchItem } from './dispatcher.js';
 import { createHandlerPipeline, defaultPipelineDeps } from './handler-pipeline.js';
 import { RestartSupervisor } from './restart-supervisor.js';
@@ -143,8 +144,14 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     if (first) this.checkBatchWait(ackWaitMs);
     const messages = await intake.consume();
     if (this.stopping) {
-      // stop() ran while opening: nothing will ever read these messages.
-      await messages.close();
+      // stop() ran while opening: nothing will handle these messages; hand back any
+      // already received.
+      await discardMessages(
+        messages,
+        (msg) => this.nak(msg),
+        (err) =>
+          this.entry.logger.error(`Failed to close consumer of ${this.label}`, errorTrace(err)),
+      );
       return;
     }
     this.messages = messages;

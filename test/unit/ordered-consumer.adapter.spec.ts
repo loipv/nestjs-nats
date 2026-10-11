@@ -10,7 +10,10 @@ import { NatsConfigError } from '../../src/errors/errors.js';
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-/** Push-driven async iterable whose `close()` ends iteration after buffered items (like nats.js). */
+/**
+ * Push-driven async iterable whose `close()` ends iteration after buffered items, and
+ * resolves only once the iterator has been read to the end (like nats.js).
+ */
 function fakeMessages() {
   const queue: JsMsg[] = [];
   let wake: (() => void) | undefined;
@@ -18,6 +21,9 @@ function fakeMessages() {
   let failure: Error | undefined;
   const statusQueue: unknown[] = [];
   let statusWake: (() => void) | undefined;
+  let markEnded!: () => void;
+  /** Resolves once the iterator has been read to its end. */
+  const ended = new Promise<void>((resolve) => (markEnded = resolve));
   const messages = {
     async *status() {
       for (;;) {
@@ -28,23 +34,28 @@ function fakeMessages() {
       }
     },
     async *[Symbol.asyncIterator]() {
-      for (;;) {
-        const next = queue.shift();
-        if (next) yield next;
-        else if (failure) throw failure;
-        else if (closed) return;
-        else await new Promise<void>((resolve) => (wake = resolve));
+      try {
+        for (;;) {
+          const next = queue.shift();
+          if (next) yield next;
+          else if (failure) throw failure;
+          else if (closed) return;
+          else await new Promise<void>((resolve) => (wake = resolve));
+        }
+      } finally {
+        markEnded();
       }
     },
     close: vi.fn(() => {
       closed = true;
       wake?.();
       statusWake?.();
-      return Promise.resolve();
+      return ended;
     }),
   };
   return {
     messages: messages as unknown as ConsumerMessages,
+    ended,
     close: messages.close,
     push(msg: unknown) {
       queue.push(msg as JsMsg);
@@ -242,6 +253,30 @@ describe('OrderedConsumerAdapter', () => {
     await adapter.stop();
     fake.push(fakeMsg(1));
     await adapter.idle();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it('closes and drains messages opened once stopped', async () => {
+    const invoke = vi.fn(() => Promise.resolve());
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const late = fakeMessages();
+    late.push(fakeMsg(1));
+    const { adapter } = setup(invoke, {
+      get: async () => {
+        await gate;
+        return { consume: () => Promise.resolve(late.messages) };
+      },
+    });
+    const starting = adapter.start();
+    await tick();
+    await adapter.stop();
+    release();
+    await starting;
+    await adapter.idle();
+    expect(late.close).toHaveBeenCalledOnce();
+    // Read to its end, so nats.js releases it.
+    await late.ended;
     expect(invoke).not.toHaveBeenCalled();
   });
 
