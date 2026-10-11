@@ -163,6 +163,6 @@ class OrderHandlers {
 - `context.getType()` returns `'nats'`, so enhancers can branch on it.
 - `switchToRpc().getData()` returns the payload, and `switchToRpc().getContext()` returns the `NatsContext`.
 - A global `ValidationPipe` (`app.useGlobalPipes()` or `APP_PIPE`) validates `@Payload()` only, never the context or headers.
-- An exception filter that handles an error without rethrowing turns the outcome into a success.
+- An exception filter handles an error by returning a truthy value, as in Nest: the outcome becomes a success, and the value is the reply to a request. An error that no filter handles is rethrown as it is, and the library logs it; Nest's `ExceptionsHandler` does not log it again.
 - The payload is decoded before the handler is invoked, so a `NatsDecodeError` (and, in a [CloudEvent router](./cloudevents.md#receiving-cloudevents), an error in the event's attributes) happens before guards, pipes, interceptors and exception filters run, and none of them sees it. See [Errors](./errors.md).
 - Return a value or `undefined`. An Observable that completes without emitting counts as a failure (Nest throws an `EmptyError`): a JetStream message is retried like after any error, and a request gets a `500` reply.

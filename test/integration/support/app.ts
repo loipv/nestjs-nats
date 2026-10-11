@@ -6,8 +6,8 @@ const silentLogger: LoggerService = { log() {}, error() {}, warn() {} };
 
 /**
  * Compiles and initialises a module; closes it when init fails, so no connection leaks.
- * `silent` silences Nest's logger, for apps whose handlers fail on purpose (their
- * ExceptionsHandler stack traces). Nest's logger is global: it stays silent, for every app,
+ * `silent` silences Nest's logger, for apps whose handlers fail on purpose (the library logs
+ * their errors through it). Nest's logger is global: it stays silent, for every app,
  * until the next app is compiled, so use it only where every logged error is expected.
  */
 export async function createTestApp(

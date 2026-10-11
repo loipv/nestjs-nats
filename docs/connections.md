@@ -34,7 +34,7 @@ NatsModule.forRootAsync({
 
 ## Logging
 
-The library logs through Nest's `Logger`, with the context `NatsConnection:<name>` (for example `NatsConnection:default`), so the application's logger configuration applies. The `logger` option of `forRoot` changes that per connection: `false` silences this library's logs for the connection, and a `LoggerService` receives them instead of Nest's `Logger`. It does not affect Nest's own logging, such as its `ExceptionsHandler` (see [Known limitations](../README.md#known-limitations)).
+The library logs through Nest's `Logger`, with the context `NatsConnection:<name>` (for example `NatsConnection:default`), so the application's logger configuration applies. The `logger` option of `forRoot` changes that per connection: `false` silences this library's logs for the connection, and a `LoggerService` receives them instead of Nest's `Logger`. Handler errors are logged by the library only, not by Nest's `ExceptionsHandler`, so `false` silences them too.
 
 ```ts
 NatsModule.forRoot({
