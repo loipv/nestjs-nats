@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { JetStreamApiCodes } from '@nats-io/jetstream';
 import { type KV, Kvm } from '@nats-io/kv';
 import { Logger } from '@nestjs/common';
@@ -32,6 +33,13 @@ const DEFAULT_MAX_AGE = 86_400_000;
 const MAX_MAX_AGE = 2_147_483_647_000;
 const MAX_CLAIM_ATTEMPTS = 3;
 const ORDERED_PREFIX = 'ordered:';
+/**
+ * The longest key stored as its own encoding. A longer one is stored under its hash: the
+ * subject `$KV.<bucket>.<key>` must fit the server's control line (4096 bytes by default),
+ * or the server closes the connection.
+ */
+const MAX_ENCODED_KEY = 256;
+const HASHED_PREFIX = 'h.';
 
 const NOT_BOUND =
   'KvIdempotencyStore is not bound to a NATS connection; pass it as idempotency.store of NatsModule.forRoot()';
@@ -229,7 +237,10 @@ export class KvIdempotencyStore implements IdempotencyStore {
     return JSON.stringify(v);
   }
 
-  /** The KV key of a store key: base64url, so any character is allowed. */
+  /**
+   * The KV key of a store key: base64url, so any character is allowed; past 256 characters,
+   * `h.` and the base64url of its sha256 (base64url has no `.`, so the two never collide).
+   */
   private kvKey(key: string): string {
     let k = key;
     if (key.startsWith(ORDERED_PREFIX)) {
@@ -240,6 +251,8 @@ export class KvIdempotencyStore implements IdempotencyStore {
         this.logger.warn(NO_INSTANCE_ID);
       }
     }
-    return Buffer.from(k, 'utf8').toString('base64url');
+    const encoded = Buffer.from(k, 'utf8').toString('base64url');
+    if (encoded.length <= MAX_ENCODED_KEY) return encoded;
+    return HASHED_PREFIX + createHash('sha256').update(k, 'utf8').digest('base64url');
   }
 }
