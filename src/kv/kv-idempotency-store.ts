@@ -10,7 +10,7 @@ import type {
 } from '../idempotency/store.js';
 
 export interface KvIdempotencyStoreOptions {
-  /** KV bucket name ([-_A-Za-z0-9]+; default 'nestjs_nats_idempotency'). */
+  /** KV bucket name (1 to 64 of [-_A-Za-z0-9]; default 'nestjs_nats_idempotency'). */
   bucket?: string;
   /** How long the bucket keeps an entry after its last write, in ms (garbage collection; default 86_400_000). Must exceed every handler's ttl. */
   maxAge?: number;
@@ -31,6 +31,7 @@ const DEFAULT_BUCKET = 'nestjs_nats_idempotency';
 const DEFAULT_MAX_AGE = 86_400_000;
 /** The largest stream max_age the server accepts, in ms ((2^31 - 1) seconds). */
 const MAX_MAX_AGE = 2_147_483_647_000;
+const MAX_BUCKET_NAME = 64;
 const MAX_CLAIM_ATTEMPTS = 3;
 const ORDERED_PREFIX = 'ordered:';
 /**
@@ -108,13 +109,16 @@ export class KvIdempotencyStore implements IdempotencyStore {
   private readonly logger = new Logger('KvIdempotencyStore');
   private connection?: string;
   private kv?: KV;
+  /** The bound bucket's max age in ms, 0 for none. */
+  private bucketMaxAge = 0;
   private warnedOrdered = false;
+  private warnedMaxAge = false;
 
   constructor(options: KvIdempotencyStoreOptions = {}) {
     const bucket = options.bucket ?? DEFAULT_BUCKET;
-    if (typeof bucket !== 'string' || !/^[-\w]+$/.test(bucket)) {
+    if (typeof bucket !== 'string' || !/^[-\w]+$/.test(bucket) || bucket.length > MAX_BUCKET_NAME) {
       throw new NatsConfigError(
-        `KvIdempotencyStore bucket ${JSON.stringify(bucket)} is invalid; expected letters, digits, "-" or "_"`,
+        `KvIdempotencyStore bucket ${JSON.stringify(bucket)} is invalid; expected at most ${MAX_BUCKET_NAME} letters, digits, "-" or "_"`,
       );
     }
     const maxAge = options.maxAge ?? DEFAULT_MAX_AGE;
@@ -149,7 +153,7 @@ export class KvIdempotencyStore implements IdempotencyStore {
     this.now = options.now ?? Date.now;
   }
 
-  async bind({ connection, nc }: IdempotencyStoreContext): Promise<void> {
+  async bind({ connection, js }: IdempotencyStoreContext): Promise<void> {
     if (this.connection !== undefined) {
       throw new NatsConfigError(
         `KvIdempotencyStore is already bound to NATS connection "${this.connection}"; give each connection its own store`,
@@ -158,7 +162,10 @@ export class KvIdempotencyStore implements IdempotencyStore {
     // Taken before the first await, so a concurrent bind is refused too.
     this.connection = connection;
     try {
-      this.kv = await this.openBucket(new Kvm(nc));
+      // On the connection's JetStream client, so its jetstream.options (domain, prefix) apply.
+      const { kv, maxAge } = await this.openBucket(new Kvm(js));
+      this.kv = kv;
+      this.bucketMaxAge = maxAge;
     } catch (err) {
       this.connection = undefined;
       throw err;
@@ -167,19 +174,21 @@ export class KvIdempotencyStore implements IdempotencyStore {
 
   async claim(key: string, ttlMs: number): Promise<ClaimResult> {
     const kv = this.bound();
+    this.checkMaxAge(ttlMs);
     const k = this.kvKey(key);
     let lastErr: unknown;
     for (let attempt = 0; attempt < MAX_CLAIM_ATTEMPTS; attempt++) {
       const claim = this.value('p', ttlMs);
       try {
-        await kv.create(k, claim);
+        // Expects no revision of the key at all: a delete or purge marker fails it too.
+        await kv.put(k, claim, { previousSeq: 0 });
         return 'claimed';
       } catch (err) {
         if (!isWrongRevision(err)) throw err;
         lastErr = err;
       }
       const entry = await kv.get(k);
-      // Gone between the create and the get (deleted and purged): create again.
+      // Gone between the put and the get (deleted and purged): try again.
       if (!entry) continue;
       if (entry.operation === 'PUT') {
         const v = parse(entry.string());
@@ -207,24 +216,53 @@ export class KvIdempotencyStore implements IdempotencyStore {
     await kv.delete(this.kvKey(key));
   }
 
-  /** Does nothing: the connection belongs to the module. */
-  async close(): Promise<void> {}
+  /**
+   * Releases the binding, so the store can be bound again (by another application, say). The
+   * connection belongs to the module: it is not closed.
+   */
+  async close(): Promise<void> {
+    this.connection = undefined;
+    this.kv = undefined;
+    this.bucketMaxAge = 0;
+  }
 
-  private async openBucket(kvm: Kvm): Promise<KV> {
+  private async openBucket(kvm: Kvm): Promise<{ kv: KV; maxAge: number }> {
     try {
-      const kv = await kvm.open(this.bucket);
+      const kv = await this.openLeaderReads(kvm);
       // open() does not look the bucket up: status() fails when its stream is missing.
-      await kv.status();
-      return kv;
+      return { kv, maxAge: (await kv.status()).ttl };
     } catch (err) {
       if (!isStreamNotFound(err)) throw err;
     }
-    return kvm.create(this.bucket, {
+    await kvm.create(this.bucket, {
       history: 1,
       ttl: this.maxAge,
       storage: this.storage,
       replicas: this.replicas,
     });
+    // create() returns a handle with direct gets when the server has them: open it again.
+    const kv = await this.openLeaderReads(kvm);
+    // Another instance may have created the bucket first, with another max age.
+    return { kv, maxAge: (await kv.status()).ttl };
+  }
+
+  /**
+   * Opens the bucket with gets answered by the stream leader, not direct gets. A direct get may
+   * be answered by a replica that lags behind the leader, and a claim compares and sets on the
+   * revision it read: a stale read would report an outdated state, or lose the write to a
+   * conflict until the claim fails.
+   */
+  private openLeaderReads(kvm: Kvm): Promise<KV> {
+    return kvm.open(this.bucket, { allow_direct: false });
+  }
+
+  /** Warns once when a claim outlives the bucket's max age: the key could vanish early. */
+  private checkMaxAge(ttlMs: number): void {
+    if (this.warnedMaxAge || this.bucketMaxAge <= 0 || ttlMs <= this.bucketMaxAge) return;
+    this.warnedMaxAge = true;
+    this.logger.warn(
+      `KvIdempotencyStore bucket "${this.bucket}" keeps entries for ${this.bucketMaxAge} ms, less than the idempotency ttl ${ttlMs} ms; raise its max age`,
+    );
   }
 
   private bound(): KV {

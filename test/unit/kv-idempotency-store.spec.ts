@@ -1,20 +1,22 @@
 import { createHash } from 'node:crypto';
-import { JetStreamApiCodes, JetStreamApiError } from '@nats-io/jetstream';
+import { JetStreamApiCodes, JetStreamApiError, type JetStreamClient } from '@nats-io/jetstream';
 import type { NatsConnection } from '@nats-io/transport-node';
 import { Logger } from '@nestjs/common';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NatsConfigError, NatsModuleError } from '../../src/errors/errors.js';
 import { KvIdempotencyStore, type KvIdempotencyStoreOptions } from '../../src/kv/index.js';
 
-// `new Kvm(nc)` builds whatever the test installs here (see the vi.mock below).
-const kvm = vi.hoisted(() => ({ create: undefined as undefined | ((nc: unknown) => unknown) }));
+// `new Kvm(js)` builds whatever the test installs here (see the vi.mock below).
+const kvm = vi.hoisted(() => ({
+  create: undefined as undefined | ((client: unknown) => unknown),
+}));
 
 vi.mock('@nats-io/kv', () => ({
   Kvm: class {
-    constructor(nc: unknown) {
+    constructor(client: unknown) {
       if (!kvm.create) throw new Error('no fake Kvm installed');
       // biome-ignore lint/correctness/noConstructorReturn: hands back the test's fake
-      return kvm.create(nc) as object;
+      return kvm.create(client) as object;
     }
   },
 }));
@@ -37,13 +39,10 @@ interface Stored {
 /** An in-memory KV bucket with revisions, close enough to `@nats-io/kv` for the store. */
 class FakeKv {
   readonly entries = new Map<string, Stored>();
+  /** The bucket's max age in ms, as `status().ttl` reports it (0: unlimited). */
+  ttl = 0;
   private seq = 0;
 
-  readonly create = vi.fn(async (k: string, data: string) => {
-    await tick();
-    if (this.entries.get(k)?.operation === 'PUT') throw wrongSequence();
-    return this.write(k, 'PUT', data);
-  });
   readonly get = vi.fn(async (k: string) => {
     await tick();
     const e = this.entries.get(k);
@@ -62,15 +61,21 @@ class FakeKv {
     if ((this.entries.get(k)?.revision ?? 0) !== version) throw wrongSequence();
     return this.write(k, 'PUT', data);
   });
-  readonly put = vi.fn(async (k: string, data: string) => {
+  // Like the server, `previousSeq` is the expected last revision of the key, 0 for none: a
+  // delete or purge marker is a revision too.
+  readonly put = vi.fn(async (k: string, data: string, opts?: { previousSeq?: number }) => {
     await tick();
+    const expected = opts?.previousSeq;
+    if (expected !== undefined && (this.entries.get(k)?.revision ?? 0) !== expected) {
+      throw wrongSequence();
+    }
     return this.write(k, 'PUT', data);
   });
   readonly delete = vi.fn(async (k: string) => {
     await tick();
     this.write(k, 'DEL', '');
   });
-  readonly status = vi.fn(async () => ({}));
+  readonly status = vi.fn(async () => ({ ttl: this.ttl }));
 
   value(key: string): string | undefined {
     return this.entries.get(enc(key))?.value;
@@ -85,18 +90,22 @@ class FakeKv {
 
 class FakeKvm {
   constructor(
-    readonly nc: unknown,
+    readonly client: unknown,
     private readonly buckets: Map<string, FakeKv>,
   ) {}
 
-  readonly open = vi.fn(async (name: string) => {
+  readonly open = vi.fn(async (name: string, _opts?: unknown) => {
     const kv = this.buckets.get(name);
     if (!kv) throw streamNotFound();
     return kv;
   });
-  readonly create = vi.fn(async (name: string, _opts?: unknown) => {
-    const kv = this.buckets.get(name) ?? new FakeKv();
-    this.buckets.set(name, kv);
+  readonly create = vi.fn(async (name: string, opts?: { ttl?: number }) => {
+    let kv = this.buckets.get(name);
+    if (!kv) {
+      kv = new FakeKv();
+      kv.ttl = opts?.ttl ?? 0;
+      this.buckets.set(name, kv);
+    }
     return kv;
   });
 }
@@ -105,6 +114,9 @@ const enc = (key: string) => Buffer.from(key, 'utf8').toString('base64url');
 
 const BUCKET = 'nestjs_nats_idempotency';
 const nc = { tag: 'nc' } as unknown as NatsConnection;
+const js = { tag: 'js' } as unknown as JetStreamClient;
+const ctx = (connection = 'default') => ({ connection, nc, js });
+const OPEN_OPTS = { allow_direct: false };
 
 let buckets: Map<string, FakeKv>;
 let kvms: FakeKvm[];
@@ -131,7 +143,7 @@ async function boundStore(
   const kv = buckets.get(name) ?? new FakeKv();
   buckets.set(name, kv);
   const store = new KvIdempotencyStore({ now: () => now, ...opts });
-  await store.bind({ connection: 'default', nc });
+  await store.bind(ctx());
   return { store, kv };
 }
 
@@ -141,6 +153,7 @@ describe('KvIdempotencyStore options', () => {
     ['a bucket with a dot', { bucket: 'a.b' }],
     ['a bucket with a space', { bucket: 'a b' }],
     ['a bucket that is not a string', { bucket: 5 as unknown as string }],
+    ['a bucket of 65 characters', { bucket: 'b'.repeat(65) }],
     ['a zero maxAge', { maxAge: 0 }],
     ['a negative maxAge', { maxAge: -1 }],
     ['a fractional maxAge', { maxAge: 1.5 }],
@@ -155,6 +168,12 @@ describe('KvIdempotencyStore options', () => {
     expect(() => new KvIdempotencyStore(opts)).toThrow(NatsConfigError);
   });
 
+  it('names the bucket rule', () => {
+    expect(() => new KvIdempotencyStore({ bucket: 'b'.repeat(65) })).toThrow(
+      `KvIdempotencyStore bucket "${'b'.repeat(65)}" is invalid; expected at most 64 letters, digits, "-" or "_"`,
+    );
+  });
+
   it('accepts the bounds', () => {
     expect(
       () =>
@@ -167,16 +186,18 @@ describe('KvIdempotencyStore options', () => {
         }),
     ).not.toThrow();
     expect(() => new KvIdempotencyStore()).not.toThrow();
+    expect(() => new KvIdempotencyStore({ bucket: 'b'.repeat(64) })).not.toThrow();
   });
 });
 
 describe('KvIdempotencyStore bind', () => {
   it('creates the bucket when it is missing', async () => {
     const store = new KvIdempotencyStore();
-    await store.bind({ connection: 'default', nc });
+    await store.bind(ctx());
     expect(kvms).toHaveLength(1);
-    expect(kvms[0]?.nc).toBe(nc);
-    expect(kvms[0]?.open).toHaveBeenCalledWith(BUCKET);
+    // Built on the connection's JetStream client, so its jetstream.options apply.
+    expect(kvms[0]?.client).toBe(js);
+    expect(kvms[0]?.open).toHaveBeenCalledWith(BUCKET, OPEN_OPTS);
     expect(kvms[0]?.create).toHaveBeenCalledWith(BUCKET, {
       history: 1,
       ttl: 86_400_000,
@@ -193,7 +214,7 @@ describe('KvIdempotencyStore bind', () => {
       storage: 'memory',
       replicas: 3,
     });
-    await store.bind({ connection: 'default', nc });
+    await store.bind(ctx());
     expect(kvms[0]?.create).toHaveBeenCalledWith('b1', {
       history: 1,
       ttl: 60_000,
@@ -208,21 +229,21 @@ describe('KvIdempotencyStore bind', () => {
     lazy.status.mockRejectedValue(streamNotFound());
     kvm.create = (c) => {
       const k = new FakeKvm(c, buckets);
-      k.open.mockResolvedValue(lazy);
+      k.open.mockResolvedValueOnce(lazy);
       kvms.push(k);
       return k;
     };
     const store = new KvIdempotencyStore();
-    await store.bind({ connection: 'default', nc });
+    await store.bind(ctx());
     expect(kvms[0]?.create).toHaveBeenCalledTimes(1);
     expect(await store.claim('k', 1000)).toBe('claimed');
-    expect(buckets.get(BUCKET)?.create).toHaveBeenCalled();
-    expect(lazy.create).not.toHaveBeenCalled();
+    expect(buckets.get(BUCKET)?.put).toHaveBeenCalled();
+    expect(lazy.put).not.toHaveBeenCalled();
   });
 
   it('only opens an existing bucket', async () => {
     const { kv } = await boundStore();
-    expect(kvms[0]?.open).toHaveBeenCalledWith(BUCKET);
+    expect(kvms[0]?.open).toHaveBeenCalledWith(BUCKET, OPEN_OPTS);
     expect(kv.status).toHaveBeenCalled();
     expect(kvms[0]?.create).not.toHaveBeenCalled();
   });
@@ -236,18 +257,18 @@ describe('KvIdempotencyStore bind', () => {
       return k;
     };
     const store = new KvIdempotencyStore();
-    await expect(store.bind({ connection: 'default', nc })).rejects.toBe(boom);
+    await expect(store.bind(ctx())).rejects.toBe(boom);
     expect(kvms[0]?.create).not.toHaveBeenCalled();
   });
 
   it('refuses a second bind', async () => {
     const { store } = await boundStore();
-    const second = store.bind({ connection: 'other', nc });
+    const second = store.bind(ctx('other'));
     await expect(second).rejects.toThrow(NatsConfigError);
     await expect(second).rejects.toThrow(
       'KvIdempotencyStore is already bound to NATS connection "default"; give each connection its own store',
     );
-    await expect(store.bind({ connection: 'default', nc })).rejects.toThrow(NatsConfigError);
+    await expect(store.bind(ctx())).rejects.toThrow(NatsConfigError);
   });
 
   it('refuses use before bind', async () => {
@@ -265,11 +286,52 @@ describe('KvIdempotencyStore bind', () => {
     }
   });
 
-  it('close does nothing', async () => {
+  it('reads from the stream leader, also in a bucket it created', async () => {
+    // create() returns a handle with direct gets when the server has them: the store reopens it.
+    const store = new KvIdempotencyStore();
+    await store.bind(ctx());
+    expect(kvms[0]?.open).toHaveBeenCalledTimes(2);
+    expect(kvms[0]?.open).toHaveBeenNthCalledWith(2, BUCKET, OPEN_OPTS);
+    expect(kvms[0]?.create.mock.invocationCallOrder[0]).toBeLessThan(
+      kvms[0]?.open.mock.invocationCallOrder[1] as number,
+    );
+  });
+
+  it('close releases the binding', async () => {
     const { store, kv } = await boundStore();
     await store.close();
-    expect(await store.claim('k', 1000)).toBe('claimed');
+    await expect(store.claim('k', 1000)).rejects.toThrow(NatsModuleError);
     expect(kv.delete).not.toHaveBeenCalled();
+    expect(kv.put).not.toHaveBeenCalled();
+  });
+
+  it('binds again after close', async () => {
+    const { store, kv } = await boundStore();
+    expect(await store.claim('k', 1000)).toBe('claimed');
+    await store.close();
+    await store.bind(ctx('other'));
+    expect(kvms).toHaveLength(2);
+    expect(await store.claim('k', 1000)).toBe('in-progress');
+    expect(await store.claim('k2', 1000)).toBe('claimed');
+    expect(kv.value('k2')).toBeDefined();
+    // Bound again: a further bind is refused, naming the new connection.
+    await expect(store.bind(ctx())).rejects.toThrow(
+      'KvIdempotencyStore is already bound to NATS connection "other"; give each connection its own store',
+    );
+  });
+
+  it('binds again after a failed bind', async () => {
+    const boom = new Error('no JetStream');
+    kvm.create = (c) => {
+      const k = new FakeKvm(c, buckets);
+      if (kvms.length === 0) k.open.mockRejectedValueOnce(boom);
+      kvms.push(k);
+      return k;
+    };
+    const store = new KvIdempotencyStore();
+    await expect(store.bind(ctx())).rejects.toBe(boom);
+    await store.bind(ctx());
+    expect(await store.claim('k', 1000)).toBe('claimed');
   });
 });
 
@@ -277,7 +339,9 @@ describe('KvIdempotencyStore claim', () => {
   it('claims a new key', async () => {
     const { store, kv } = await boundStore();
     expect(await store.claim('k', 1000)).toBe('claimed');
-    expect(kv.create).toHaveBeenCalledWith(enc('k'), JSON.stringify({ s: 'p', x: now + 1000 }));
+    expect(kv.put).toHaveBeenCalledWith(enc('k'), JSON.stringify({ s: 'p', x: now + 1000 }), {
+      previousSeq: 0,
+    });
     expect(kv.value('k')).toBe(`{"s":"p","x":${now + 1000}}`);
   });
 
@@ -332,28 +396,54 @@ describe('KvIdempotencyStore claim', () => {
     expect(kv.value('k')).toBe(`{"s":"p","x":${now + 1000}}`);
   });
 
-  it('claims over a deleted entry reported by get', async () => {
+  it('claims over a delete marker with the revision read', async () => {
     const { store, kv } = await boundStore();
     await kv.delete(enc('k'));
-    // As if the key was deleted between a failed create and the get.
-    kv.create.mockRejectedValueOnce(wrongSequence());
     const revision = kv.entries.get(enc('k'))?.revision;
     expect(await store.claim('k', 1000)).toBe('claimed');
+    // The marker is the key's last revision: the write expecting none fails first.
+    expect(kv.put).toHaveBeenCalledTimes(1);
     expect(kv.update).toHaveBeenCalledWith(enc('k'), expect.any(String), revision);
+    expect(kv.value('k')).toBe(`{"s":"p","x":${now + 1000}}`);
+  });
+
+  it('claims over a purge marker with the revision read', async () => {
+    const { store, kv } = await boundStore();
+    kv.entries.set(enc('k'), { revision: 7, operation: 'PURGE', value: '' });
+    expect(await store.claim('k', 1000)).toBe('claimed');
+    expect(kv.update).toHaveBeenCalledWith(enc('k'), expect.any(String), 7);
+  });
+
+  it('reports in-progress when another claim lands between the get and the update', async () => {
+    const { store, kv } = await boundStore();
+    await kv.delete(enc('k'));
+    const revision = kv.entries.get(enc('k'))?.revision;
+    kv.update.mockImplementationOnce(async (k: string) => {
+      // Another instance claims the deleted key first.
+      await kv.put(k, JSON.stringify({ s: 'p', x: now + 1000 }));
+      throw wrongSequence();
+    });
+    expect(await store.claim('k', 1000)).toBe('in-progress');
+    expect(kv.update).toHaveBeenCalledTimes(1);
+    expect(kv.update).toHaveBeenCalledWith(enc('k'), expect.any(String), revision);
+    const claims = kv.put.mock.calls.filter(([, , opts]) => opts?.previousSeq === 0);
+    expect(claims).toHaveLength(2);
+    expect(kv.get).toHaveBeenCalledTimes(2);
   });
 
   it('retries the claim when the entry vanished before the get', async () => {
     const { store, kv } = await boundStore();
-    kv.create.mockRejectedValueOnce(wrongSequence());
+    kv.put.mockRejectedValueOnce(wrongSequence());
     expect(await store.claim('k', 1000)).toBe('claimed');
-    expect(kv.create).toHaveBeenCalledTimes(2);
+    expect(kv.put).toHaveBeenCalledTimes(2);
+    expect(kv.put).toHaveBeenLastCalledWith(enc('k'), expect.any(String), { previousSeq: 0 });
     expect(kv.update).not.toHaveBeenCalled();
   });
 
   it('one of two concurrent claims of an expired key wins', async () => {
     const { store: a, kv } = await boundStore();
     const b = new KvIdempotencyStore({ now: () => now });
-    await b.bind({ connection: 'default', nc });
+    await b.bind(ctx());
     await a.claim('k', 1000);
     now += 2000;
     const results = await Promise.all([a.claim('k', 1000), b.claim('k', 1000)]);
@@ -361,7 +451,8 @@ describe('KvIdempotencyStore claim', () => {
     // Both read the same revision; the second update lost the race and the claim was retried.
     expect(kv.update).toHaveBeenCalledTimes(2);
     expect(kv.update.mock.calls[0]?.[2]).toBe(kv.update.mock.calls[1]?.[2]);
-    expect(kv.create).toHaveBeenCalledTimes(4);
+    const claims = kv.put.mock.calls.filter(([, , opts]) => opts?.previousSeq === 0);
+    expect(claims).toHaveLength(4);
   });
 
   it('gives up after 3 revision conflicts', async () => {
@@ -388,10 +479,10 @@ describe('KvIdempotencyStore claim', () => {
   it('propagates other KV errors unchanged', async () => {
     const { store, kv } = await boundStore();
     const boom = new Error('timeout');
-    kv.create.mockRejectedValueOnce(boom);
+    kv.put.mockRejectedValueOnce(boom);
     await expect(store.claim('k', 1000)).rejects.toBe(boom);
     const getErr = new Error('get failed');
-    kv.create.mockRejectedValueOnce(wrongSequence());
+    kv.put.mockRejectedValueOnce(wrongSequence());
     kv.get.mockRejectedValueOnce(getErr);
     await expect(store.claim('k', 1000)).rejects.toBe(getErr);
     const putErr = new Error('put failed');
@@ -479,6 +570,43 @@ describe('KvIdempotencyStore keys', () => {
       'KvIdempotencyStore without instanceId is shared by the instances of @ConsumeOrdered handlers: each instance skips the messages another processed. Set instanceId.',
     );
     expect(kv.value('ordered:C.m:k1')).toBeDefined();
+  });
+});
+
+describe('KvIdempotencyStore bucket max age', () => {
+  const text = (bucket: string, maxAge: number, ttl: number) =>
+    `KvIdempotencyStore bucket "${bucket}" keeps entries for ${maxAge} ms, less than the idempotency ttl ${ttl} ms; raise its max age`;
+
+  it('warns once when a claim outlives the max age of an existing bucket', async () => {
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const kv = new FakeKv();
+    kv.ttl = 1000;
+    buckets.set('b1', kv);
+    const { store } = await boundStore({ bucket: 'b1' });
+    expect(await store.claim('k1', 1000)).toBe('claimed');
+    expect(warn).not.toHaveBeenCalled();
+    expect(await store.claim('k2', 2000)).toBe('claimed');
+    expect(await store.claim('k3', 3000)).toBe('claimed');
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(text('b1', 1000, 2000));
+  });
+
+  it('compares with the max age of a bucket it created', async () => {
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const store = new KvIdempotencyStore({ maxAge: 60_000, now: () => now });
+    await store.bind(ctx());
+    await store.claim('k1', 60_000);
+    expect(warn).not.toHaveBeenCalled();
+    await store.claim('k2', 60_001);
+    expect(warn).toHaveBeenCalledWith(text(BUCKET, 60_000, 60_001));
+  });
+
+  it('does not warn for a bucket without max age', async () => {
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const { store, kv } = await boundStore();
+    expect(kv.ttl).toBe(0);
+    await store.claim('k', 10 ** 12);
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 

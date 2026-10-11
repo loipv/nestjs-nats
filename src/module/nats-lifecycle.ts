@@ -62,7 +62,10 @@ export class NatsLifecycle
    * again.
    */
   private readonly moduleConsumers = new Map<string, Set<string>>();
-  /** Stores already closed: a failed bootstrap followed by `app.close()` shuts down twice. */
+  /**
+   * Stores not to close: the ones already closed (a failed bootstrap followed by `app.close()`
+   * shuts down twice) and the ones that failed to bind (see `bindIdempotencyStores`).
+   */
   private readonly closedStores = new WeakSet<IdempotencyStore>();
 
   constructor(
@@ -74,11 +77,7 @@ export class NatsLifecycle
   async onModuleInit(): Promise<void> {
     try {
       // Once per (store, connection) pair, before anything else uses the stores.
-      for (const name of this.manager.names()) {
-        const entry = this.manager.get(name);
-        const store = entry.options.idempotency?.store;
-        if (store?.bind) await store.bind({ connection: name, nc: entry.nc });
-      }
+      await this.bindIdempotencyStores();
       const declarations = this.collectDeclarations();
       // Before anything is written: a failed boot must leave the server as it was.
       if (this.moduleConsumers.size > 0) this.checkHandlerConsumers(this.explorer.explore());
@@ -91,6 +90,27 @@ export class NatsLifecycle
       // Releases everything so no socket or store stays open.
       await this.shutdown();
       throw err;
+    }
+  }
+
+  /**
+   * Binds the store of each connection. A store whose every bind failed is not closed at
+   * shutdown: it may be bound to another application (a second bind of a `KvIdempotencyStore`
+   * fails), and closing it would release that binding.
+   */
+  private async bindIdempotencyStores(): Promise<void> {
+    const bound = new Set<IdempotencyStore>();
+    for (const name of this.manager.names()) {
+      const entry = this.manager.get(name);
+      const store = entry.options.idempotency?.store;
+      if (!store?.bind) continue;
+      try {
+        await store.bind({ connection: name, nc: entry.nc, js: entry.js() });
+      } catch (err) {
+        if (!bound.has(store)) this.closedStores.add(store);
+        throw err;
+      }
+      bound.add(store);
     }
   }
 

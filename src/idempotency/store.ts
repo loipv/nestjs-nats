@@ -1,3 +1,4 @@
+import type { JetStreamClient } from '@nats-io/jetstream';
 import type { NatsConnection } from '@nats-io/transport-node';
 import { NatsConfigError } from '../errors/errors.js';
 
@@ -9,6 +10,8 @@ export interface IdempotencyStoreContext {
   connection: string;
   /** The connection the store runs on. */
   nc: NatsConnection;
+  /** The JetStream client of that connection, with its `jetstream.options` (domain, API prefix, timeout). */
+  js: JetStreamClient;
 }
 
 /**
@@ -29,6 +32,7 @@ export interface IdempotencyStore {
   release(key: string): Promise<void>;
   /**
    * Called once with the connection of `forRoot`, at module init, before any message is handled.
+   * A store whose `bind` fails is not closed by the module.
    */
   bind?(ctx: IdempotencyStoreContext): Promise<void> | void;
   close?(): Promise<void>;
