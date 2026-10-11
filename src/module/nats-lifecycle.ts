@@ -94,20 +94,25 @@ export class NatsLifecycle
   }
 
   /**
-   * Binds the store of each connection. A store whose every bind failed is not closed at
-   * shutdown: it may be bound to another application (a second bind of a `KvIdempotencyStore`
-   * fails), and closing it would release that binding.
+   * Binds the store of each connection. A store whose every bind in this application failed,
+   * or was never attempted, is not closed at shutdown: it may be bound to another application
+   * (a second bind of a `KvIdempotencyStore` fails), and closing it would release that binding.
    */
   private async bindIdempotencyStores(): Promise<void> {
     const bound = new Set<IdempotencyStore>();
-    for (const name of this.manager.names()) {
+    const names = this.manager.names();
+    for (const [i, name] of names.entries()) {
       const entry = this.manager.get(name);
       const store = entry.options.idempotency?.store;
       if (!store?.bind) continue;
       try {
         await store.bind({ connection: name, nc: entry.nc, js: entry.js() });
       } catch (err) {
-        if (!bound.has(store)) this.closedStores.add(store);
+        // The stores of the connections not reached are not ours to close either.
+        for (const rest of [name, ...names.slice(i + 1)]) {
+          const s = this.manager.get(rest).options.idempotency?.store;
+          if (s?.bind && !bound.has(s)) this.closedStores.add(s);
+        }
         throw err;
       }
       bound.add(store);

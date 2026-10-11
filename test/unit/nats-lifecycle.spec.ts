@@ -810,6 +810,31 @@ describe('NatsLifecycle idempotency store binding', () => {
     expect(close).not.toHaveBeenCalled();
   });
 
+  it('does not close a store of a connection never attempted: it may belong to a running app', async () => {
+    const error = new Error('already bound');
+    const closeA = vi.fn(async () => {});
+    const closeB = vi.fn(async () => {});
+    const storeA: IdempotencyStore = {
+      ...fakeStore(closeA),
+      bind: vi.fn(async () => {
+        throw error;
+      }),
+    };
+    const storeB: IdempotencyStore = { ...fakeStore(closeB), bind: vi.fn(async () => {}) };
+    const { manager, entries } = fakeManager({
+      c1: { idempotency: { store: storeA } },
+      c2: { idempotency: { store: storeB } },
+    });
+    for (const entry of entries.values()) Object.assign(entry, { js: () => ({}) });
+    const lifecycle = lifecycleFor(manager);
+
+    await expect(lifecycle.onModuleInit()).rejects.toBe(error);
+    await lifecycle.beforeApplicationShutdown();
+    expect(storeB.bind).not.toHaveBeenCalled();
+    expect(closeA).not.toHaveBeenCalled();
+    expect(closeB).not.toHaveBeenCalled();
+  });
+
   it('closes a store shared by two connections when only its second bind failed', async () => {
     const error = new Error('already bound');
     const close = vi.fn(async () => {});

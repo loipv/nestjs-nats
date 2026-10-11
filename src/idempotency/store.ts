@@ -32,7 +32,9 @@ export interface IdempotencyStore {
   release(key: string): Promise<void>;
   /**
    * Called once with the connection of `forRoot`, at module init, before any message is handled.
-   * A store whose `bind` fails is not closed by the module.
+   * A store whose every bind in this application failed is not closed by the module (it may
+   * belong to another running application); a bind that allocates resources and then fails
+   * must release them itself.
    */
   bind?(ctx: IdempotencyStoreContext): Promise<void> | void;
   close?(): Promise<void>;

@@ -320,6 +320,57 @@ describe('KvIdempotencyStore bind', () => {
     );
   });
 
+  it('close during a pending bind makes that bind fail and leaves the store unbound', async () => {
+    let release: () => void = () => {};
+    kvm.create = (c) => {
+      const k = new FakeKvm(c, buckets);
+      const open = k.open.getMockImplementation() as (name: string, o?: unknown) => Promise<FakeKv>;
+      if (kvms.length === 0) {
+        k.open.mockImplementationOnce(async (name: string, o?: unknown) => {
+          await new Promise<void>((r) => (release = r));
+          return open(name, o);
+        });
+      }
+      kvms.push(k);
+      return k;
+    };
+    const store = new KvIdempotencyStore();
+    const pending = store.bind(ctx());
+    pending.catch(() => {});
+    await tick();
+    await store.close();
+    release();
+    await expect(pending).rejects.toThrow(NatsModuleError);
+    await expect(pending).rejects.toThrow('KvIdempotencyStore was closed while binding');
+    await expect(store.claim('k', 1000)).rejects.toThrow(
+      'KvIdempotencyStore is not bound to a NATS connection',
+    );
+    await store.bind(ctx());
+    expect(await store.claim('k', 1000)).toBe('claimed');
+  });
+
+  it('a stale failing bind does not clear a newer bind', async () => {
+    const boom = new Error('late failure');
+    let fail: (e: Error) => void = () => {};
+    let n = 0;
+    kvm.create = (c) => {
+      const k = new FakeKvm(c, buckets);
+      if (n++ === 0) k.open.mockImplementationOnce(() => new Promise((_, rej) => (fail = rej)));
+      kvms.push(k);
+      return k;
+    };
+    const store = new KvIdempotencyStore();
+    const stale = store.bind(ctx());
+    stale.catch(() => {});
+    await tick();
+    await store.close();
+    await store.bind(ctx('other'));
+    fail(boom);
+    await expect(stale).rejects.toBe(boom);
+    expect(await store.claim('k', 1000)).toBe('claimed');
+    await expect(store.bind(ctx())).rejects.toThrow('already bound to NATS connection "other"');
+  });
+
   it('binds again after a failed bind', async () => {
     const boom = new Error('no JetStream');
     kvm.create = (c) => {

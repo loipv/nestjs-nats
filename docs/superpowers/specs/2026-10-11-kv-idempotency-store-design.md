@@ -85,7 +85,7 @@ export interface IdempotencyStore {
 - `IdempotencyStoreContext` được export từ entry chính.
 - Lifecycle gọi `bind` trong `onModuleInit`, trước khi sync stream, cho mọi connection có `options.idempotency.store` với `bind`. Store mặc định (in-memory) không có `bind`.
 - `js` là `entry.js()` của connection đó, nên store dùng đúng `jetstream.options` (domain, API prefix) của connection.
-- Lỗi từ `bind` làm init fail: lifecycle shutdown rồi ném lại lỗi, như các lỗi init khác. Khi shutdown, lifecycle không gọi `close()` trên store mà mọi lần `bind` trong app này đều lỗi: store đó có thể đang gắn với một app khác (bind lần hai của `KvIdempotencyStore` lỗi), và `close()` sẽ gỡ binding của app kia. Store đã bind thành công (kể cả khi store của connection khác bind lỗi) vẫn được đóng.
+- Lỗi từ `bind` làm init fail: lifecycle shutdown rồi ném lại lỗi, như các lỗi init khác. Khi shutdown, lifecycle không gọi `close()` trên store mà mọi lần `bind` trong app này đều lỗi hoặc chưa được thử (connection phía sau connection lỗi): store đó có thể đang gắn với một app khác (bind lần hai của `KvIdempotencyStore` lỗi), và `close()` sẽ gỡ binding của app kia; `bind` đã cấp phát tài nguyên rồi lỗi phải tự giải phóng. `close()` khi một `bind` đang chạy làm `bind` đó lỗi (`KvIdempotencyStore was closed while binding`) và bỏ kết quả. Store đã bind thành công (kể cả khi store của connection khác bind lỗi) vẫn được đóng.
 
 ## 4. Hành vi của `KvIdempotencyStore`
 
