@@ -50,8 +50,7 @@ export type CloudEventRouterOptions = (
 
 /**
  * Receives CloudEvents (binary or structured) on one subscription, pull, push or ordered
- * consumer and hands
- * each to the `@OnCloudEvent` method whose type pattern matches it best.
+ * consumer and hands each to the `@OnCloudEvent` method whose type pattern matches it best.
  */
 export function CloudEventRouter(options: CloudEventRouterOptions): ClassDecorator {
   return SetMetadata(NATS_CLOUD_EVENT_ROUTER_METADATA, options) as ClassDecorator;
