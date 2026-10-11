@@ -26,8 +26,14 @@ import { backoffDelay, DEFAULT_RETRY, type RetryPolicy } from '../settlement/ret
 import { errorTrace } from '../util/errors.js';
 import { isPowerOfTwo } from '../util/power-of-two.js';
 import { sleep } from '../util/sleep.js';
-import type { ForceStopResult, HandlerAdapter } from './adapter.js';
+import {
+  type ForceStopResult,
+  type HandlerAdapter,
+  NO_RESTART,
+  type RestartBinding,
+} from './adapter.js';
 import { createHandlerPipeline, defaultPipelineDeps } from './handler-pipeline.js';
+import { RestartSupervisor } from './restart-supervisor.js';
 
 type OrderedDefinition = HandlerDefinition & { kind: 'ordered' };
 
@@ -73,10 +79,14 @@ export class OrderedConsumerAdapter implements HandlerAdapter {
   private loop?: Promise<void>;
   /** Waiting to retry the current message. */
   private waiting = false;
+  /** Stream sequence of the last message handled: a reopen resumes right after it. */
+  private lastSeq?: number;
+  private readonly supervisor: RestartSupervisor;
 
   constructor(
     private readonly def: OrderedDefinition,
     private readonly entry: ConnectionEntry,
+    restart: RestartBinding = NO_RESTART,
   ) {
     const pipeline = createHandlerPipeline(def, entry, defaultPipelineDeps);
     this.codec = pipeline.codec;
@@ -84,6 +94,14 @@ export class OrderedConsumerAdapter implements HandlerAdapter {
     this.retry = pipeline.retry;
     this.run = pipeline.run;
     this.label = `${def.className}.${def.methodName} on "${def.options.stream}" (ordered)`;
+    this.supervisor = new RestartSupervisor({
+      policy: restart.policy,
+      label: this.label,
+      logger: entry.logger,
+      isConnectionClosed: () => entry.nc.isClosed(),
+      reopen: () => this.open(),
+      onState: restart.track(this.label),
+    });
   }
 
   private get stopping(): boolean {
@@ -92,28 +110,48 @@ export class OrderedConsumerAdapter implements HandlerAdapter {
 
   async start(): Promise<void> {
     if (this.messages) return;
-    const consumer = await this.open();
+    await this.open();
+    this.supervisor.started();
+  }
+
+  /** Creates the consumer and starts reading it; a reopen resumes after the last handled message. */
+  private async open(): Promise<void> {
+    const consumer = await this.getConsumer();
     // Prefetches nats.js's default number of messages: they are not acked, so they need
     // no heartbeat while they wait.
     const messages = await consumer.consume();
-    this.messages = messages;
     if (this.stopping) {
-      // stop() ran while start() was awaiting: nothing will ever read these messages.
+      // stop() ran while opening: nothing will ever read these messages.
       this.close(messages);
       return;
     }
+    this.messages = messages;
     this.loop = this.consume(messages);
     void this.watchStatus(messages);
+  }
+
+  /** The consumer's options: the declared ones, or after the last handled message. */
+  private consumerOptions(): Partial<OrderedConsumerOptions> {
+    const declared = orderedConsumerOptions(this.def.options);
+    if (this.lastSeq === undefined) return declared;
+    const { deliver_policy, opt_start_seq, opt_start_time, ...rest } = declared;
+    return {
+      ...rest,
+      deliver_policy: DeliverPolicy.StartSequence,
+      opt_start_seq: this.lastSeq + 1,
+    };
   }
 
   stop(): Promise<void> {
     // Cancels the retry wait (and a failing dead letter's), abandoning that message.
     this.abort.abort();
+    this.supervisor.stop();
     if (this.messages) this.close(this.messages);
     return Promise.resolve();
   }
 
   async idle(): Promise<void> {
+    await this.supervisor.settled();
     await this.loop;
   }
 
@@ -126,10 +164,10 @@ export class OrderedConsumerAdapter implements HandlerAdapter {
   }
 
   /** Creates the ordered consumer, a missing stream being a configuration error. */
-  private async open(): Promise<Consumer> {
+  private async getConsumer(): Promise<Consumer> {
     const { stream } = this.def.options;
     try {
-      return await this.entry.js().consumers.get(stream, orderedConsumerOptions(this.def.options));
+      return await this.entry.js().consumers.get(stream, this.consumerOptions());
     } catch (err) {
       if (err instanceof JetStreamApiError && err.code === JetStreamApiCodes.StreamNotFound) {
         throw new NatsConfigError(
@@ -152,24 +190,29 @@ export class OrderedConsumerAdapter implements HandlerAdapter {
   }
 
   private async consume(messages: ConsumerMessages): Promise<void> {
+    let error: unknown;
+    let failed = false;
     try {
       for await (const msg of messages) {
         // Prefetched messages still buffered at shutdown are left unprocessed: an ordered
         // consumer has nothing to hand back.
         if (this.stopping) return;
         if (!(await this.handle(msg))) return;
+        this.lastSeq = msg.info.streamSequence;
       }
     } catch (err) {
-      if (!this.stopping) {
-        this.entry.logger.error(`Consumer of ${this.label} failed`, errorTrace(err));
-      }
-      return;
+      failed = true;
+      error = err;
     }
-    if (!this.stopping) {
-      this.entry.logger.error(
-        `Consumer of ${this.label} ended unexpectedly; no more messages will be received`,
-      );
+    // Messages that were replaced are not this handler's intake anymore.
+    if (this.stopping || messages !== this.messages) return;
+    const tail = this.supervisor.restartable ? '' : '; no more messages will be received';
+    if (failed) {
+      this.entry.logger.error(`Consumer of ${this.label} failed${tail}`, errorTrace(error));
+    } else {
+      this.entry.logger.error(`Consumer of ${this.label} ended unexpectedly${tail}`);
     }
+    this.supervisor.ended(error);
   }
 
   /**
