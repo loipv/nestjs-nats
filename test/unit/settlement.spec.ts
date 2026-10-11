@@ -1,6 +1,7 @@
 import { headers, type MsgHdrs } from '@nats-io/transport-node';
 import { BadRequestException } from '@nestjs/common';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { UnmatchedCloudEventError } from '../../src/cloudevents/errors.js';
 import { type Codec, jsonCodec } from '../../src/codec/codec.js';
 import type { ConnectionEntry } from '../../src/connection/connection-registry.js';
 import { NatsContext, NatsJetStreamContext } from '../../src/context/nats-context.js';
@@ -1004,5 +1005,85 @@ describe('publishToDlq', () => {
         vi.useRealTimers();
       }
     });
+  });
+});
+
+describe('createSettlement — a dead letter dropped by an outbound plugin', () => {
+  const dropping = [{ name: 'p', outbound: { handle: async () => {} } }] as unknown as NatsPlugin[];
+
+  it('terms a JetStream message whose dead letter a plugin dropped, and warns', async () => {
+    const { entry } = fakeEntry({ plugins: dropping });
+    const { d, msg, raw, log } = consumeDelivery(6);
+    await createSettlement({ entry, retry, dlq: consumeDlq }).handle(
+      d,
+      nextWith(new Error('boom')),
+    );
+    expect(raw.term).toHaveBeenCalledTimes(1);
+    expect(raw.nak).not.toHaveBeenCalled();
+    expect(d.outcomes.get(msg)).toMatchObject({ action: 'dlq', subject: 'dlq.ORD.d' });
+    expect(log.warn).toHaveBeenCalledWith(
+      'H.on on "ord.created" failed, its dead letter to dlq.ORD.d was dropped by an outbound plugin after 6 attempts: boom',
+    );
+    expect(log.error).not.toHaveBeenCalledWith(expect.stringContaining('sent to DLQ'));
+  });
+
+  it('records dlq for a core message whose dead letter a plugin dropped', async () => {
+    const { entry, ncPublish } = fakeEntry({ plugins: dropping });
+    const { d, msg, log } = coreDelivery({ attempt: 6 });
+    await createSettlement({ entry, retry, dlq: coreDlq }).handle(d, nextWith(new Error('boom')));
+    expect(ncPublish).not.toHaveBeenCalled();
+    expect(d.outcomes.get(msg)).toMatchObject({ action: 'dlq', subject: 'dlq.orders.x' });
+    expect(log.warn).toHaveBeenCalledWith(
+      'H.on on "orders.x" failed, its dead letter to dlq.orders.x was dropped by an outbound plugin after 6 attempts: boom',
+    );
+    expect(log.error).not.toHaveBeenCalled();
+  });
+
+  it('warns with the unmatched form for an unmatched CloudEvent', async () => {
+    const { entry } = fakeEntry({ plugins: dropping });
+    const { d, msg, raw, log } = consumeDelivery(1);
+    const err = new UnmatchedCloudEventError('a.b', 'dlq');
+    await createSettlement({ entry, retry, dlq: consumeDlq }).handle(d, nextWith(err));
+    expect(raw.term).toHaveBeenCalledTimes(1);
+    expect(d.outcomes.get(msg)).toMatchObject({ action: 'dlq', subject: 'dlq.ORD.d' });
+    expect(log.warn).toHaveBeenCalledWith(
+      `H.on on "ord.created": ${err.message}; its dead letter to dlq.ORD.d was dropped by an outbound plugin (unmatched: 'dlq')`,
+    );
+  });
+
+  it('retries an ordered dead letter in place while a plugin throws', async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const plugins = [
+      {
+        name: 'p',
+        outbound: {
+          handle: async (_m: unknown, next: () => Promise<void>) => {
+            if (++calls <= 2) throw new Error('plugin down');
+            await next();
+          },
+        },
+      },
+    ] as unknown as NatsPlugin[];
+    const { entry, jsPublish } = fakeEntry({ plugins });
+    const { d, msg, log } = orderedDelivery({ attempt: 3 });
+    const twoRetries = resolveRetryPolicy({
+      initialDelay: 100,
+      jitter: 0,
+      maxRetries: 2,
+    }) as RetryPolicy;
+    const err = new Error('x');
+    const p = createSettlement({ entry, retry: twoRetries, dlq: orderedDlq }).handle(
+      d,
+      nextWith(err),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(jsPublish).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(300);
+    await p;
+    expect(jsPublish).toHaveBeenCalledTimes(1);
+    expect(d.outcomes.get(msg)).toMatchObject({ action: 'dlq' });
+    const failures = log.error.mock.calls.filter((c) => String(c[0]).includes('could not be sent'));
+    expect(failures).toHaveLength(2);
   });
 });

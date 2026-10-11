@@ -142,22 +142,46 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
     msg: InboundMessage,
     err: unknown,
     consumer?: string,
-  ): Promise<{ subject: string; error?: unknown }> {
+  ): Promise<{ subject: string; error?: unknown; dropped?: boolean }> {
     let subject = '(unresolved subject)';
     try {
       // `decide` only returns 'dlq' when a DLQ policy is set.
       if (!dlq) throw new Error('no DLQ configured');
       subject = dlq.subject(d.handler, msg);
-      await sendToDlq(entry, subject, dlq.mode, msg, err, msg.attempt, d.handler, consumer);
-      return { subject };
+      const result = await sendToDlq(
+        entry,
+        subject,
+        dlq.mode,
+        msg,
+        err,
+        msg.attempt,
+        d.handler,
+        consumer,
+      );
+      return { subject, dropped: result === 'dropped' };
     } catch (error) {
       return { subject, error: error ?? new Error(String(error)) };
     }
   }
 
-  /** Logs a successful dead letter: a handler failure, or an unmatched routing decision. */
-  function logDeadLettered(d: Delivery, msg: InboundMessage, subject: string, err: unknown) {
-    if (err instanceof UnmatchedCloudEventError) {
+  /**
+   * Logs a successful dead letter: a handler failure, or an unmatched routing decision;
+   * a warning when an outbound plugin dropped it (it still counts as dead-lettered).
+   */
+  function logDeadLettered(
+    d: Delivery,
+    msg: InboundMessage,
+    subject: string,
+    err: unknown,
+    dropped?: boolean,
+  ) {
+    if (dropped) {
+      d.logger.warn(
+        err instanceof UnmatchedCloudEventError
+          ? `${label(d, msg)}: ${err.message}; its dead letter to ${subject} was dropped by an outbound plugin (unmatched: 'dlq')`
+          : `${label(d, msg)} failed, its dead letter to ${subject} was dropped by an outbound plugin after ${attempts(msg.attempt)}: ${errorMessage(err)}`,
+      );
+    } else if (err instanceof UnmatchedCloudEventError) {
       d.logger.warn(`${label(d, msg)}: ${err.message}; sent to DLQ ${subject} (unmatched: 'dlq')`);
     } else {
       d.logger.error(
@@ -168,9 +192,9 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
 
   /** Dead-letters then terms a JetStream message; naks it when the DLQ publish fails. */
   async function deadLetterConsume(d: Delivery, { msg, ctx }: JsTarget, err: unknown) {
-    const { subject, error } = await deadLetter(d, msg, err);
+    const { subject, error, dropped } = await deadLetter(d, msg, err);
     if (error === undefined) {
-      logDeadLettered(d, msg, subject, err);
+      logDeadLettered(d, msg, subject, err, dropped);
       settle(d, msg, 'term', () => ctx.term());
       recordOutcome(d, msg, { action: 'dlq', subject, error: err });
       return;
@@ -252,9 +276,9 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
     err: unknown,
     consumer?: string,
   ) {
-    const { subject, error } = await deadLetter(d, msg, err, consumer);
+    const { subject, error, dropped } = await deadLetter(d, msg, err, consumer);
     if (error === undefined) {
-      logDeadLettered(d, msg, subject, err);
+      logDeadLettered(d, msg, subject, err, dropped);
     } else {
       d.logger.error(
         `${label(d, msg)} failed after ${attempts(msg.attempt)} and could not be sent to DLQ ${subject}: ${errorMessage(error)}`,
@@ -288,9 +312,9 @@ export function createSettlement(cfg: SettlementConfig): InboundMiddleware {
       recordOutcome(d, msg, { action: 'drop', error: err });
     };
     for (let n = 1; ; n++) {
-      const { subject, error } = await deadLetter(d, msg, err, consumer);
+      const { subject, error, dropped } = await deadLetter(d, msg, err, consumer);
       if (error === undefined) {
-        logDeadLettered(d, msg, subject, err);
+        logDeadLettered(d, msg, subject, err, dropped);
         recordOutcome(d, msg, { action: 'dlq', subject, error: err });
         return;
       }
