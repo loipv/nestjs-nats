@@ -342,6 +342,7 @@ describe('OrderedConsumerAdapter', () => {
     expect(err).toBeInstanceOf(NatsConfigError);
     expect((err as Error).message).toContain('"ORD"');
     expect((err as Error).message).toContain('C.m');
+    expect((err as Error).message).toBe('Stream "ORD" not found for C.m');
     expect((err as Error).cause).toBe(notFound);
   });
 

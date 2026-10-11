@@ -214,8 +214,6 @@ describe('@CloudEventRouter', () => {
   });
 });
 
-const orderedLog: Array<[string, unknown]> = [];
-
 @CloudEventRouter({
   consumePush: {
     stream: 'CEP',
@@ -242,14 +240,16 @@ class PushRouter {
 @CloudEventRouter({ consumeOrdered: { stream: 'CEO' } })
 @Injectable()
 class OrderedRouter {
+  readonly received: Array<[string, unknown]> = [];
+
   @OnCloudEvent('x.one')
   one(@Payload() data: unknown) {
-    orderedLog.push(['x.one', data]);
+    this.received.push(['x.one', data]);
   }
 
   @OnCloudEvent('x.two')
   two(@Payload() data: unknown) {
-    orderedLog.push(['x.two', data]);
+    this.received.push(['x.two', data]);
   }
 }
 
@@ -295,11 +295,12 @@ describe('@CloudEventRouter on push and ordered consumers', () => {
   });
 
   it('routes CloudEvents from an ordered consumer router in stream order', async () => {
+    const router = app.get(OrderedRouter);
     await js.publish('ceo.a', 1, { cloudEvent: { type: 'x.one' } });
     await js.publish('ceo.a', 2, { cloudEvent: { type: 'x.two' } });
     await js.publish('ceo.a', 3, { cloudEvent: { type: 'x.one' } });
     await eventually(() =>
-      expect(orderedLog).toEqual([
+      expect(router.received).toEqual([
         ['x.one', 1],
         ['x.two', 2],
         ['x.one', 3],

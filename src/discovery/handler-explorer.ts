@@ -74,10 +74,17 @@ export const ROUTER_METHOD_NAME = '@CloudEventRouter';
 
 const UNMATCHED_POLICIES: ReadonlyArray<CloudEventRouting['unmatched']> = ['ack', 'term', 'dlq'];
 
+const ORDERED_KEYS: readonly string[] = [
+  'stream',
+  'filterSubjects',
+  'deliverPolicy',
+  'headersOnly',
+];
+
 /**
  * Finds `@Subscribe`, `@Consume`, `@ConsumePush`, `@ConsumeOrdered`,
  * `@NatsService`/`@ServiceEndpoint` handlers and `@CloudEventRouter` classes (one
- * subscribe/consume definition per class).
+ * subscribe, pull, push or ordered definition per class).
  */
 @Injectable()
 export class HandlerExplorer {
@@ -179,6 +186,9 @@ export class HandlerExplorer {
       );
     }
     const { connection, concurrency, codec, retry, dlq, idempotency } = options;
+    if (set[0] !== 'subscribe' && 'queue' in options && options.queue !== undefined) {
+      throw new NatsConfigError(`${label} sets queue, which only applies to subscribe`);
+    }
     if (set[0] === 'consumeOrdered' && concurrency !== undefined) {
       throw new NatsConfigError(`${label} with consumeOrdered does not support concurrency`);
     }
@@ -223,6 +233,15 @@ export class HandlerExplorer {
         CloudEventRouterOptions,
         { consumeOrdered: unknown }
       >;
+      // Not part of the options type; rejected for untyped callers.
+      for (const key of Object.keys(consumeOrdered)) {
+        if (
+          !ORDERED_KEYS.includes(key) &&
+          (consumeOrdered as Record<string, unknown>)[key] !== undefined
+        ) {
+          throw new NatsConfigError(`${label}: consumeOrdered does not support ${key}`);
+        }
+      }
       spec = {
         kind: 'ordered',
         options: {

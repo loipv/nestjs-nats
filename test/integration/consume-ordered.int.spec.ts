@@ -180,7 +180,7 @@ describe('@ConsumeOrdered', () => {
 
   it('fails bootstrap when the stream is missing', async () => {
     await expect(start(MissingStreamHandlers)).rejects.toThrow(
-      new NatsConfigError('Stream "NOPE" not found for @ConsumeOrdered MissingStreamHandlers.on'),
+      new NatsConfigError('Stream "NOPE" not found for MissingStreamHandlers.on'),
     );
   });
 });

@@ -710,3 +710,58 @@ describe('NatsTestHarness push and ordered consumers', () => {
     }
   });
 });
+
+describe('NatsTestHarness CloudEventRouter on push and ordered consumers', () => {
+  @CloudEventRouter({
+    consumePush: { stream: 'S', durable: 'D', config: { filter_subject: 'p.*' } },
+  })
+  @Injectable()
+  class PushRouter {
+    @OnCloudEvent('o.created')
+    created(@Payload() p: unknown) {
+      return { route: 'push', p };
+    }
+  }
+
+  @CloudEventRouter({ consumeOrdered: { stream: 'S', filterSubjects: 'o.*' } })
+  @Injectable()
+  class OrderedRouter {
+    @OnCloudEvent('o.created')
+    created(@Payload() p: unknown) {
+      return { route: 'ordered', p };
+    }
+  }
+
+  let moduleRef: TestingModule;
+  let h: NatsTestHarness;
+
+  beforeAll(async () => {
+    moduleRef = await Test.createTestingModule({
+      imports: [NatsTestingModule.forRoot({ retry: { initialDelay: 10, jitter: 0 } })],
+      providers: [PushRouter, OrderedRouter],
+    })
+      .setLogger(silentLogger)
+      .compile();
+    h = NatsTestHarness.create(moduleRef);
+  });
+
+  afterAll(async () => {
+    await moduleRef.close();
+  });
+
+  const event = { cloudEvent: { type: 'o.created', source: 's' } };
+
+  it('dispatches to a consumePush router and acks', async () => {
+    const byHandler = await h.dispatch({ handler: 'PushRouter.@CloudEventRouter' }, 1, event);
+    expect(byHandler).toMatchObject({ settlement: 'ack', result: { route: 'push', p: 1 } });
+    const bySubject = await h.dispatch({ subject: 'p.x' }, 2, event);
+    expect(bySubject).toMatchObject({ settlement: 'ack', result: { route: 'push', p: 2 } });
+  });
+
+  it('dispatches to a consumeOrdered router and leaves nothing to settle', async () => {
+    const byHandler = await h.dispatch({ handler: 'OrderedRouter.@CloudEventRouter' }, 1, event);
+    expect(byHandler).toMatchObject({ settlement: 'none', result: { route: 'ordered', p: 1 } });
+    const bySubject = await h.dispatch({ subject: 'o.x' }, 2, event);
+    expect(bySubject).toMatchObject({ settlement: 'none', result: { route: 'ordered', p: 2 } });
+  });
+});

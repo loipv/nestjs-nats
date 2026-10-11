@@ -928,6 +928,9 @@ describe('JetStreamConsumerAdapter', () => {
       expect(err).toBeInstanceOf(NatsConfigError);
       expect((err as Error).message).toContain('is not a push consumer');
       expect((err as Error).message).toMatch(/"ORD\/d".*C\.m/);
+      expect((err as Error).message).toContain(
+        'use a pull consumer (@Consume, or consume on a router)',
+      );
       expect(consume).not.toHaveBeenCalled();
     });
 
