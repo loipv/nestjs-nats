@@ -16,7 +16,7 @@ The library has three ways to read a JetStream stream, each with its own decorat
 | **Shutdown** | Messages being handled or waiting are `nak`'d after `drainTimeout` | Same as pull, for every message received, including those queued behind a busy slot or batch | A pending retry wait is abandoned. Messages not finished are not redelivered |
 | **Retry** | `nak(delay)`: the server redelivers | `nak(delay)`: the server redelivers | In place, with the backoff delay, before the next message |
 | **Dead-letter queue** | `dlq.<stream>.<durable>` | `dlq.<stream>.<durable>` | `dlq.<stream>.ordered.<Class>.<method>` |
-| **`@CloudEventRouter`** | Yes, with `consume` | No | No |
+| **`@CloudEventRouter`** | Yes, with `consume` | Yes, with `consumePush` | Yes, with `consumeOrdered` |
 | **Limits** | `batch` cannot be combined with `ack: 'manual'` | Without `deliverGroup`, one instance only. A grouped consumer has no flow control or idle heartbeat, and the group shares one `max_ack_pending`. `batch` cannot be combined with `ack: 'manual'` | One message at a time. No `concurrency`, `batch`, `durable`, `ack` or `config`. Idempotency needs a store per instance |
 
 Declare the stream and, for pull and push, the durable consumer in [`forRoot` or with `config`](./streams.md). All three work with `retry`, `dlq`, `idempotency` and `codec`. The options of each decorator are listed in [Handlers](./handlers.md).
