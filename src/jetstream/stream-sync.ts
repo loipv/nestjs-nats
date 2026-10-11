@@ -64,6 +64,14 @@ function withoutServerMetadata(field: string, value: unknown): unknown {
 }
 
 /**
+ * The declaration without its top-level `null` fields: `null` means omitted, so the server
+ * keeps (or applies) its default instead of drifting from what it stores (`-1`, 2 min, ...).
+ */
+export function withoutNulls<T extends object>(declared: T): T {
+  return Object.fromEntries(Object.entries(declared).filter(([, v]) => v !== null)) as T;
+}
+
+/**
  * Compares only the keys present in `declared` (see `matches` for the rules), ignoring
  * the server's own `_nats.` metadata keys.
  */

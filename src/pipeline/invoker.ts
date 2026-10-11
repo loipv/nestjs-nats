@@ -51,8 +51,9 @@ export async function invokeHandler(d: InternalDelivery): Promise<void> {
 /**
  * Reads the CloudEvent attributes of the message (a `NatsDecodeError` when it is not a
  * valid CloudEvent), presets `ctx.cloudEvent` and invokes the `@OnCloudEvent` route
- * matching its type with its decoded `data` (a `NatsDecodeError` when undecodable). With no matching route, policy `'ack'` succeeds without a result; the others
- * throw an `UnmatchedCloudEventError` for settlement to apply.
+ * matching its type with its decoded `data` (a `NatsDecodeError` when undecodable). With no matching route, policy `'ack'` succeeds without a result; the others,
+ * and a request under any policy (for its 404 reply), throw an `UnmatchedCloudEventError`
+ * for settlement to apply.
  */
 async function invokeRoute(
   d: InternalDelivery,
@@ -71,7 +72,7 @@ async function invokeRoute(
     d.result = await unwrap(await target.invoke(event.data(d.codec), ctx));
     return;
   }
-  if (router.unmatched === 'ack') {
+  if (router.unmatched === 'ack' && ctx.replyTo === undefined) {
     d.logger.debug?.(
       `No handler for CloudEvent type "${meta.type}" in ${d.handler.className} on "${msg.subject}"; acknowledged`,
     );

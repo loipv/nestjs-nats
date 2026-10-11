@@ -146,10 +146,14 @@ describe('@CloudEventRouter', () => {
     await expect(
       client.request('cer.core.req', { q: 1 }, { headers: ce('order.created') }),
     ).resolves.toEqual({ ok: 'created' });
-    // Policy 'ack' (the default): no reply.
+    // Policy 'ack' (the default) too: a request is never left without a reply.
     await expect(
-      client.request('cer.core.req', { q: 1 }, { headers: ce('invoice.sent'), timeout: 300 }),
-    ).rejects.toMatchObject({ code: 'timeout' });
+      client.request('cer.core.req', { q: 1 }, { headers: ce('invoice.sent'), timeout: 2000 }),
+    ).rejects.toMatchObject({
+      code: 'service_error',
+      serviceCode: 404,
+      description: 'No handler for CloudEvent type "invoice.sent"',
+    });
   });
 
   it('routes a JetStream router and settles per outcome', async () => {
@@ -184,7 +188,7 @@ describe('@CloudEventRouter', () => {
     expect(router.received).toHaveLength(1);
   });
 
-  it('replies 404 to an unmatched request when unmatched is not ack', async () => {
+  it('replies 404 to an unmatched request with unmatched term', async () => {
     const err = await client
       .request('cer404.x', null, {
         headers: {

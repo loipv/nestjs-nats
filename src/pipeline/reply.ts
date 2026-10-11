@@ -16,6 +16,17 @@ export function toServiceError(err: unknown): ServiceError {
   return { code: 500, description: 'Internal Server Error' };
 }
 
+/** The reply to a request a `@Subscribe` batch handler receives: batches do not reply. */
+export function batchRequestError(handler: {
+  className: string;
+  methodName: string;
+}): ServiceError {
+  return {
+    code: 400,
+    description: `NATS handler ${handler.className}.${handler.methodName} handles batches and does not reply to requests`,
+  };
+}
+
 /**
  * Whether the delivery expects a reply (service endpoint, or a request on a
  * subscription). A batch never replies.

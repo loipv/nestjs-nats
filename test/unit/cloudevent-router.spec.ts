@@ -387,11 +387,14 @@ describe('@CloudEventRouter dispatch', () => {
     });
   });
 
-  it('does not reply to an unmatched request with policy ack', async () => {
+  it('replies 404 to an unmatched request with policy ack too', async () => {
     const def = await routerDef({ subscribe: 'events.>' });
-    const { d, error } = await run(def, corePart({ ...BASE, type: 'com.other' }, '_INBOX.1'));
-    expect(error).toBeUndefined();
-    expect(d.result).toBeUndefined();
+    const { outcome, error } = await run(def, corePart({ ...BASE, type: 'com.other' }, '_INBOX.1'));
+    expect(outcome).toMatchObject({ action: 'replied', error });
+    expect(toServiceError(error)).toEqual({
+      code: 404,
+      description: 'No handler for CloudEvent type "com.other"',
+    });
   });
 
   it('never decodes the data of an unmatched CloudEvent', async () => {
