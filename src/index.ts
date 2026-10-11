@@ -45,6 +45,7 @@ export type { IdempotencyOptions } from './idempotency/idempotency.js';
 export type {
   ClaimResult,
   IdempotencyStore,
+  IdempotencyStoreContext,
   InMemoryIdempotencyStoreOptions,
 } from './idempotency/store.js';
 export { InMemoryIdempotencyStore } from './idempotency/store.js';

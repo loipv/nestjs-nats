@@ -682,3 +682,72 @@ describe('NatsLifecycle declarations', () => {
     });
   });
 });
+
+describe('NatsLifecycle idempotency store binding', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function lifecycleFor(manager: ReturnType<typeof fakeManager>['manager']) {
+    return new NatsLifecycle(
+      manager as unknown as ConnectionRegistry,
+      { getProviders: () => [] } as never,
+      { explore: () => [] } as never,
+    );
+  }
+
+  it('binds the idempotency store of each connection before syncing streams', async () => {
+    const ensureStream = vi
+      .spyOn(NatsStreamManager.prototype, 'ensureStream')
+      .mockResolvedValue(undefined);
+    const bind = vi.fn(async () => {});
+    const store: IdempotencyStore = { ...fakeStore(), bind };
+    const { manager, entries } = fakeManager({
+      default: { idempotency: { store }, streams: [{ name: 'S', subjects: ['s.>'] }] },
+    });
+    const nc = { name: 'nc' };
+    Object.assign(entries.get('default') as object, { nc });
+
+    await lifecycleFor(manager).onModuleInit();
+
+    expect(bind).toHaveBeenCalledTimes(1);
+    expect(bind).toHaveBeenCalledWith({ connection: 'default', nc });
+    expect(bind.mock.invocationCallOrder[0]).toBeLessThan(
+      ensureStream.mock.invocationCallOrder[0] as number,
+    );
+  });
+
+  it('fails init when a store fails to bind', async () => {
+    const error = new Error('bind failed');
+    const store: IdempotencyStore = {
+      ...fakeStore(),
+      bind: vi.fn(async () => {
+        throw error;
+      }),
+    };
+    const { manager } = fakeManager({ default: { idempotency: { store } } });
+
+    await expect(lifecycleFor(manager).onModuleInit()).rejects.toBe(error);
+    expect(manager.closeAll).toHaveBeenCalled();
+  });
+
+  it('binds a store shared by two connections once per connection', async () => {
+    const bind = vi.fn(async () => {});
+    const store: IdempotencyStore = { ...fakeStore(), bind };
+    const { manager, entries } = fakeManager({
+      a: { idempotency: { store } },
+      b: { idempotency: { store } },
+    });
+    const ncA = { name: 'a' };
+    const ncB = { name: 'b' };
+    Object.assign(entries.get('a') as object, { nc: ncA });
+    Object.assign(entries.get('b') as object, { nc: ncB });
+
+    await lifecycleFor(manager).onModuleInit();
+
+    expect(bind.mock.calls).toEqual([
+      [{ connection: 'a', nc: ncA }],
+      [{ connection: 'b', nc: ncB }],
+    ]);
+  });
+});

@@ -18,6 +18,7 @@ import type {
   HandlerInfo,
   IdempotencyOptions,
   IdempotencyStore,
+  IdempotencyStoreContext,
   InboundMessage,
   InMemoryIdempotencyStoreOptions,
   JetStreamPublishOptions,
@@ -178,6 +179,7 @@ it('exports the reliability types', () => {
   expectTypeOf<DlqOptions>().toHaveProperty('subject');
   expectTypeOf<IdempotencyOptions>().toHaveProperty('ttl');
   expectTypeOf<IdempotencyStore>().toHaveProperty('claim');
+  expectTypeOf<IdempotencyStoreContext>().toHaveProperty('nc');
   expectTypeOf<ClaimResult>().not.toBeAny();
   expectTypeOf<InMemoryIdempotencyStoreOptions>().toHaveProperty('maxKeys');
   expectTypeOf<BatchOptions>().toHaveProperty('maxSize');

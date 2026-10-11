@@ -73,6 +73,12 @@ export class NatsLifecycle
 
   async onModuleInit(): Promise<void> {
     try {
+      // Once per (store, connection) pair, before anything else uses the stores.
+      for (const name of this.manager.names()) {
+        const entry = this.manager.get(name);
+        const store = entry.options.idempotency?.store;
+        if (store?.bind) await store.bind({ connection: name, nc: entry.nc });
+      }
       const declarations = this.collectDeclarations();
       // Before anything is written: a failed boot must leave the server as it was.
       if (this.moduleConsumers.size > 0) this.checkHandlerConsumers(this.explorer.explore());
