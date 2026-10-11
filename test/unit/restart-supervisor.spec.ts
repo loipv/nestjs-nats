@@ -9,6 +9,7 @@ function setup(
     policy?: Partial<RestartPolicy> | false;
     reopen?: () => Promise<void>;
     closed?: () => boolean;
+    random?: () => number;
   } = {},
 ) {
   const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -21,7 +22,7 @@ function setup(
     isConnectionClosed: opts.closed ?? (() => false),
     reopen,
     onState: (s) => states.push(s),
-    random: () => 0.5,
+    random: opts.random ?? (() => 0.5),
   });
   return { supervisor, logger, states, reopen };
 }
@@ -49,6 +50,22 @@ describe('RestartSupervisor', () => {
     await vi.advanceTimersByTimeAsync(4000);
     expect(logger.log).toHaveBeenCalledWith('Restarted L (attempt 3)');
     expect(states).toEqual(['running', 'restarting', 'restarting', 'restarting', 'running']);
+  });
+
+  it('clamps the delay to the longest timer Node supports', async () => {
+    const max = 2 ** 31 - 1;
+    const { supervisor, logger, reopen } = setup({
+      policy: { initialDelay: max, maxDelay: max, jitter: 1 },
+      random: () => 1,
+    });
+    supervisor.started();
+    supervisor.ended();
+    expect(logger.warn).toHaveBeenLastCalledWith(`Restarting L in ${max} ms (attempt 1)`);
+    // Node fires a longer timer after 1 ms.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(reopen).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(max - 1000);
+    expect(reopen).toHaveBeenCalledOnce();
   });
 
   it('shows the attempt limit when maxAttempts is finite', () => {

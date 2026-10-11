@@ -4,6 +4,9 @@ import { backoffDelay } from '../settlement/retry.js';
 import { errorMessage } from '../util/errors.js';
 import type { HandlerState } from './adapter.js';
 
+/** The longest delay `setTimeout` honours: Node fires a longer one after 1 ms. */
+const MAX_TIMER_DELAY = 2 ** 31 - 1;
+
 export interface RestartSupervisorDeps {
   policy: RestartPolicy | false;
   label: string;
@@ -118,7 +121,8 @@ export class RestartSupervisor {
     }
     this.attempts++;
     this.setState('restarting');
-    const delay = backoffDelay(policy, this.attempts, random);
+    // The jitter can take the delay past `maxDelay`, and so past the longest timer.
+    const delay = Math.min(backoffDelay(policy, this.attempts, random), MAX_TIMER_DELAY);
     const limit = Number.isFinite(policy.maxAttempts) ? `/${policy.maxAttempts}` : '';
     logger.warn(`Restarting ${label} in ${delay} ms (attempt ${this.attempts}${limit})`);
     this.restartTimer = setTimeout(() => this.run(), delay);
