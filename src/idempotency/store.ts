@@ -1,6 +1,15 @@
+import type { NatsConnection } from '@nats-io/transport-node';
 import { NatsConfigError } from '../errors/errors.js';
 
 export type ClaimResult = 'claimed' | 'duplicate' | 'in-progress';
+
+/** What a store receives from `bind`. */
+export interface IdempotencyStoreContext {
+  /** The connection name. */
+  connection: string;
+  /** The connection the store runs on. */
+  nc: NatsConnection;
+}
 
 /**
  * Remembers which messages were processed (or are being processed) so redeliveries and
@@ -18,6 +27,10 @@ export interface IdempotencyStore {
   complete(key: string, ttlMs: number): Promise<void>;
   /** Frees a claimed `key` (processing failed) so the message can be processed again. */
   release(key: string): Promise<void>;
+  /**
+   * Called once with the connection of `forRoot`, at module init, before any message is handled.
+   */
+  bind?(ctx: IdempotencyStoreContext): Promise<void> | void;
   close?(): Promise<void>;
 }
 
