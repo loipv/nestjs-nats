@@ -1,4 +1,5 @@
 import { AckPolicy, type ConsumerConfig } from '@nats-io/jetstream';
+import { NatsConfigError } from '../errors/errors.js';
 
 export const STREAM_IMMUTABLE_FIELDS = ['storage', 'retention'] as const;
 
@@ -161,14 +162,20 @@ export function removedFields(
 }
 
 /**
- * The first declared metadata key the library or the server owns (`_nats.*`, `SNAPSHOT_KEY`):
- * the server would never report the declared value back.
+ * Throws for a declared metadata key the library or the server owns (`_nats.*`,
+ * `SNAPSHOT_KEY`): the server would never report the declared value back, so every boot
+ * would update. `label` is `stream "<name>"` or `consumer "<stream>/<durable>"`.
  */
-export function reservedMetadataKey(
+export function rejectReservedMetadata(
+  label: string,
   metadata: Record<string, string> | undefined,
-): string | undefined {
-  return Object.keys(metadata ?? {}).find(
+): void {
+  const key = Object.keys(metadata ?? {}).find(
     (k) => k.startsWith(SERVER_METADATA_PREFIX) || k === SNAPSHOT_KEY,
+  );
+  if (key === undefined) return;
+  throw new NatsConfigError(
+    `JetStream ${label} declares metadata key "${key}", which the library or the server sets: declare no "${SERVER_METADATA_PREFIX}" key nor "${SNAPSHOT_KEY}"`,
   );
 }
 

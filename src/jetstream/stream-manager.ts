@@ -22,8 +22,8 @@ import {
   declaredFields,
   diffConfig,
   parseSnapshot,
+  rejectReservedMetadata,
   removedFields,
-  reservedMetadataKey,
   SNAPSHOT_KEY,
   STREAM_IMMUTABLE_FIELDS,
   STREAM_KEPT_FIELDS,
@@ -131,7 +131,7 @@ export class NatsStreamManager {
   ): Promise<StreamInfo | undefined> {
     if (mode === 'none') return undefined;
     const cfg = withoutNulls(declared);
-    this.rejectReservedMetadata(`stream "${cfg.name}"`, cfg.metadata);
+    if (this.resetsRemovedFields) rejectReservedMetadata(`stream "${cfg.name}"`, cfg.metadata);
     const jsm = await this.jsm();
     const tracked = this.checkTracksRemovedFields();
     const fields = declaredFields(cfg, ['name']);
@@ -198,7 +198,7 @@ export class NatsStreamManager {
     const cfg = withoutNulls(declared);
     const durable = cfg.durable_name;
     const label = `${stream}/${durable}`;
-    this.rejectReservedMetadata(`consumer "${label}"`, cfg.metadata);
+    if (this.resetsRemovedFields) rejectReservedMetadata(`consumer "${label}"`, cfg.metadata);
     const jsm = await this.jsm();
     const tracked = this.checkTracksRemovedFields();
     // `name` is the durable name again, when given.
@@ -322,19 +322,6 @@ export class NatsStreamManager {
       ),
       kept: removed.kept,
     };
-  }
-
-  /**
-   * With `removedFields: 'reset'`, throws for declared metadata keys the library or the
-   * server sets: they would never match, so every boot would update.
-   */
-  private rejectReservedMetadata(label: string, metadata: Record<string, string> | undefined) {
-    if (!this.resetsRemovedFields) return;
-    const key = reservedMetadataKey(metadata);
-    if (key === undefined) return;
-    throw new NatsConfigError(
-      `JetStream ${label} declares metadata key "${key}", which the library or the server sets: declare no "_nats." key nor "${SNAPSHOT_KEY}"`,
-    );
   }
 
   /**
