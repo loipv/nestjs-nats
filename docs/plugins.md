@@ -44,7 +44,7 @@ Once the message is sent, the call settles with the outcome of the send (the `Pu
 
 ## Dead letters
 
-Every dead letter the library publishes (see [Retry and DLQ](./retry-and-dlq.md)) goes through the connection's outbound plugins, like any other publish. Its `OutgoingMessage` has `kind` `'jetstream'` in `jetstream` DLQ mode and `'publish'` in `core` mode, `data` is the original body and `headers` are the DLQ headers, and `deadLetter` is set to `{ subject, handler, error }`: the subject the failed message arrived on, the `HandlerInfo` of the handler that failed and the error. There is no option to opt out, so a plugin that must not touch dead letters checks `message.deadLetter`.
+Every dead letter the library publishes (see [Retry and DLQ](./retry-and-dlq.md)) goes through the connection's outbound plugins, like any other publish. Its `OutgoingMessage` has `kind` `'jetstream'` in `jetstream` DLQ mode and `'publish'` in `core` mode, `data` is the original body as a `Uint8Array` (the raw bytes), and a value a plugin puts in its place is encoded with the codec. `headers` are the DLQ headers, and `deadLetter` is set to `{ subject, handler, error }`: the subject the failed message arrived on, the `HandlerInfo` of the handler that failed and the error. There is no option to opt out, so a plugin that must not touch dead letters checks `message.deadLetter`.
 
 ```ts
 import type { NatsPlugin } from '@loipv/nestjs-nats';
@@ -64,7 +64,7 @@ const tagDeadLetters: NatsPlugin = {
 
 - **Call `next()`.** A plugin that returns without calling it drops the dead letter: nothing is published, but the failed message counts as dead-lettered. Its outcome is `'dlq'`, a JetStream message is `term`'d, and a warning is logged. Drop one only on purpose.
 - **Timeout.** The plugins get the JetStream client's timeout in `jetstream` mode and 5000 ms in `core` mode. A plugin that throws before `next()`, or does not pass the dead letter on in time, makes the DLQ publish fail: the existing failure behavior applies (a `@Consume` or `@ConsumePush` message is `nak`'d with the backoff delay, a `@ConsumeOrdered` message is retried in place without limit, a `@Subscribe` message is logged and dropped).
-- **`Nats-Msg-Id`.** The DLQ stream de-duplicates on it. A plugin that changes or deletes `Nats-Msg-Id` on a dead letter loses that de-duplication.
+- **`Nats-Msg-Id`.** The DLQ stream de-duplicates on it; only JetStream messages have one. A plugin that changes or deletes `Nats-Msg-Id` on a dead letter loses that de-duplication.
 
 ## Observing outcomes
 

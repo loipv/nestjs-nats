@@ -83,7 +83,7 @@ NatsModule.forRoot({
 });
 ```
 
-A dead letter has the original body, unchanged, and the original headers except the ones whose name starts with `Nats-` (in any case), plus these:
+A dead letter has the original body, unchanged, and the original headers except the ones whose name starts with `Nats-` (in any case), plus these. This is what the outbound plugins receive — they can change it (see [Dead letters](./plugins.md#dead-letters)) — and with tracing, `traceparent` is the dead letter's own publish span.
 
 | Header | Value |
 |---|---|
