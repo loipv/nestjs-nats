@@ -4,7 +4,7 @@ import 'reflect-metadata';
 import { Payload, Subscribe } from '@loipv/nestjs-nats';
 import { NatsHealthIndicator } from '@loipv/nestjs-nats/health';
 import { KvIdempotencyStore } from '@loipv/nestjs-nats/kv';
-import { tracing } from '@loipv/nestjs-nats/otel';
+import { metrics, tracing } from '@loipv/nestjs-nats/otel';
 import { NatsTestHarness, NatsTestingModule } from '@loipv/nestjs-nats/testing';
 import { Injectable, Module } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
@@ -29,6 +29,7 @@ class AppModule {}
 Module({ imports: [NatsTestingModule.forRoot()], providers: [Handlers] })(AppModule);
 
 assert.equal(typeof tracing, 'function');
+assert.equal(typeof metrics, 'function');
 assert.equal(typeof NatsHealthIndicator, 'function');
 assert.equal(typeof new KvIdempotencyStore().claim, 'function');
 

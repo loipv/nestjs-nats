@@ -20,7 +20,7 @@ Decorator-driven [NATS](https://nats.io) integration for [NestJS](https://nestjs
 - Several named connections in one application, each passing its options straight to the NATS client, so every NATS auth method and TLS/mTLS works unchanged. See [Connections](./docs/connections.md).
 - [CloudEvents](./docs/cloudevents.md) 1.0 in binary and structured mode: publish with a `cloudEvent` option, route incoming events to methods by `type` with `@CloudEventRouter()` and `@OnCloudEvent()`, and read an event's attributes in any handler with `@CloudEvent()`.
 - An inbound and outbound plugin pipeline for cross-cutting concerns, with a per-message outcome for plugins to observe. See [Plugins](./docs/plugins.md).
-- [OpenTelemetry tracing](./docs/tracing.md) from producer to consumer, as a plugin (`@loipv/nestjs-nats/otel`).
+- [OpenTelemetry tracing](./docs/tracing.md) from producer to consumer, and [OpenTelemetry metrics](./docs/metrics.md) for throughput, duration and outcomes, as plugins (`@loipv/nestjs-nats/otel`).
 - Subscriptions, consumers and services that end on their own are restarted with a backoff. See [Restarting handlers](./docs/connections.md#restarting-handlers).
 - A [Terminus health indicator](./docs/health.md) (`@loipv/nestjs-nats/health`) for the connection and, optionally, its handlers.
 - [Testing utilities](./docs/testing.md) (`@loipv/nestjs-nats/testing`): mock clients and a harness that runs messages through your handlers without a NATS server.
@@ -34,7 +34,7 @@ Decorator-driven [NATS](https://nats.io) integration for [NestJS](https://nestjs
 | NestJS | `11.x` or `12.x` |
 | NATS client | `@nats-io/transport-node`, `@nats-io/jetstream`, `@nats-io/services` `3.x` |
 | NATS server | JetStream enabled, needed only for the JetStream consumers, `JetStreamClient` and `KvIdempotencyStore`. `publishAtomic()` needs `2.12` or later |
-| `@opentelemetry/api` | `^1.9.0`, optional: only for `@loipv/nestjs-nats/otel` |
+| `@opentelemetry/api` | `^1.9.0`, optional: only for `@loipv/nestjs-nats/otel` (tracing and metrics) |
 | `@nestjs/terminus` | `11.x` or `12.x`, optional: only for `@loipv/nestjs-nats/health` |
 | `@nats-io/kv` | `3.x`, optional: only for `@loipv/nestjs-nats/kv` |
 
@@ -114,6 +114,7 @@ Handlers can live in any provider or controller, in any module. The library find
 | [CloudEvents](./docs/cloudevents.md) | Publishing and receiving CloudEvents |
 | [Plugins](./docs/plugins.md) | Inbound and outbound plugins, observing outcomes |
 | [Tracing (OpenTelemetry)](./docs/tracing.md) | Spans, attributes, events and errors |
+| [Metrics (OpenTelemetry)](./docs/metrics.md) | Instruments, attributes, counting rules |
 | [Health checks](./docs/health.md) | Terminus health indicator, handler health, readiness and liveness |
 | [Testing](./docs/testing.md) | Mock clients, `NatsTestingModule` and `NatsTestHarness` |
 | [Errors](./docs/errors.md) | Error classes and reply codes |

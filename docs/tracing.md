@@ -2,6 +2,8 @@
 
 [Back to the README](../README.md)
 
+For metrics (duration, throughput, outcomes), see [Metrics](./metrics.md).
+
 `@loipv/nestjs-nats/otel` provides a plugin that traces every publish, request and delivery, and propagates the trace context in the message headers, so a trace continues from the producer to the consumer. It needs the `@opentelemetry/api` peer dependency (`^1.9.0`):
 
 ```bash

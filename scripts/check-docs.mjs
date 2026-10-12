@@ -116,6 +116,14 @@ declare module '@opentelemetry/sdk-node' {
     start(): void;
   }
 }
+declare module '@opentelemetry/exporter-metrics-otlp-http' {
+  export class OTLPMetricExporter {
+    constructor(options?: Record<string, unknown>);
+    export: import('@opentelemetry/sdk-metrics').PushMetricExporter['export'];
+    forceFlush(): Promise<void>;
+    shutdown(): Promise<void>;
+  }
+}
 declare module '@opentelemetry/exporter-trace-otlp-http' {
   export class OTLPTraceExporter {
     constructor(options?: Record<string, unknown>);
