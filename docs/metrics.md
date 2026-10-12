@@ -72,16 +72,16 @@ Histograms have the unit `s` and the buckets `0.005, 0.01, 0.025, 0.05, 0.075, 0
 | Attribute | On | Value |
 |---|---|---|
 | `messaging.system` | all | `nats` |
-| `messaging.operation.name` | all | `process` for inbound; `request` or `publish` for sent messages |
+| `messaging.operation.name` | all | `process` for inbound; `request` or `publish` for the sent metrics |
 | `nats.connection` | all | The connection name |
 | `nats.handler` | inbound | `<ClassName>.<methodName>` |
 | `nats.handler.kind` | inbound | `subscribe`, `consume`, `ordered` or `service-endpoint` |
 | `messaging.consumer.group.name` | inbound | The durable name of a `@Consume`, or the queue group of a `@Subscribe` that has one |
 | `nats.stream` | inbound, `consume` and `ordered` | The stream |
 | `nats.outcome` | `messaging.client.consumed.messages` | The `action` of the message's [outcome](./plugins.md#observing-outcomes): `ack`, `retry`, `dlq`, `term`, `drop`, `skipped`, `replied` or `none`. `unsettled` when the library did not settle the message |
-| `nats.publish.kind` | sent | `core` for `NatsClient.publish()`, `jetstream` or `request` |
-| `nats.dead_letter` | sent | `true` for a dead letter. Absent on other messages |
-| `error.type` | duration histograms; `messaging.client.consumed.messages` when the outcome has an error | The `name` of the error (`Error` subclasses), `_OTHER` for anything else, such as a thrown string |
+| `nats.publish.kind` | both sent metrics (`messaging.client.sent.messages`, `messaging.client.operation.duration`) | `core` for `NatsClient.publish()`, `jetstream` or `request` |
+| `nats.dead_letter` | both sent metrics | `true` for a dead letter. Absent on other messages |
+| `error.type` | `messaging.process.duration` when the handler pipeline threw; `messaging.client.consumed.messages` when the outcome has an error; both sent metrics when the send failed | The `name` of the error (`Error` subclasses), `_OTHER` for anything else, such as a thrown string |
 | `messaging.destination.name` | all, only with `subjects` | The subject, or what your function returns. The inbound histogram takes the subject of the first message of the delivery |
 
 ## Counting
