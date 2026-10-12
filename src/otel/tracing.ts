@@ -18,6 +18,7 @@ import { NatsOrderedContext } from '../context/nats-ordered-context.js';
 import { type Delivery, messageContexts } from '../pipeline/delivery.js';
 import { isReplyDelivery } from '../pipeline/reply.js';
 import type { NatsPlugin, Next, OutgoingMessage } from '../pipeline/types.js';
+import { consumerGroup } from './attributes.js';
 import { extractContext, headerValues, msgHdrsSetter } from './carrier.js';
 
 export interface TracingOptions {
@@ -55,17 +56,6 @@ function captureHeaders(attributes: Attributes, h: MsgHdrs | undefined, names: s
     if (values.length === 0) continue;
     attributes[`messaging.header.${name.toLowerCase()}`] =
       values.length === 1 ? (values[0] as string) : values;
-  }
-}
-
-function consumerGroup(d: Delivery): string | undefined {
-  switch (d.handler.kind) {
-    case 'consume':
-      return d.handler.durable;
-    case 'subscribe':
-      return d.handler.queue;
-    default:
-      return undefined;
   }
 }
 

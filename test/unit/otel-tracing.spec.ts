@@ -165,11 +165,12 @@ function outgoing(kind: OutgoingMessage['kind'], h: MsgHdrs = headers()): Outgoi
 }
 
 it('exports the otel subpath API', () => {
-  expect(Object.keys(otelApi).sort()).toEqual(['tracing']);
+  expect(Object.keys(otelApi).sort()).toEqual(['metrics', 'tracing']);
   expectTypeOf<TracingOptions>().toEqualTypeOf<{
     tracerName?: string;
     captureHeaders?: string[];
   }>();
+  expectTypeOf<otelApi.MetricsOptions>().toHaveProperty('subjects');
 });
 
 describe('tracing()', () => {
