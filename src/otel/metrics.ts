@@ -7,7 +7,7 @@ import {
   metrics as metricsApi,
 } from '@opentelemetry/api';
 import type { Delivery } from '../pipeline/delivery.js';
-import type { NatsPlugin, Next } from '../pipeline/types.js';
+import type { NatsPlugin, Next, OutgoingMessage } from '../pipeline/types.js';
 import { consumerGroup } from './attributes.js';
 
 export interface MetricsOptions {
@@ -93,7 +93,8 @@ export function subjectResolver(
 const seconds = (start: number): number => (performance.now() - start) / 1000;
 
 /**
- * OpenTelemetry metrics plugin. Inbound deliveries record `messaging.process.duration` and
+ * OpenTelemetry metrics plugin. Outbound sends record `messaging.client.sent.messages` and
+ * `messaging.client.operation.duration`. Inbound deliveries record `messaging.process.duration` and
  * count each message by outcome in `messaging.client.consumed.messages`. Without an
  * OpenTelemetry SDK registered, it does nothing.
  */
@@ -147,6 +148,32 @@ export function metrics(options: MetricsOptions = {}): NatsPlugin {
               ...(error !== undefined ? { 'error.type': errorType(error) } : {}),
             });
           }
+        }
+      },
+    },
+    outbound: {
+      async handle(m: OutgoingMessage, next: Next): Promise<void> {
+        const start = performance.now();
+        let failure: { err: unknown } | undefined;
+        try {
+          await next();
+        } catch (err) {
+          failure = { err };
+          throw err;
+        } finally {
+          const subject = subjectOf(m.subject);
+          const attributes: Attributes = {
+            'messaging.system': 'nats',
+            'messaging.operation.name': m.kind === 'request' ? 'request' : 'publish',
+            'nats.connection': m.connection,
+            'nats.publish.kind': m.kind === 'publish' ? 'core' : m.kind,
+            ...(subject !== undefined ? { 'messaging.destination.name': subject } : {}),
+            ...(m.deadLetter ? { 'nats.dead_letter': true } : {}),
+            ...(failure ? { 'error.type': errorType(failure.err) } : {}),
+          };
+          const { sent, operationDuration } = instruments();
+          sent.add(1, attributes);
+          operationDuration.record(seconds(start), attributes);
         }
       },
     },

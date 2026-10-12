@@ -5,6 +5,7 @@ import { jsonCodec } from '../../src/codec/codec.js';
 import { NatsBatchContext } from '../../src/context/nats-batch-context.js';
 import { NatsContext, NatsJetStreamContext } from '../../src/context/nats-context.js';
 import { NatsOrderedContext } from '../../src/context/nats-ordered-context.js';
+import { NatsModuleError } from '../../src/errors/errors.js';
 import { type MetricsOptions, metrics } from '../../src/otel/index.js';
 import type {
   Delivery,
@@ -12,7 +13,7 @@ import type {
   InboundMessage,
   MessageOutcome,
 } from '../../src/pipeline/delivery.js';
-import type { NatsPlugin } from '../../src/pipeline/types.js';
+import type { NatsPlugin, OutgoingMessage } from '../../src/pipeline/types.js';
 import { setupMetrics, type TestMetrics } from '../support/otel.js';
 
 const enc = new TextEncoder();
@@ -390,5 +391,125 @@ describe('metrics()', () => {
     t = setupMetrics();
     await handle(metrics(), delivery(consumeHandler, [jsPart()]));
     expect(await t.scopes()).toEqual(['@loipv/nestjs-nats']);
+  });
+});
+
+describe('metrics() outbound', () => {
+  let t: TestMetrics;
+  const SENT = 'messaging.client.sent.messages';
+  const OPERATION = 'messaging.client.operation.duration';
+
+  beforeEach(() => {
+    t = setupMetrics();
+  });
+  afterEach(async () => {
+    await t.shutdown();
+    vi.restoreAllMocks();
+  });
+
+  const outgoing = (kind: OutgoingMessage['kind']): OutgoingMessage => ({
+    kind,
+    connection: 'default',
+    subject: 'o.c',
+    data: { id: 1 },
+    headers: undefined as never,
+    codec: jsonCodec(),
+  });
+
+  const send = (
+    plugin: NatsPlugin,
+    m: OutgoingMessage,
+    next: () => Promise<void> = async () => {},
+  ): Promise<void> => (plugin.outbound as NonNullable<NatsPlugin['outbound']>).handle(m, next);
+
+  const count = (v: unknown): number => (v as HistogramValue).count;
+
+  it.each([
+    ['publish', 'publish', 'core'],
+    ['jetstream', 'publish', 'jetstream'],
+    ['request', 'request', 'request'],
+  ] as const)('counts and times a sent message (%s)', async (kind, op, publishKind) => {
+    await send(metrics(), outgoing(kind));
+    const attributes = {
+      'messaging.system': 'nats',
+      'messaging.operation.name': op,
+      'nats.connection': 'default',
+      'nats.publish.kind': publishKind,
+    };
+    const sent = await t.points(SENT);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.value).toBe(1);
+    expect(sent[0]?.attributes).toEqual(attributes);
+    const timed = await t.points(OPERATION);
+    expect(timed).toHaveLength(1);
+    expect(count(timed[0]?.value)).toBe(1);
+    expect(timed[0]?.attributes).toEqual(attributes);
+  });
+
+  it('marks dead letters', async () => {
+    const m = outgoing('jetstream');
+    m.deadLetter = { subject: 'o.c', handler: consumeHandler, error: new Error() };
+    await send(metrics(), m);
+    expect((await t.points(SENT))[0]?.attributes).toHaveProperty('nats.dead_letter', true);
+    expect((await t.points(OPERATION))[0]?.attributes).toHaveProperty('nats.dead_letter', true);
+  });
+
+  it('records the error of next() and rethrows it', async () => {
+    const err = new NatsModuleError('boom');
+    await expect(send(metrics(), outgoing('publish'), () => Promise.reject(err))).rejects.toBe(err);
+    for (const name of [SENT, OPERATION]) {
+      const points = await t.points(name);
+      expect(points).toHaveLength(1);
+      expect(points[0]?.attributes).toHaveProperty('error.type', 'NatsModuleError');
+    }
+  });
+
+  it('marks a failed dead letter', async () => {
+    const m = outgoing('jetstream');
+    m.deadLetter = { subject: 'o.c', handler: consumeHandler, error: new Error() };
+    await expect(
+      send(metrics(), m, () => Promise.reject(new NatsModuleError('x'))),
+    ).rejects.toBeInstanceOf(NatsModuleError);
+    for (const name of [SENT, OPERATION]) {
+      expect((await t.points(name))[0]?.attributes).toMatchObject({
+        'nats.dead_letter': true,
+        'error.type': 'NatsModuleError',
+      });
+    }
+  });
+
+  it('counts each message of an atomic batch', async () => {
+    const plugin = metrics();
+    for (let i = 0; i < 3; i++) {
+      const m = outgoing('jetstream');
+      m.atomic = { index: i, count: 3 };
+      await send(plugin, m);
+    }
+    const sent = await t.points(SENT);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.value).toBe(3);
+  });
+
+  it('records nothing while next() is pending', async () => {
+    void send(metrics(), outgoing('publish'), () => new Promise<void>(() => {}));
+    await Promise.resolve();
+    expect(await t.points(SENT)).toEqual([]);
+    expect(await t.points(OPERATION)).toEqual([]);
+  });
+
+  it('applies subjects to outbound', async () => {
+    await send(metrics({ subjects: true }), outgoing('publish'));
+    expect((await t.points(SENT))[0]?.attributes).toHaveProperty(
+      'messaging.destination.name',
+      'o.c',
+    );
+    expect((await t.points(OPERATION))[0]?.attributes).toHaveProperty(
+      'messaging.destination.name',
+      'o.c',
+    );
+    await t.shutdown();
+    t = setupMetrics();
+    await send(metrics(), outgoing('publish'));
+    expect((await t.points(SENT))[0]?.attributes).not.toHaveProperty('messaging.destination.name');
   });
 });
