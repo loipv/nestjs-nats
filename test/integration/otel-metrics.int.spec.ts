@@ -96,11 +96,17 @@ describe('OpenTelemetry metrics', () => {
   });
 
   it('counts a JetStream publish as sent', async () => {
+    const jetstreamSent = async () =>
+      (await sent())
+        .filter(
+          (p) =>
+            p.attributes['nats.publish.kind'] === 'jetstream' && !p.attributes['nats.dead_letter'],
+        )
+        .reduce((sum, p) => sum + (p.value as number), 0);
+    const before = await jetstreamSent();
     await js.publish('mtr.ok', { id: 3 });
     await eventually(async () => {
-      expect((await sent()).some((p) => p.attributes['nats.publish.kind'] === 'jetstream')).toBe(
-        true,
-      );
+      expect(await jetstreamSent()).toBe(before + 1);
     });
   });
 });
