@@ -121,6 +121,7 @@ Ghi `start`, `await next()`, rồi trong `finally` ghi counter và histogram (k�
 
 - Plugin không đổi kết quả của pipeline: không nuốt lỗi và không thêm lỗi.
 - Nếu hàm `subjects` ném lỗi, plugin bỏ `messaging.destination.name` cho lần ghi đó và báo qua `diag.warn` một lần cho mỗi instance plugin.
+- Nếu việc ghi metric tự ném lỗi (ví dụ `subjects` trả về giá trị SDK không băm được, hoặc meter provider lỗi), plugin bỏ lỗi đó và báo qua `diag.warn` một lần cho mỗi instance plugin; kết quả của `next()` giữ nguyên.
 
 ## 6. Thành phần
 

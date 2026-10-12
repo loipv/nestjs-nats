@@ -33,7 +33,7 @@ interface Instruments {
 }
 
 /** `err.name` for an `Error` with a name, `_OTHER` for anything else. */
-export function errorType(err: unknown): string {
+function errorType(err: unknown): string {
   return err instanceof Error && err.name !== '' ? err.name : '_OTHER';
 }
 
@@ -42,7 +42,7 @@ export function errorType(err: unknown): string {
  * taken before the SDK registers stays a noop), so the instruments of one provider are
  * cached and rebuilt when `getMeterProvider()` returns another one.
  */
-export function instrumentCache(meterName: string): () => Instruments {
+function instrumentCache(meterName: string): () => Instruments {
   let slot: { provider: MeterProvider; instruments: Instruments } | undefined;
   return () => {
     const provider = metricsApi.getMeterProvider();
@@ -70,7 +70,7 @@ export function instrumentCache(meterName: string): () => Instruments {
  * Returns the `messaging.destination.name` value for `subject`, or `undefined` when subjects
  * are off, the function returns nothing, or it throws (warned once per helper).
  */
-export function subjectResolver(
+function subjectResolver(
   subjects: MetricsOptions['subjects'],
 ): (subject: string) => string | undefined {
   if (typeof subjects === 'function') {
@@ -101,6 +101,18 @@ const seconds = (start: number): number => (performance.now() - start) / 1000;
 export function metrics(options: MetricsOptions = {}): NatsPlugin {
   const instruments = instrumentCache(options.meterName ?? DEFAULT_METER_NAME);
   const subjectOf = subjectResolver(options.subjects);
+  let warned = false;
+  /** Recording must never change what `next()` did: a throw is warned once and dropped. */
+  const safely = (record: () => void): void => {
+    try {
+      record();
+    } catch (err) {
+      if (!warned) {
+        warned = true;
+        diag.warn('@loipv/nestjs-nats metrics: recording failed', err);
+      }
+    }
+  };
 
   return {
     name: 'otel-metrics',
@@ -115,39 +127,41 @@ export function metrics(options: MetricsOptions = {}): NatsPlugin {
           failure = { err };
           throw err;
         } finally {
-          const common: Attributes = {
-            'messaging.system': 'nats',
-            'messaging.operation.name': 'process',
-            'nats.connection': d.handler.connection,
-            'nats.handler': `${d.handler.className}.${d.handler.methodName}`,
-            'nats.handler.kind': d.handler.kind,
-          };
-          const group = consumerGroup(d);
-          if (group !== undefined) common['messaging.consumer.group.name'] = group;
-          if (d.handler.kind === 'consume' || d.handler.kind === 'ordered') {
-            common['nats.stream'] = d.handler.stream;
-          }
-          const { processDuration, consumed } = instruments();
+          safely(() => {
+            const common: Attributes = {
+              'messaging.system': 'nats',
+              'messaging.operation.name': 'process',
+              'nats.connection': d.handler.connection,
+              'nats.handler': `${d.handler.className}.${d.handler.methodName}`,
+              'nats.handler.kind': d.handler.kind,
+            };
+            const group = consumerGroup(d);
+            if (group !== undefined) common['messaging.consumer.group.name'] = group;
+            if (d.handler.kind === 'consume' || d.handler.kind === 'ordered') {
+              common['nats.stream'] = d.handler.stream;
+            }
+            const { processDuration, consumed } = instruments();
 
-          const first = d.messages[0];
-          const firstSubject = first ? subjectOf(first.subject) : undefined;
-          processDuration.record(seconds(start), {
-            ...common,
-            ...(firstSubject !== undefined ? { 'messaging.destination.name': firstSubject } : {}),
-            ...(failure ? { 'error.type': errorType(failure.err) } : {}),
-          });
-
-          for (const message of d.messages) {
-            const outcome = d.outcomes.get(message);
-            const subject = subjectOf(message.subject);
-            const error = outcome && 'error' in outcome ? outcome.error : undefined;
-            consumed.add(1, {
+            const first = d.messages[0];
+            const firstSubject = first ? subjectOf(first.subject) : undefined;
+            processDuration.record(seconds(start), {
               ...common,
-              ...(subject !== undefined ? { 'messaging.destination.name': subject } : {}),
-              'nats.outcome': outcome?.action ?? 'unsettled',
-              ...(error !== undefined ? { 'error.type': errorType(error) } : {}),
+              ...(firstSubject !== undefined ? { 'messaging.destination.name': firstSubject } : {}),
+              ...(failure ? { 'error.type': errorType(failure.err) } : {}),
             });
-          }
+
+            for (const message of d.messages) {
+              const outcome = d.outcomes.get(message);
+              const subject = subjectOf(message.subject);
+              const error = outcome && 'error' in outcome ? outcome.error : undefined;
+              consumed.add(1, {
+                ...common,
+                ...(subject !== undefined ? { 'messaging.destination.name': subject } : {}),
+                'nats.outcome': outcome?.action ?? 'unsettled',
+                ...(error !== undefined ? { 'error.type': errorType(error) } : {}),
+              });
+            }
+          });
         }
       },
     },
@@ -161,19 +175,21 @@ export function metrics(options: MetricsOptions = {}): NatsPlugin {
           failure = { err };
           throw err;
         } finally {
-          const subject = subjectOf(m.subject);
-          const attributes: Attributes = {
-            'messaging.system': 'nats',
-            'messaging.operation.name': m.kind === 'request' ? 'request' : 'publish',
-            'nats.connection': m.connection,
-            'nats.publish.kind': m.kind === 'publish' ? 'core' : m.kind,
-            ...(subject !== undefined ? { 'messaging.destination.name': subject } : {}),
-            ...(m.deadLetter ? { 'nats.dead_letter': true } : {}),
-            ...(failure ? { 'error.type': errorType(failure.err) } : {}),
-          };
-          const { sent, operationDuration } = instruments();
-          sent.add(1, attributes);
-          operationDuration.record(seconds(start), attributes);
+          safely(() => {
+            const subject = subjectOf(m.subject);
+            const attributes: Attributes = {
+              'messaging.system': 'nats',
+              'messaging.operation.name': m.kind === 'request' ? 'request' : 'publish',
+              'nats.connection': m.connection,
+              'nats.publish.kind': m.kind === 'publish' ? 'core' : m.kind,
+              ...(subject !== undefined ? { 'messaging.destination.name': subject } : {}),
+              ...(m.deadLetter ? { 'nats.dead_letter': true } : {}),
+              ...(failure ? { 'error.type': errorType(failure.err) } : {}),
+            };
+            const { sent, operationDuration } = instruments();
+            sent.add(1, attributes);
+            operationDuration.record(seconds(start), attributes);
+          });
         }
       },
     },

@@ -8,7 +8,7 @@
 npm install @opentelemetry/api
 ```
 
-**Setting up OpenTelemetry is your job.** The plugin only uses the API. Register a meter provider with a metric reader before the application starts. `NodeSDK` from `@opentelemetry/sdk-node` does it when you give it a `metricReader`. Without a registered SDK the plugin does nothing. The example below uses the Node SDK and the OTLP HTTP exporter, next to the [tracing](./tracing.md) plugin:
+**Setting up OpenTelemetry is your job.** The plugin only uses the API. Register a meter provider with a metric reader before the application starts. `NodeSDK` from `@opentelemetry/sdk-node` does it when you give it `metricReaders`. Without a registered SDK the plugin does nothing. The example below uses the Node SDK and the OTLP HTTP exporter, next to the [tracing](./tracing.md) plugin:
 
 ```bash
 npm install @opentelemetry/sdk-node @opentelemetry/sdk-metrics @opentelemetry/exporter-metrics-otlp-http
@@ -24,7 +24,7 @@ import { metrics, tracing } from '@loipv/nestjs-nats/otel';
 // Start the SDK before the application is created.
 const sdk = new NodeSDK({
   serviceName: 'orders-service',
-  metricReader: new PeriodicExportingMetricReader({ exporter: new OTLPMetricExporter() }),
+  metricReaders: [new PeriodicExportingMetricReader({ exporter: new OTLPMetricExporter() })],
 });
 sdk.start();
 
@@ -76,22 +76,23 @@ Histograms have the unit `s` and the buckets `0.005, 0.01, 0.025, 0.05, 0.075, 0
 | `nats.connection` | all | The connection name |
 | `nats.handler` | inbound | `<ClassName>.<methodName>` |
 | `nats.handler.kind` | inbound | `subscribe`, `consume`, `ordered` or `service-endpoint` |
-| `messaging.consumer.group.name` | inbound | The durable name of a `@Consume`, or the queue group of a `@Subscribe` that has one |
+| `messaging.consumer.group.name` | inbound | The durable name of a `@Consume` or `@ConsumePush`, or the queue group of a `@Subscribe` that has one |
 | `nats.stream` | inbound, `consume` and `ordered` | The stream |
 | `nats.outcome` | `messaging.client.consumed.messages` | The `action` of the message's [outcome](./plugins.md#observing-outcomes): `ack`, `retry`, `dlq`, `term`, `drop`, `skipped`, `replied` or `none`. `unsettled` when the library did not settle the message |
-| `nats.publish.kind` | both sent metrics (`messaging.client.sent.messages`, `messaging.client.operation.duration`) | `core` for `NatsClient.publish()`, `jetstream` or `request` |
+| `nats.publish.kind` | both sent metrics (`messaging.client.sent.messages`, `messaging.client.operation.duration`) | `core` for core NATS publishes (`NatsClient.publish()` and dead letters with `dlq.mode: 'core'`), `jetstream` or `request` |
 | `nats.dead_letter` | both sent metrics | `true` for a dead letter. Absent on other messages |
-| `error.type` | `messaging.process.duration` when the handler pipeline threw; `messaging.client.consumed.messages` when the outcome has an error; both sent metrics when the send failed | The `name` of the error (`Error` subclasses), `_OTHER` for anything else, such as a thrown string |
+| `error.type` | `messaging.process.duration` only when the pipeline itself failed (for example a plugin threw or `next()` rejected), not when the handler threw, because settlement absorbs handler errors and they appear on `messaging.client.consumed.messages` through the outcome's error; `messaging.client.consumed.messages` when the outcome has an error; both sent metrics when the send failed | The `name` of the error (`Error` subclasses), `_OTHER` for anything else, such as a thrown string |
 | `messaging.destination.name` | all, only with `subjects` | The subject, or what your function returns. The inbound histogram takes the subject of the first message of the delivery |
 
 ## Counting
 
 - Every attempt is counted once. A retry (a JetStream redelivery, an in-process retry of a core message, an in-place retry of an ordered consumer) is a new delivery.
 - A message skipped by [idempotency](./idempotency.md) is counted with `nats.outcome` `skipped`.
-- A dead letter is counted on the sending side, with `nats.dead_letter` `true`, as well as with outcome `dlq` on the receiving side.
+- A dead letter is counted on the sending side, with `nats.dead_letter` `true`, as well as with outcome `dlq` on the receiving side. Every dead-letter publish attempt is counted: an ordered consumer retries the dead-letter publish in place, and a JetStream redelivery dead-letters again, so `messaging.client.sent.messages` with `nats.dead_letter` `true` can exceed the number of dead-lettered messages. Failed attempts carry `error.type`: filter it out to count the successful dead letters.
 - Each message of a `publishAtomic()` batch is counted on its own, and its duration lasts until the batch settles.
 - A plugin after `metrics()` that never passes a message on: nothing is recorded for it, because the plugin is still waiting. The same holds for the `tracing()` spans.
-- The plugin never swallows or adds errors: a failure is recorded, then rethrown as it was.
+- A plugin after `metrics()` that returns without calling `next()` (it drops the message) still has the message counted as sent, without `error.type`. That includes dead letters the library reports as dropped. If that matters, list `metrics()` after the plugins that filter messages.
+- The plugin never swallows or adds errors: a failure is recorded, then rethrown as it was. If recording itself throws (for example a `subjects` function that returns a value the SDK cannot hash, or a failing meter provider), the error is dropped, and reported once per plugin instance through the OpenTelemetry `diag` logger.
 
 ## Created before the SDK
 

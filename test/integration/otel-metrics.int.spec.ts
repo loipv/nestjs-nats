@@ -88,7 +88,9 @@ describe('OpenTelemetry metrics', () => {
   it('counts a replied request as consumed and sent', async () => {
     expect(await client.request('mtr.get', { id: 2 })).toEqual({ id: 2 });
     await eventually(async () => {
-      expect((await consumed('replied')).length).toBeGreaterThan(0);
+      const replied = await consumed('replied');
+      expect(replied.length).toBeGreaterThan(0);
+      expect(replied[0]?.attributes['nats.handler']).toBe('Handlers.onGet');
       expect((await sent()).some((p) => p.attributes['nats.publish.kind'] === 'request')).toBe(
         true,
       );
