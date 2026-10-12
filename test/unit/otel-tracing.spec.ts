@@ -170,7 +170,10 @@ it('exports the otel subpath API', () => {
     tracerName?: string;
     captureHeaders?: string[];
   }>();
-  expectTypeOf<otelApi.MetricsOptions>().toHaveProperty('subjects');
+  expectTypeOf<otelApi.MetricsOptions>().toEqualTypeOf<{
+    meterName?: string;
+    subjects?: boolean | ((subject: string) => string | undefined);
+  }>();
 });
 
 describe('tracing()', () => {

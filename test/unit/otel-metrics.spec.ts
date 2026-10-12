@@ -1,4 +1,4 @@
-import type { MsgHdrs } from '@nats-io/transport-node';
+import { headers, type MsgHdrs } from '@nats-io/transport-node';
 import { diag, metrics as metricsApi } from '@opentelemetry/api';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { jsonCodec } from '../../src/codec/codec.js';
@@ -384,6 +384,24 @@ describe('metrics()', () => {
     expect((points[0]?.value as HistogramValue | undefined)?.count).toBe(1);
   });
 
+  it('records the duration in seconds', async () => {
+    vi.spyOn(performance, 'now').mockReturnValueOnce(1000).mockReturnValueOnce(1500);
+    await run(delivery(consumeHandler, [jsPart()]), [{ action: 'ack' }]);
+    const points = await t.points(PROCESS);
+    expect((points[0]?.value as HistogramValue | undefined)?.sum).toBe(0.5);
+  });
+
+  it('does not let a recording failure change the outcome of next()', async () => {
+    const warn = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+    const plugin = metrics({ subjects: (() => 1n) as never });
+    await expect(handle(plugin, delivery(consumeHandler, [jsPart()]))).resolves.toBeUndefined();
+    const err = new RangeError('boom');
+    await expect(
+      handle(plugin, delivery(consumeHandler, [jsPart()]), () => Promise.reject(err)),
+    ).rejects.toBe(err);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
   it('uses meterName', async () => {
     await handle(metrics({ meterName: 'x' }), delivery(consumeHandler, [jsPart()]));
     expect(await t.scopes()).toEqual(['x']);
@@ -412,7 +430,7 @@ describe('metrics() outbound', () => {
     connection: 'default',
     subject: 'o.c',
     data: { id: 1 },
-    headers: undefined as never,
+    headers: headers(),
     codec: jsonCodec(),
   });
 
@@ -488,13 +506,32 @@ describe('metrics() outbound', () => {
     const sent = await t.points(SENT);
     expect(sent).toHaveLength(1);
     expect(sent[0]?.value).toBe(3);
+    const timed = await t.points(OPERATION);
+    expect(timed).toHaveLength(1);
+    expect(count(timed[0]?.value)).toBe(3);
   });
 
   it('records nothing while next() is pending', async () => {
     void send(metrics(), outgoing('publish'), () => new Promise<void>(() => {}));
-    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
     expect(await t.points(SENT)).toEqual([]);
     expect(await t.points(OPERATION)).toEqual([]);
+  });
+
+  it('records the duration in seconds', async () => {
+    vi.spyOn(performance, 'now').mockReturnValueOnce(1000).mockReturnValueOnce(1500);
+    await send(metrics(), outgoing('publish'));
+    const points = await t.points(OPERATION);
+    expect((points[0]?.value as HistogramValue | undefined)?.sum).toBe(0.5);
+  });
+
+  it('does not let a recording failure change the outcome of next()', async () => {
+    const warn = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+    const plugin = metrics({ subjects: (() => 1n) as never });
+    await expect(send(plugin, outgoing('publish'))).resolves.toBeUndefined();
+    const err = new NatsModuleError('boom');
+    await expect(send(plugin, outgoing('publish'), () => Promise.reject(err))).rejects.toBe(err);
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 
   it('applies subjects to outbound', async () => {
