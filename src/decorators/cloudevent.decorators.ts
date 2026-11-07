@@ -5,7 +5,7 @@ import type { IdempotencyOptions } from '../idempotency/idempotency.js';
 import type { DlqOptions } from '../settlement/dlq.js';
 import type { RetryOptions } from '../settlement/retry.js';
 import { NATS_CLOUD_EVENT_ROUTER_METADATA, NATS_ON_CLOUD_EVENT_METADATA } from './constants.js';
-import type { OrderedDeliverPolicy } from './handler.decorators.js';
+import type { HandlerDisabled, OrderedDeliverPolicy } from './handler.decorators.js';
 
 /**
  * Options of `@CloudEventRouter`: exactly one source for the whole class, plus what to do
@@ -47,6 +47,11 @@ export type CloudEventRouterOptions = (
   retry?: RetryOptions | false;
   dlq?: DlqOptions | boolean;
   idempotency?: boolean | IdempotencyOptions;
+  /**
+   * Skips the router and all its `@OnCloudEvent` routes: nothing subscribes, consumes or
+   * validates it. A function is called at application startup. Default `false`.
+   */
+  disabled?: HandlerDisabled;
 };
 
 /**

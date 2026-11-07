@@ -407,6 +407,31 @@ describe('NatsTestingModule', () => {
     await moduleRef.close();
   });
 
+  it('does not dispatch to a disabled handler, as bootstrap would not start it', async () => {
+    @Injectable()
+    class Toggled {
+      @Subscribe('off', { disabled: () => true })
+      off() {}
+
+      @Subscribe('on', { disabled: false })
+      on(@Payload() p: number) {
+        return p + 1;
+      }
+    }
+    const moduleRef = await Test.createTestingModule({
+      imports: [NatsTestingModule.forRoot({ logger: false })],
+      providers: [Toggled],
+    }).compile();
+    const h = NatsTestHarness.create(moduleRef);
+    await expect(h.dispatch({ handler: 'Toggled.off' }, 1)).rejects.toThrow(
+      'NATS handler Toggled.off is disabled',
+    );
+    await expect(h.dispatch({ subject: 'off' }, 1)).rejects.toThrow(/No NATS handler matches/);
+    const r = await h.dispatch({ handler: 'Toggled.on' }, 1, { request: true });
+    expect(r.reply).toEqual({ data: 2 });
+    await moduleRef.close();
+  });
+
   it('registers named connections without class aliases', async () => {
     @Injectable()
     class Other {

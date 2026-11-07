@@ -14,6 +14,12 @@ import {
   NATS_SUBSCRIBE_METADATA,
 } from './constants.js';
 
+/**
+ * Whether a handler is skipped: a boolean, or a function called at application startup
+ * (decorator arguments are evaluated at import time, before configuration is loaded).
+ */
+export type HandlerDisabled = boolean | (() => boolean);
+
 export interface SubscribeOptions {
   connection?: string;
   queue?: string;
@@ -27,6 +33,12 @@ export interface SubscribeOptions {
    * `@Ctx() ctx: NatsBatchContext`); a batch never replies.
    */
   batch?: BatchOptions;
+  /**
+   * Skips this handler: nothing subscribes, consumes or validates it, as if the decorator
+   * were absent. A function is called at application startup, after configuration
+   * (e.g. `.env`) is loaded. Default `false`.
+   */
+  disabled?: HandlerDisabled;
 }
 
 export interface ConsumeOptions {
@@ -45,6 +57,12 @@ export interface ConsumeOptions {
    * `@Ctx() ctx: NatsBatchContext`). Not allowed with `ack: 'manual'`.
    */
   batch?: BatchOptions;
+  /**
+   * Skips this handler: nothing subscribes, consumes or validates it, as if the decorator
+   * were absent. A function is called at application startup, after configuration
+   * (e.g. `.env`) is loaded. Default `false`.
+   */
+  disabled?: HandlerDisabled;
 }
 
 /**
@@ -82,6 +100,12 @@ export interface ConsumeOrderedOptions {
   retry?: RetryOptions | false;
   dlq?: DlqOptions | boolean;
   idempotency?: boolean | IdempotencyOptions;
+  /**
+   * Skips this handler: nothing subscribes, consumes or validates it, as if the decorator
+   * were absent. A function is called at application startup, after configuration
+   * (e.g. `.env`) is loaded. Default `false`.
+   */
+  disabled?: HandlerDisabled;
 }
 
 export interface NatsServiceOptions {
@@ -91,6 +115,8 @@ export interface NatsServiceOptions {
   queue?: string;
   metadata?: Record<string, string>;
   connection?: string;
+  /** Skips every endpoint of the service; see `SubscribeOptions.disabled`. */
+  disabled?: HandlerDisabled;
 }
 
 export interface ServiceEndpointOptions {
@@ -98,6 +124,8 @@ export interface ServiceEndpointOptions {
   queue?: string;
   metadata?: Record<string, string>;
   codec?: Codec;
+  /** Skips this endpoint; see `SubscribeOptions.disabled`. */
+  disabled?: HandlerDisabled;
 }
 
 export function Subscribe(subject: string, options?: SubscribeOptions): MethodDecorator {

@@ -20,12 +20,14 @@ import type {
   ConsumeOptions,
   ConsumeOrderedOptions,
   ConsumePushOptions,
+  HandlerDisabled,
   NatsServiceOptions,
   ServiceEndpointOptions,
   SubscribeOptions,
 } from '../decorators/handler.decorators.js';
 import { NatsConfigError, NatsModuleError } from '../errors/errors.js';
 import { DEFAULT_CONNECTION } from '../module/tokens.js';
+import { errorMessage } from '../util/errors.js';
 import { NatsArgumentsHost } from './nats-arguments-host.js';
 import { NatsParamsFactory } from './nats-params-factory.js';
 
@@ -70,6 +72,20 @@ type HandlerSpec =
 
 export type HandlerDefinition = HandlerBase & HandlerSpec;
 
+/** A handler skipped by its `disabled` option (or its `@NatsService`'s). */
+export interface DisabledHandler {
+  kind: HandlerKind;
+  className: string;
+  /** The method name; `'@CloudEventRouter'` for a CloudEvent router. */
+  methodName: string;
+  connection: string;
+}
+
+export interface ExploreOptions {
+  /** Called for each handler skipped because it is disabled. */
+  onDisabled?: (handler: DisabledHandler) => void;
+}
+
 export const ROUTER_METHOD_NAME = '@CloudEventRouter';
 
 const UNMATCHED_POLICIES: ReadonlyArray<CloudEventRouting['unmatched']> = ['ack', 'term', 'dlq'];
@@ -99,10 +115,11 @@ export class HandlerExplorer {
    * providers, and `@ServiceEndpoint` methods of classes without `@NatsService`, are
    * included (with their current instance) so validation can reject them.
    * `useExisting` aliases are skipped and an instance reachable through several wrappers
-   * (other modules, other tokens) is explored once. Throws a `NatsConfigError` for an
-   * invalid `@CloudEventRouter`/`@OnCloudEvent` setup.
+   * (other modules, other tokens) is explored once. Disabled handlers are left out (and
+   * reported to `onDisabled`); their `disabled` functions are called on every call. Throws a
+   * `NatsConfigError` for an invalid `@CloudEventRouter`/`@OnCloudEvent` setup or `disabled`.
    */
-  explore(): HandlerDefinition[] {
+  explore(options: ExploreOptions = {}): HandlerDefinition[] {
     const wrappers = [...this.discovery.getProviders(), ...this.discovery.getControllers()];
     const seen = new Set<object>();
     const out: HandlerDefinition[] = [];
@@ -119,6 +136,9 @@ export class HandlerExplorer {
         NATS_CLOUD_EVENT_ROUTER_METADATA,
         instance.constructor,
       );
+      const className = instance.constructor.name;
+      const serviceDisabled =
+        service !== undefined && isDisabled(service.disabled, `@NatsService ${className}`);
       const routes: Array<{ pattern: string; methodName: string }> = [];
       const prototype = Object.getPrototypeOf(instance) as object;
       for (const methodName of this.scanner.getAllMethodNames(prototype)) {
@@ -140,10 +160,32 @@ export class HandlerExplorer {
           for (const pattern of patterns) routes.push({ pattern, methodName });
         }
         for (const spec of specs) {
+          const disabled =
+            isDisabled(spec.options.disabled, `NATS handler ${className}.${methodName}`) ||
+            (spec.kind === 'service-endpoint' && serviceDisabled);
+          if (disabled) {
+            options.onDisabled?.({
+              kind: spec.kind,
+              className,
+              methodName,
+              connection: connectionOf(spec, service),
+            });
+            continue;
+          }
           out.push(this.define(wrapper, instance, methodName, spec, service));
         }
       }
-      if (routerOptions) out.push(this.defineRouter(wrapper, instance, routerOptions, routes));
+      if (!routerOptions) continue;
+      if (isDisabled(routerOptions.disabled, `@CloudEventRouter ${className}`)) {
+        options.onDisabled?.({
+          kind: routerKind(routerOptions),
+          className,
+          methodName: ROUTER_METHOD_NAME,
+          connection: routerOptions.connection ?? DEFAULT_CONNECTION,
+        });
+        continue;
+      }
+      out.push(this.defineRouter(wrapper, instance, routerOptions, routes));
     }
     return out;
   }
@@ -334,13 +376,9 @@ export class HandlerExplorer {
     service: NatsServiceOptions | undefined,
   ): HandlerDefinition {
     const invoke = this.wrap(instance, methodName);
-    const connection =
-      ('connection' in spec.options ? spec.options.connection : undefined) ??
-      service?.connection ??
-      DEFAULT_CONNECTION;
     return {
       ...spec,
-      connection,
+      connection: connectionOf(spec, service),
       className: instance.constructor.name,
       methodName,
       instance,
@@ -414,6 +452,51 @@ interface FiltersContextCreator {
     callback: (...args: unknown[]) => unknown,
     moduleKey: string,
   ): ExceptionFilters | undefined;
+}
+
+/** The connection a handler receives from. */
+function connectionOf(spec: HandlerSpec, service: NatsServiceOptions | undefined): string {
+  return (
+    ('connection' in spec.options ? spec.options.connection : undefined) ??
+    service?.connection ??
+    DEFAULT_CONNECTION
+  );
+}
+
+/** The kind of the definition a router would have; `'subscribe'` when it sets no source. */
+function routerKind(options: CloudEventRouterOptions): HandlerKind {
+  if ('consume' in options || 'consumePush' in options) return 'consume';
+  if ('consumeOrdered' in options) return 'ordered';
+  return 'subscribe';
+}
+
+/**
+ * Resolves a `disabled` option: `false` when unset, the boolean, or what the function returns.
+ * Throws a `NatsConfigError` naming `label` when the function throws or the value is not a
+ * boolean.
+ */
+function isDisabled(value: HandlerDisabled | undefined, label: string): boolean {
+  if (value === undefined) return false;
+  let resolved: unknown = value;
+  if (typeof value === 'function') {
+    try {
+      resolved = value();
+    } catch (err) {
+      throw new NatsConfigError(`${label} failed to resolve disabled: ${errorMessage(err)}`, {
+        cause: err,
+      });
+    }
+  }
+  if (typeof resolved !== 'boolean') {
+    throw new NatsConfigError(
+      `${label} has invalid disabled ${describeValue(resolved)}; expected a boolean or a function returning one`,
+    );
+  }
+  return resolved;
+}
+
+function describeValue(value: unknown): string {
+  return typeof value === 'function' ? 'function' : (JSON.stringify(value) ?? String(value));
 }
 
 /** `obj` without the keys whose value is `undefined`. */

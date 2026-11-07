@@ -17,7 +17,7 @@ import {
 import { type ConnectionEntry, ConnectionRegistry } from '../connection/connection-registry.js';
 import { redactText } from '../connection/redact.js';
 import type { NatsServiceOptions } from '../decorators/handler.decorators.js';
-import type { HandlerDefinition } from '../discovery/handler-explorer.js';
+import type { DisabledHandler, HandlerDefinition } from '../discovery/handler-explorer.js';
 import { HandlerExplorer } from '../discovery/handler-explorer.js';
 import { validateHandlers } from '../discovery/handler-validator.js';
 import { NatsConfigError } from '../errors/errors.js';
@@ -121,7 +121,7 @@ export class NatsLifecycle
 
   async onApplicationBootstrap(): Promise<void> {
     try {
-      const defs = this.explorer.explore();
+      const defs = this.explorer.explore({ onDisabled: (d) => this.logDisabled(d) });
       validateHandlers(defs, this.manager);
       for (const managed of this.createAdapters(defs)) {
         this.adapters.push(managed);
@@ -169,6 +169,19 @@ export class NatsLifecycle
       Math.max(closeDeadline - Date.now(), Math.min(MIN_STORE_CLOSE_TIMEOUT, drainTimeout)),
     );
     this.manager.clearHandlers();
+  }
+
+  /** Through the logger of its connection, or of the default connection when it has none. */
+  private logDisabled({ kind, className, methodName, connection }: DisabledHandler): void {
+    const name = this.manager.has(connection)
+      ? connection
+      : this.manager.has(DEFAULT_CONNECTION)
+        ? DEFAULT_CONNECTION
+        : this.manager.names()[0];
+    if (name === undefined) return;
+    this.manager
+      .get(name)
+      .logger.log(`NATS handler ${className}.${methodName} (${kind}) is disabled`);
   }
 
   private createAdapters(defs: HandlerDefinition[]): ManagedAdapter[] {

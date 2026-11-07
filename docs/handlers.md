@@ -21,6 +21,7 @@ onOrderEvent(@Payload() event: OrderEvent, @Subject() subject: string) {
 | `dlq` | module's, else off | Dead-letter queue: `true`, or `{ subject?, mode? }` |
 | `idempotency` | off | `true` or `{ ttl?, keyExtractor? }`. See [Idempotency](./idempotency.md) |
 | `batch` | off | `{ maxSize?, maxWait? }`. See [Batch processing](./batching.md#batch-processing) |
+| `disabled` | `false` | `true`, or a function returning a boolean, to skip the handler. See [Disabling a handler](#disabling-a-handler) |
 
 **Request/reply.** If the incoming message has a reply subject and the handler returns something other than `undefined`, the return value is encoded and sent back. If the handler throws, the requester gets an error reply and the message is not retried. See [Errors](./errors.md).
 
@@ -45,7 +46,7 @@ async bill(@Payload() order: OrderDto, @Ctx() ctx: NatsJetStreamContext) {
 | `config` | none | Consumer config. If set, the consumer is created or updated at startup. If not, it must already exist |
 | `ack` | `'auto'` | `'auto'` or `'manual'` |
 | `concurrency` | `1` | Maximum number of messages processed at once. The library asks the server for `concurrency` messages at a time (`max(batch.maxSize, concurrency)` with `batch`), and pulls more as it hands them to free slots |
-| `connection`, `codec` | | As for `@Subscribe` |
+| `connection`, `codec`, `disabled` | | As for `@Subscribe` |
 | `retry`, `dlq`, `idempotency`, `batch` | | As for `@Subscribe`. `batch` cannot be combined with `ack: 'manual'` |
 
 A consumer the library creates defaults to `ack_policy: 'explicit'` and `max_deliver: -1`, unless you set them. These defaults are never applied to a consumer that already exists.
@@ -101,7 +102,7 @@ An ephemeral consumer without acknowledgements: every instance receives every me
 | `filterSubjects` | whole stream | A subject or an array of subjects |
 | `deliverPolicy` | `'all'` | `'all'`, `'last'`, `'new'`, `'last_per_subject'`, `{ startSeq }` or `{ startTime }` (a `Date` or an ISO 8601 string) |
 | `headersOnly` | `false` | Deliver headers without the payload (`@Payload()` is `undefined`) |
-| `connection`, `codec` | | As for `@Subscribe` |
+| `connection`, `codec`, `disabled` | | As for `@Subscribe` |
 | `retry`, `dlq`, `idempotency` | | As for `@Subscribe`. A failed message is retried in place, then dead-lettered or dropped. See [Retry and dead-letter queue](./retry-and-dlq.md#ordered-consumers) |
 
 There is no `durable`, `config`, `ack`, `concurrency` or `batch`, and an option that does not belong to `@ConsumeOrdered` fails startup with a `NatsConfigError`. `ctx.ack()`, `ctx.nak()`, `ctx.term()` and `ctx.working()` throw. A message the handler has not finished when the application shuts down is not redelivered unless the next start replays it: see [Pull, push and ordered consumers](./consumers.md#ordered-consumeordered).
@@ -125,7 +126,33 @@ export class InventoryService {
 }
 ```
 
-Each `@NatsService` class becomes one service registered with `@nats-io/services`, which gives it discovery, `PING`, `INFO` and `STATS`. An endpoint's return value is always sent as the reply; returning `undefined` sends an empty payload. A thrown error is sent with `respondError(code, description)`. An endpoint method in a class without `@NatsService`, or an endpoint name the services framework rejects, fails startup with a `NatsConfigError`.
+Each `@NatsService` class becomes one service registered with `@nats-io/services`, which gives it discovery, `PING`, `INFO` and `STATS`. An endpoint's return value is always sent as the reply; returning `undefined` sends an empty payload. A thrown error is sent with `respondError(code, description)`. An endpoint method in a class without `@NatsService`, or an endpoint name the services framework rejects, fails startup with a `NatsConfigError`. `disabled` on `@ServiceEndpoint` skips one endpoint; on `@NatsService` it skips every endpoint of the class, so the service is not registered.
+
+## Disabling a handler
+
+Every handler decorator takes a `disabled` option (default `false`): `@Subscribe`, `@Consume`, `@ConsumePush`, `@ConsumeOrdered`, `@ServiceEndpoint`, `@NatsService` and [`@CloudEventRouter`](./cloudevents.md#receiving-cloudevents). A disabled handler is left out at startup as if its decorator were absent: nothing subscribes, consumes or registers it, and its options are not validated, so a disabled `@Consume` may keep the durable of the handler replacing it. Startup logs `NATS handler Class.method (kind) is disabled` for each one.
+
+Decorator arguments are evaluated when the class is imported, which is often before `ConfigModule` has loaded `.env`. Pass a function to read the configuration at startup instead. It is called during application startup and must return the same value each time:
+
+```ts
+import { Injectable } from '@nestjs/common';
+import { Consume, Payload, Subscribe } from '@loipv/nestjs-nats';
+
+@Injectable()
+export class BillingHandlers {
+  @Consume({
+    stream: 'ORDERS',
+    durable: 'billing',
+    disabled: () => process.env.BILLING_CONSUMER_DISABLED === 'true',
+  })
+  bill(@Payload() order: { id: string }) {}
+
+  @Subscribe('billing.debug', { disabled: true })
+  debug() {}
+}
+```
+
+A function that throws, or a value that is not a boolean, fails startup with a `NatsConfigError` naming the handler. Disabling a `@Consume` or `@ConsumePush` handler does not delete its durable consumer: messages stay on it until a handler consumes them again. In tests, [`NatsTestHarness.dispatch()`](./testing.md#natstestingmodule-and-natstestharness) rejects a target naming a disabled handler.
 
 ## Parameters, pipes and Nest enhancers
 

@@ -97,7 +97,7 @@ assert.equal(bad.dlq[0]?.subject, 'dlq.ORDERS.billing');
 | `{ handler: 'Class.method' }` | A handler by class and method name. For a CloudEvent router it is `'Class.@CloudEventRouter'` |
 | `{ subject: '...' }` | The one handler that receives from that subject. For `@Consume` and `@ConsumePush` the subject is matched against the consumer's `filter_subject`(s), for `@ConsumeOrdered` against its `filterSubjects` |
 
-It rejects with a `NatsConfigError` when the handlers are misconfigured (as bootstrap would report), or when the target matches no handler or several. For a batch handler, `payload` is a non-empty array with one message per entry.
+It rejects with a `NatsConfigError` when the handlers are misconfigured (as bootstrap would report), or when the target matches no handler or several, or names a [disabled](./handlers.md#disabling-a-handler) one. For a batch handler, `payload` is a non-empty array with one message per entry.
 
 | Option | Description |
 |---|---|

@@ -101,6 +101,30 @@ class SlowHandlers {
 }
 
 @Injectable()
+class ToggledHandlers {
+  readonly received: string[] = [];
+
+  @Subscribe('toggle.off', { disabled: true })
+  off() {
+    this.received.push('off');
+  }
+
+  @Subscribe('toggle.fn', { disabled: () => true })
+  offByFn() {
+    this.received.push('fn');
+  }
+
+  // A disabled handler is not validated: this unknown connection does not fail bootstrap.
+  @Subscribe('toggle.bad', { connection: 'nope', disabled: true })
+  bad() {}
+
+  @Subscribe('toggle.on', { disabled: false })
+  on() {
+    this.received.push('on');
+  }
+}
+
+@Injectable()
 class BadHandlers {
   @Subscribe('bad', { connection: 'nope' })
   on() {}
@@ -187,6 +211,25 @@ describe('@Subscribe', () => {
     } finally {
       await a.close();
       await b.close();
+    }
+  });
+
+  it('does not subscribe disabled handlers', async () => {
+    const toggled = await createTestApp({ imports: [nats()], providers: [ToggledHandlers] });
+    try {
+      const h = toggled.get(ToggledHandlers);
+      const c = toggled.get<NatsClient>(getNatsClientToken());
+      c.publish('toggle.off', {});
+      c.publish('toggle.fn', {});
+      c.publish('toggle.on', {});
+      await eventually(() => expect(h.received).toContain('on'));
+      await sleep(100);
+      expect(h.received).toEqual(['on']);
+      await expect(c.request('toggle.off', {}, { timeout: 300 })).rejects.toMatchObject({
+        code: 'no_responders',
+      });
+    } finally {
+      await toggled.close();
     }
   });
 

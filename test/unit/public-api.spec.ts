@@ -15,6 +15,7 @@ import type {
   ConsumePushOptions,
   Delivery,
   DlqOptions,
+  HandlerDisabled,
   HandlerInfo,
   IdempotencyOptions,
   IdempotencyStore,
@@ -27,9 +28,11 @@ import type {
   NatsConnectionManager,
   NatsContext,
   NatsHeadersInit,
+  NatsServiceOptions,
   OrderedDeliverPolicy,
   PublishManyResult,
   RetryOptions,
+  SubscribeOptions,
 } from '../../src/index.js';
 import * as api from '../../src/index.js';
 import * as otel from '../../src/otel/index.js';
@@ -201,6 +204,10 @@ it('exports the reliability types', () => {
   expectTypeOf<ConsumePushOptions>().toHaveProperty('durable');
   expectTypeOf<ConsumeOrderedOptions>().toHaveProperty('deliverPolicy');
   expectTypeOf<OrderedDeliverPolicy>().not.toBeAny();
+  expectTypeOf<HandlerDisabled>().toEqualTypeOf<boolean | (() => boolean)>();
+  expectTypeOf<SubscribeOptions>().toHaveProperty('disabled');
+  expectTypeOf<CloudEventRouterOptions>().toHaveProperty('disabled');
+  expectTypeOf<NatsServiceOptions>().toHaveProperty('disabled');
 });
 
 it('exposes only the query API on NatsConnectionManager', () => {

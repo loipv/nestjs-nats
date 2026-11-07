@@ -16,6 +16,7 @@ export type {
   ConsumeOptions,
   ConsumeOrderedOptions,
   ConsumePushOptions,
+  HandlerDisabled,
   NatsServiceOptions,
   OrderedDeliverPolicy,
   ServiceEndpointOptions,

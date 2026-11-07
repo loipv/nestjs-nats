@@ -118,6 +118,7 @@ class OrderProjector {
 | `consumePush` | `{ stream, durable, config?, deliverGroup? }`: receive from a JetStream push consumer, as for `@ConsumePush` |
 | `consumeOrdered` | `{ stream, filterSubjects?, deliverPolicy?, headersOnly? }`: receive from an ordered consumer, as for `@ConsumeOrdered`. `concurrency` is not supported |
 | `unmatched` | What to do with an event no `@OnCloudEvent` matches: `'ack'` (default), `'term'` or `'dlq'` |
+| `disabled` | `true`, or a function returning a boolean, to skip the router and all its routes. See [Disabling a handler](./handlers.md#disabling-a-handler) |
 
 ```ts
 import { Injectable } from '@nestjs/common';

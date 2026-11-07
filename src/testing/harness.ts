@@ -90,7 +90,8 @@ export interface DispatchResult {
   dlq: PublishedMessage[];
 }
 
-const label = (def: HandlerDefinition) => `${def.className}.${def.methodName}`;
+const label = (def: { className: string; methodName: string }) =>
+  `${def.className}.${def.methodName}`;
 
 /** The subjects a handler receives from: the ones a `{ subject }` target is matched against. */
 function subjectsOf(def: HandlerDefinition): string[] {
@@ -148,6 +149,8 @@ type JsMsgCall =
 @Injectable()
 export class NatsTestHarness {
   private handlers?: HandlerDefinition[];
+  /** `Class.method` of each disabled handler. */
+  private readonly disabled = new Set<string>();
   private readonly pipelines = new Map<HandlerDefinition, HandlerPipeline>();
   private sequence = 0;
   private inboxes = 0;
@@ -165,8 +168,9 @@ export class NatsTestHarness {
    * Dispatches `payload` to the handler `target` designates and reports what became of
    * it. A batch handler takes an array of payloads, one message each. Rejects with a
    * `NatsConfigError` when the handlers are misconfigured (as bootstrap would) or the
-   * target matches no handler or several; with the error itself when the pipeline fails
-   * outside settlement (e.g. a plugin throws) on a delivery that expects no reply.
+   * target matches no handler or several, or names a disabled one; with the error itself
+   * when the pipeline fails outside settlement (e.g. a plugin throws) on a delivery that
+   * expects no reply.
    */
   async dispatch(
     target: DispatchTarget,
@@ -267,7 +271,8 @@ export class NatsTestHarness {
   /** The discovered handlers, validated on first use as bootstrap validates them. */
   private explore(): HandlerDefinition[] {
     if (!this.handlers) {
-      const defs = this.explorer.explore();
+      this.disabled.clear();
+      const defs = this.explorer.explore({ onDisabled: (d) => this.disabled.add(label(d)) });
       validateHandlers(defs, this.registry);
       this.handlers = defs;
     }
@@ -280,6 +285,9 @@ export class NatsTestHarness {
     let wanted: string;
     if (typeof (target as { handler?: unknown }).handler === 'string') {
       const { handler } = target as { handler: string };
+      if (this.disabled.has(handler)) {
+        throw new NatsConfigError(`NATS handler ${handler} is disabled`);
+      }
       wanted = `handler "${handler}"`;
       matches = defs.filter((def) => label(def) === handler);
     } else if (typeof (target as { subject?: unknown }).subject === 'string') {
