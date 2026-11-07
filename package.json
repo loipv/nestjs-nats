@@ -1,6 +1,6 @@
 {
   "name": "@loipv/nestjs-nats",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Decorator-driven NATS and JetStream integration for NestJS: subscribers, consumers, services, CloudEvents, retry/DLQ, idempotency, batching, OpenTelemetry, health checks and testing utilities",
   "keywords": [
     "nestjs",
