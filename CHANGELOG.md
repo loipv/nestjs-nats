@@ -1,5 +1,11 @@
 # @loipv/nestjs-nats
 
+## 0.2.0
+
+### Minor Changes
+
+- [`daa558a`](https://github.com/loipv/nestjs-nats/commit/daa558a481d159dee99c7111a9d20306bf5461ee) Thanks [@loipv](https://github.com/loipv)! - Add a `disabled` option to every handler decorator (`@Subscribe`, `@Consume`, `@ConsumePush`, `@ConsumeOrdered`, `@ServiceEndpoint`, `@NatsService` and `@CloudEventRouter`) to skip a handler from configuration instead of commenting it out. It takes a boolean or a function called at application startup, after configuration is loaded. A disabled handler is not started or validated, and startup logs it.
+
 ## 0.1.0
 
 Initial release.
