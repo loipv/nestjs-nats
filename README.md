@@ -105,7 +105,7 @@ Handlers can live in any provider or controller, in any module. The library find
 | Page | Covers |
 |---|---|
 | [Connections](./docs/connections.md) | Options and authentication, logging, several named connections, restarting handlers |
-| [Handlers](./docs/handlers.md) | `@Subscribe`, `@Consume`, `@ConsumePush`, `@ConsumeOrdered`, `@NatsService`, disabling handlers, handler timeouts, parameter decorators, pipes and Nest enhancers |
+| [Handlers](./docs/handlers.md) | `@Subscribe`, `@Consume`, `@ConsumePush`, `@ConsumeOrdered`, `@NatsService`, values from configuration, disabling handlers, handler timeouts, parameter decorators, pipes and Nest enhancers |
 | [Consumers](./docs/consumers.md) | Pull, push and ordered consumers compared: load, acknowledgement, shutdown, limits |
 | [Publishing](./docs/publishing.md) | `NatsClient`, `JetStreamClient`, atomic batches, codecs |
 | [Streams and consumers](./docs/streams.md) | Declarative streams and consumers, sync modes |

@@ -109,7 +109,7 @@ class OrderProjector {
 }
 ```
 
-`@CloudEventRouter()` takes `connection`, `concurrency`, `codec`, `retry`, `dlq` and `idempotency` like `@Subscribe` and `@Consume`, plus these:
+`@CloudEventRouter()` takes `connection`, `concurrency`, `codec`, `retry`, `dlq`, `idempotency` and `timeout` like `@Subscribe` and `@Consume`, plus these. Like the other handler decorators, it also takes a function returning its options, called once at startup (see [Values from configuration](./handlers.md#values-from-configuration)):
 
 | Option | Description |
 |---|---|

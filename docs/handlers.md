@@ -130,26 +130,55 @@ export class InventoryService {
 
 Each `@NatsService` class becomes one service registered with `@nats-io/services`, which gives it discovery, `PING`, `INFO` and `STATS`. An endpoint's return value is always sent as the reply; returning `undefined` sends an empty payload. A thrown error is sent with `respondError(code, description)`. An endpoint method in a class without `@NatsService`, or an endpoint name the services framework rejects, fails startup with a `NatsConfigError`. `disabled` on `@ServiceEndpoint` skips one endpoint; on `@NatsService` it skips every endpoint of the class, so the service is not registered.
 
-## Disabling a handler
+## Values from configuration
 
-Every handler decorator takes a `disabled` option (default `false`): `@Subscribe`, `@Consume`, `@ConsumePush`, `@ConsumeOrdered`, `@ServiceEndpoint`, `@NatsService` and [`@CloudEventRouter`](./cloudevents.md#receiving-cloudevents). A disabled handler is left out at startup as if its decorator were absent: nothing subscribes, consumes or registers it, and its options are not validated, so a disabled `@Consume` may keep the durable of the handler replacing it. Startup logs `NATS handler Class.method (kind) is disabled` for each one.
-
-Decorator arguments are evaluated when the class is imported, which is often before `ConfigModule` has loaded `.env`. Pass a function to read the configuration at startup instead. It is called during application startup and must return the same value each time:
+Decorator arguments are evaluated when the class is imported, which is often before `ConfigModule` has loaded `.env`. Any argument of `@Subscribe`, `@Consume`, `@ConsumePush`, `@ConsumeOrdered`, `@NatsService`, `@ServiceEndpoint` and [`@CloudEventRouter`](./cloudevents.md#receiving-cloudevents) can instead be a function that returns it: the subject, the endpoint name, or the whole options object. The function receives `{ get }`, which returns any provider of the application (looked up in every module, like `moduleRef.get(token, { strict: false })`):
 
 ```ts
 import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Consume, Payload, Subscribe } from '@loipv/nestjs-nats';
 
 @Injectable()
 export class BillingHandlers {
-  @Consume({
-    stream: 'ORDERS',
+  @Consume(({ get }) => ({
+    stream: get(ConfigService).getOrThrow<string>('ORDERS_STREAM'),
     durable: 'billing',
-    disabled: () => process.env.BILLING_CONSUMER_DISABLED === 'true',
-  })
+    concurrency: get(ConfigService).get<number>('BILLING_CONCURRENCY') ?? 1,
+  }))
   bill(@Payload() order: { id: string }) {}
 
-  @Subscribe('billing.debug', { disabled: true })
+  @Subscribe(({ get }) => `${get(ConfigService).getOrThrow<string>('TENANT')}.orders.created`)
+  onCreated(@Payload() order: { id: string }) {}
+}
+```
+
+- **Once, at startup.** Each function runs once per application, when the handlers are discovered during startup, and what it returns (or throws) is kept. A function shared by several decorators also runs once and gives them all the same value.
+- **Synchronous.** A function returning a Promise fails startup. Asynchronous configuration belongs in [`NatsModule.forRootAsync()`](./connections.md).
+- **Errors.** A function that throws (including `get` of a provider that does not exist, or of a request-scoped one) fails startup with a `NatsConfigError` naming the handler, such as `NATS handler BillingHandlers.bill failed to resolve its @Consume options: ...`, with the original error as `cause`. So does a subject or endpoint name that is not a non-empty string, or options that are not an object; the options of `@Subscribe` and `@ServiceEndpoint` may also be `undefined`. The resolved values are then validated like written ones.
+- **Not for streams.** Streams and consumers declared in `forRoot` or `forFeature` take no functions; declare those whose names come from configuration in `NatsModule.forRootAsync()`. `@OnCloudEvent` type patterns are fixed too.
+
+### Disabling a handler
+
+Every handler decorator takes a `disabled` option (default `false`): `@Subscribe`, `@Consume`, `@ConsumePush`, `@ConsumeOrdered`, `@ServiceEndpoint`, `@NatsService` and [`@CloudEventRouter`](./cloudevents.md#receiving-cloudevents). A disabled handler is left out at startup as if its decorator were absent: nothing subscribes, consumes or registers it, and its options are not validated, so a disabled `@Consume` may keep the durable of the handler replacing it. Startup logs `NATS handler Class.method (kind) is disabled` for each one.
+
+`disabled` can be a function too. It receives the same `{ get }` and runs once per application, like the functions above. It can also be part of what an options function returns; that function still runs for a disabled handler, which is how its `disabled` is read:
+
+```ts
+import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Consume, Payload, Subscribe } from '@loipv/nestjs-nats';
+
+@Injectable()
+export class AuditHandlers {
+  @Consume({
+    stream: 'ORDERS',
+    durable: 'audit',
+    disabled: ({ get }) => get(ConfigService).get<string>('AUDIT_DISABLED') === 'true',
+  })
+  audit(@Payload() order: { id: string }) {}
+
+  @Subscribe('audit.debug', { disabled: true })
   debug() {}
 }
 ```
