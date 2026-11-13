@@ -46,6 +46,8 @@ NatsModule.forRoot({
 
 ## Removed fields
 
+> **Experimental:** `'reset'` may change or be removed before 1.0. See [Stability](../README.md#stability).
+
 By default (`jetstream.removedFields: 'ignore'`), a field you take out of a declaration keeps its value on the server. With `'reset'`, the library remembers the declared fields of each stream and consumer, so `create-or-update` resets a removed field and `verify` reports it. Any other value fails bootstrap with a `NatsConfigError`.
 
 ```ts

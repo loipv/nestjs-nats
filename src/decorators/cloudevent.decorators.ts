@@ -81,7 +81,9 @@ export function CloudEventRouter(options: StartupValue<CloudEventRouterOptions>)
  * `typePattern` (segments split on `.`; `*` matches one segment, a trailing `>` one or
  * more). An exact match wins over a pattern with more literal segments, which wins over
  * one using `>`. `@Payload()` is the event's `data`, `@CloudEvent()` its attributes.
- * Several `@OnCloudEvent` on one method route each pattern to it.
+ * Several `@OnCloudEvent` on one method route each pattern to it. Wildcard patterns (`*`,
+ * `>`) are experimental: they may change or be removed before 1.0 (see Stability in the
+ * README); exact types are stable.
  */
 export function OnCloudEvent(typePattern: string): MethodDecorator {
   return (_target, _key, descriptor) => {

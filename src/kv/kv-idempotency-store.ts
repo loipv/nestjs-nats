@@ -21,6 +21,8 @@ export interface KvIdempotencyStoreOptions {
   /**
    * Prefixes the keys of `@ConsumeOrdered` handlers (keys starting with `ordered:`), so the
    * instances sharing the bucket each process every message of an ordered consumer.
+   *
+   * @experimental May change or be removed before 1.0 (see Stability in the README).
    */
   instanceId?: string;
   /** Clock in ms (tests; default Date.now). */

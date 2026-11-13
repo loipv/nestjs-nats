@@ -23,6 +23,13 @@ export interface CloudEventInit {
    */
   datacontenttype?: string;
   extensions?: Record<string, string>;
+  /**
+   * `'binary'` (default): attributes in headers, data in the body. `'structured'`: one JSON
+   * envelope in the body.
+   *
+   * @experimental `'structured'` may change or be removed before 1.0 (see Stability in the
+   * README).
+   */
   mode?: 'binary' | 'structured';
 }
 

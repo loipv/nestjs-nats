@@ -84,6 +84,8 @@ export class JetStreamClient {
    * Publishes `items` with at most `window` publishes awaiting their PubAck at once. Each item
    * goes through `publish()`, so outbound plugins apply. Results are in input order and an
    * item's failure is its result, never a rejection.
+   *
+   * @experimental May change or be removed before 1.0 (see Stability in the README).
    */
   async publishMany(
     items: ReadonlyArray<{ subject: string; data?: unknown; opts?: JetStreamPublishOptions }>,
@@ -126,6 +128,8 @@ export class JetStreamClient {
   /**
    * A batcher that groups publishes and flushes them through `publishMany`. It is flushed
    * and closed when the connection closes.
+   *
+   * @experimental May change or be removed before 1.0 (see Stability in the README).
    */
   batcher(opts: { maxSize?: number; maxWait?: number; window?: number } = {}): Batcher {
     let off: (() => void) | undefined;

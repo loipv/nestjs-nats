@@ -67,6 +67,8 @@ With `ack: 'manual'` you settle the message yourself with `ctx.ack()`, `ctx.nak(
 
 ## `@ConsumePush(options)`: JetStream push consumer
 
+> **Experimental:** `@ConsumePush` may change or be removed before 1.0. See [Stability](../README.md#stability).
+
 ```ts
 @ConsumePush({
   stream: 'ORDERS',

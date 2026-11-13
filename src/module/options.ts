@@ -37,6 +37,9 @@ export interface NatsModuleOptions {
      * field removed from a declaration to the server default and `verify` reports it. Only
      * for an application that is the only one declaring its streams and consumers. Default
      * `'ignore'`: a removed field keeps its value on the server.
+     *
+     * @experimental `'reset'` may change or be removed before 1.0 (see Stability in the
+     * README).
      */
     removedFields?: RemovedFieldsMode;
   };

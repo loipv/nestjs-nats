@@ -6,6 +6,8 @@
 
 With `batch`, a handler receives messages in groups instead of one at a time. It works for `@Subscribe`, `@Consume` and `@ConsumePush`, not for `@ConsumeOrdered`. A batch is handed to the handler when `maxSize` messages are collected, or `maxWait` ms after the first message of the batch, whichever comes first.
 
+> **Experimental:** `batch` on `@Subscribe` may change or be removed before 1.0; on `@Consume` and `@ConsumePush` it is stable. See [Stability](../README.md#stability).
+
 | Option | Default | Description |
 |---|---|---|
 | `maxSize` | `100` | Messages per batch, an integer `>= 1` |
@@ -46,6 +48,8 @@ class AnalyticsHandlers {
 - **Shutdown.** The batch being collected is handed to the handler. See [Lifecycle and graceful shutdown](./lifecycle.md).
 
 ## Batch publishing
+
+> **Experimental:** `publishMany()` and `batcher()` may change or be removed before 1.0. See [Stability](../README.md#stability).
 
 `JetStreamClient` can publish many messages while keeping several in flight, which is much faster than awaiting each `publish()` in turn.
 

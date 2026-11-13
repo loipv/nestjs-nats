@@ -3,7 +3,7 @@
 Decorator-driven [NATS](https://nats.io) integration for [NestJS](https://nestjs.com): core subscriptions, JetStream consumers and NATS services as plain Nest providers, with pipes, guards, interceptors and exception filters working the way they do for HTTP controllers.
 
 > **Warning:** 0.x, under active development, not production-ready yet.
-> The API may change between minor versions until 1.0. See [Known limitations](#known-limitations).
+> The API may change between minor versions until 1.0. See [Stability](#stability) and [Known limitations](#known-limitations).
 
 ## Features
 
@@ -120,6 +120,21 @@ Handlers can live in any provider or controller, in any module. The library find
 | [Testing](./docs/testing.md) | Mock clients, `NatsTestingModule` and `NatsTestHarness` |
 | [Errors](./docs/errors.md) | Error classes and reply codes |
 | [Lifecycle and graceful shutdown](./docs/lifecycle.md) | Startup, shutdown phases, connection status |
+
+## Stability
+
+Until 1.0, any API may change in a minor release, as the warning above says. The features below are **experimental** on top of that: they work and are tested, but they are the most likely to change incompatibly or be removed before 1.0, and they get no new options until then. Prefer the alternative given where you can.
+
+| Feature | Alternative |
+|---|---|
+| [`jetstream.removedFields: 'reset'`](./docs/streams.md#removed-fields) | The default `'ignore'`, and changing removed fields by hand |
+| [`publishMany()` and `batcher()`](./docs/batching.md#batch-publishing) | `publish()` in a loop, or `Promise.all` over a bounded set |
+| [`@ConsumePush`](./docs/consumers.md#push-consumepush) | `@Consume` (pull), which NATS recommends |
+| [`batch` on `@Subscribe`](./docs/batching.md#batch-processing) | `batch` on `@Consume` (stable) |
+| [Idempotency on `@ConsumeOrdered`](./docs/idempotency.md), with the KV store's `instanceId` | Idempotency on `@Consume` |
+| [CloudEvents structured mode](./docs/cloudevents.md#publishing-cloudevents) and [wildcard type patterns](./docs/cloudevents.md#receiving-cloudevents) (`*`, `>`) | Binary mode, and exact types in `@OnCloudEvent` |
+
+Receiving structured CloudEvents is part of the CloudEvents format and stays stable.
 
 ## Known limitations
 

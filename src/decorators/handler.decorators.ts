@@ -33,6 +33,9 @@ export interface SubscribeOptions {
   /**
    * Hands the handler messages in batches (`@Payload() items: T[]`,
    * `@Ctx() ctx: NatsBatchContext`); a batch never replies.
+   *
+   * @experimental On `@Subscribe`, may change or be removed before 1.0 (see Stability in the
+   * README).
    */
   batch?: BatchOptions;
   /**
@@ -113,6 +116,12 @@ export interface ConsumeOrderedOptions {
   codec?: Codec;
   retry?: RetryOptions | false;
   dlq?: DlqOptions | boolean;
+  /**
+   * Skips messages already processed (see docs/idempotency.md).
+   *
+   * @experimental On an ordered consumer, may change or be removed before 1.0 (see Stability
+   * in the README).
+   */
   idempotency?: boolean | IdempotencyOptions;
   /**
    * Longest run of the handler, in ms; past it the run counts as failed and `ctx.signal` is
@@ -207,6 +216,11 @@ export function Consume(options: StartupValue<ConsumeOptions>): MethodDecorator 
   return methodMetadata(NATS_CONSUME_METADATA, '@Consume', { options });
 }
 
+/**
+ * A durable JetStream push consumer. NATS recommends pull consumers (`@Consume`).
+ *
+ * @experimental May change or be removed before 1.0 (see Stability in the README).
+ */
 export function ConsumePush(options: StartupValue<ConsumePushOptions>): MethodDecorator {
   return methodMetadata(NATS_CONSUME_PUSH_METADATA, '@ConsumePush', { options });
 }

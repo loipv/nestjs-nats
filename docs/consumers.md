@@ -27,6 +27,8 @@ A pull consumer asks the server for messages when it has room for them. It is th
 
 ## Push: `@ConsumePush`
 
+> **Experimental:** `@ConsumePush` may change or be removed before 1.0. See [Stability](../README.md#stability).
+
 A push consumer has a delivery subject, and the server sends messages to it as soon as they exist.
 
 ```ts
