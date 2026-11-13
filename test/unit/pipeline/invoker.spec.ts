@@ -222,7 +222,7 @@ describe('invokeHandler timeout', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('aborts the batch, the view the handler gets and every message, ignoring a late { failed }', async () => {
+  it('aborts the batch, the view the handler gets and every message', async () => {
     let view: NatsBatchContext | undefined;
     const run = deferred<unknown>();
     const { d, parts } = batchDelivery((_items, ctx) => {
@@ -235,9 +235,11 @@ describe('invokeHandler timeout', () => {
     expect(view?.signal.aborted).toBe(true);
     expect((d.context as NatsBatchContext).signal.aborted).toBe(true);
     for (const { context } of parts) expect(context.signal.aborted).toBe(true);
-    run.resolve({ failed: [{ msg: 0, error: new Error('late') }] });
+    const late = new Error('late');
+    run.resolve({ failed: [{ msg: 0, error: late }] });
+    // Settlement is over; the late { failed } still tells idempotency which keys to free.
     await expect(d[LINGERING]).resolves.toBe(true);
-    expect(d[FAILURES].size).toBe(0);
+    expect([...d[FAILURES]]).toEqual([[parts[0]?.message, late]]);
   });
 
   it('names the route a router timed out on', async () => {

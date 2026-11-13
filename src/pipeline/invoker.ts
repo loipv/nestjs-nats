@@ -167,13 +167,19 @@ async function invokeBatch(
     messages: contexts,
     onFail: (context, error) => batch.fail(context.raw, error),
   });
-  const result = await timed(
+  // `{ failed }` is applied within the timed call: a run that outlived its timeout reports
+  // its failures too, too late for settlement but in time for idempotency (`LINGERING`).
+  await timed(
     d,
     `${d.handler.className}.${d.handler.methodName}`,
-    async () => unwrap(await d[HANDLER_DEFINITION].invoke(items, view)),
+    async () => applyFailed(d, view, await unwrap(await d[HANDLER_DEFINITION].invoke(items, view))),
     [view, batch, ...batch.messages],
     timeout,
   );
+}
+
+/** Records the messages a batch handler returned as `{ failed }`; invalid entries are logged. */
+function applyFailed(d: InternalDelivery, view: NatsBatchContext, result: unknown): void {
   if (!isBatchResult(result)) return;
   const { className, methodName } = d.handler;
   for (const entry of result.failed as unknown[]) {
