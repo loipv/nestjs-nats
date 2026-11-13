@@ -13,6 +13,7 @@ import {
   NATS_SERVICE_METADATA,
   NATS_SUBSCRIBE_METADATA,
 } from './constants.js';
+import type { StartupValue } from './startup-value.js';
 
 /**
  * Whether a handler is skipped: a boolean, or a function called at application startup
@@ -194,19 +195,22 @@ export function classMetadata(
   };
 }
 
-export function Subscribe(subject: string, options?: SubscribeOptions): MethodDecorator {
+export function Subscribe(
+  subject: StartupValue<string>,
+  options?: StartupValue<SubscribeOptions | undefined>,
+): MethodDecorator {
   return methodMetadata(NATS_SUBSCRIBE_METADATA, '@Subscribe', { subject, options });
 }
 
-export function Consume(options: ConsumeOptions): MethodDecorator {
+export function Consume(options: StartupValue<ConsumeOptions>): MethodDecorator {
   return methodMetadata(NATS_CONSUME_METADATA, '@Consume', { options });
 }
 
-export function ConsumePush(options: ConsumePushOptions): MethodDecorator {
+export function ConsumePush(options: StartupValue<ConsumePushOptions>): MethodDecorator {
   return methodMetadata(NATS_CONSUME_PUSH_METADATA, '@ConsumePush', { options });
 }
 
-export function ConsumeOrdered(options: ConsumeOrderedOptions): MethodDecorator {
+export function ConsumeOrdered(options: StartupValue<ConsumeOrderedOptions>): MethodDecorator {
   return methodMetadata(NATS_CONSUME_ORDERED_METADATA, '@ConsumeOrdered', { options });
 }
 
@@ -214,6 +218,9 @@ export function NatsService(options: NatsServiceOptions): ClassDecorator {
   return classMetadata(NATS_SERVICE_METADATA, '@NatsService', options, 'one service');
 }
 
-export function ServiceEndpoint(name: string, options?: ServiceEndpointOptions): MethodDecorator {
+export function ServiceEndpoint(
+  name: StartupValue<string>,
+  options?: StartupValue<ServiceEndpointOptions | undefined>,
+): MethodDecorator {
   return methodMetadata(NATS_ENDPOINT_METADATA, '@ServiceEndpoint', { name, options });
 }

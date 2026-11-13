@@ -1,6 +1,6 @@
 import { type ArgumentsHost, Injectable } from '@nestjs/common';
 import { ROUTE_ARGS_METADATA } from '@nestjs/common/constants.js';
-import { DiscoveryService, ExternalContextCreator, MetadataScanner } from '@nestjs/core';
+import { DiscoveryService, ExternalContextCreator, MetadataScanner, ModuleRef } from '@nestjs/core';
 import type { InstanceWrapper } from '@nestjs/core/injector/instance-wrapper.js';
 import { createTypeRouter } from '../cloudevents/matcher.js';
 import type { NatsBatchContext } from '../context/nats-batch-context.js';
@@ -25,6 +25,11 @@ import type {
   ServiceEndpointOptions,
   SubscribeOptions,
 } from '../decorators/handler.decorators.js';
+import {
+  resolveStartupValue,
+  type StartupContext,
+  type StartupValue,
+} from '../decorators/startup-value.js';
 import { NatsConfigError, NatsModuleError } from '../errors/errors.js';
 import { DEFAULT_CONNECTION } from '../module/tokens.js';
 import { errorMessage } from '../util/errors.js';
@@ -90,6 +95,9 @@ export const ROUTER_METHOD_NAME = '@CloudEventRouter';
 
 const UNMATCHED_POLICIES: ReadonlyArray<CloudEventRouting['unmatched']> = ['ack', 'term', 'dlq'];
 
+/** What a startup function returned, or threw. */
+type Resolved = { ok: true; value: unknown } | { ok: false; error: unknown };
+
 const ORDERED_KEYS: readonly string[] = [
   'stream',
   'filterSubjects',
@@ -108,7 +116,16 @@ export class HandlerExplorer {
     private readonly discovery: DiscoveryService,
     private readonly scanner: MetadataScanner,
     private readonly ecc: ExternalContextCreator,
+    private readonly moduleRef: ModuleRef,
   ) {}
+
+  /** What startup functions receive: any provider of the application. */
+  private readonly ctx: StartupContext = {
+    get: (token) => this.moduleRef.get(token, { strict: false }),
+  };
+
+  /** What each startup function returned or threw, so it runs once per application. */
+  private readonly resolved = new WeakMap<object, Resolved>();
 
   /**
    * Returns every handler of every provider/controller. Request-scoped and transient
@@ -143,7 +160,7 @@ export class HandlerExplorer {
       const prototype = Object.getPrototypeOf(instance) as object;
       for (const methodName of this.scanner.getAllMethodNames(prototype)) {
         const method = instance[methodName as keyof typeof instance];
-        const specs = this.specsFor(method, service);
+        const specs = this.specsFor(method, service, `NATS handler ${className}.${methodName}`);
         const patterns = this.patternsFor(method);
         if (patterns.length > 0) {
           const label = `${instance.constructor.name}.${methodName}`;
@@ -332,40 +349,132 @@ export class HandlerExplorer {
     };
   }
 
-  private specsFor(method: unknown, service: NatsServiceOptions | undefined): HandlerSpec[] {
+  /**
+   * The handler specs of a method's decorators, their startup functions resolved. `subject`
+   * (e.g. `NATS handler Orders.on`) names the method in errors.
+   */
+  private specsFor(
+    method: unknown,
+    service: NatsServiceOptions | undefined,
+    subject: string,
+  ): HandlerSpec[] {
     if (typeof method !== 'function') return [];
     const specs: HandlerSpec[] = [];
-    const sub: { subject: string; options?: SubscribeOptions } | undefined = Reflect.getMetadata(
-      NATS_SUBSCRIBE_METADATA,
-      method,
-    );
-    if (sub) specs.push({ kind: 'subscribe', subject: sub.subject, options: sub.options ?? {} });
-    const consume: { options: ConsumeOptions } | undefined = Reflect.getMetadata(
+    const sub:
+      | { subject: StartupValue<string>; options?: StartupValue<SubscribeOptions | undefined> }
+      | undefined = Reflect.getMetadata(NATS_SUBSCRIBE_METADATA, method);
+    if (sub) {
+      specs.push({
+        kind: 'subscribe',
+        subject: this.resolveString(sub.subject, subject, '@Subscribe subject'),
+        options: this.resolveOptions(sub.options, subject, '@Subscribe options', true) ?? {},
+      });
+    }
+    const consume: { options: StartupValue<ConsumeOptions> } | undefined = Reflect.getMetadata(
       NATS_CONSUME_METADATA,
       method,
     );
-    if (consume) specs.push({ kind: 'consume', delivery: 'pull', options: consume.options });
-    const push: { options: ConsumePushOptions } | undefined = Reflect.getMetadata(
+    if (consume) {
+      specs.push({
+        kind: 'consume',
+        delivery: 'pull',
+        options: this.resolveOptions(consume.options, subject, '@Consume options'),
+      });
+    }
+    const push: { options: StartupValue<ConsumePushOptions> } | undefined = Reflect.getMetadata(
       NATS_CONSUME_PUSH_METADATA,
       method,
     );
-    if (push) specs.push({ kind: 'consume', delivery: 'push', options: push.options });
-    const ordered: { options: ConsumeOrderedOptions } | undefined = Reflect.getMetadata(
-      NATS_CONSUME_ORDERED_METADATA,
-      method,
-    );
-    if (ordered) specs.push({ kind: 'ordered', options: ordered.options });
-    const endpoint: { name: string; options?: ServiceEndpointOptions } | undefined =
-      Reflect.getMetadata(NATS_ENDPOINT_METADATA, method);
+    if (push) {
+      specs.push({
+        kind: 'consume',
+        delivery: 'push',
+        options: this.resolveOptions(push.options, subject, '@ConsumePush options'),
+      });
+    }
+    const ordered: { options: StartupValue<ConsumeOrderedOptions> } | undefined =
+      Reflect.getMetadata(NATS_CONSUME_ORDERED_METADATA, method);
+    if (ordered) {
+      specs.push({
+        kind: 'ordered',
+        options: this.resolveOptions(ordered.options, subject, '@ConsumeOrdered options'),
+      });
+    }
+    const endpoint:
+      | {
+          name: StartupValue<string>;
+          options?: StartupValue<ServiceEndpointOptions | undefined>;
+        }
+      | undefined = Reflect.getMetadata(NATS_ENDPOINT_METADATA, method);
     if (endpoint) {
       specs.push({
         kind: 'service-endpoint',
-        endpoint: endpoint.name,
-        options: endpoint.options ?? {},
+        endpoint: this.resolveString(endpoint.name, subject, '@ServiceEndpoint name'),
+        options:
+          this.resolveOptions(endpoint.options, subject, '@ServiceEndpoint options', true) ?? {},
         service,
       });
     }
     return specs;
+  }
+
+  /**
+   * `value`, or what its function returns: called once per application, its result (or
+   * error) kept. `subject` and `what` name it in errors.
+   */
+  private resolve<T>(value: StartupValue<T>, subject: string, what: string): T {
+    if (typeof value !== 'function') return value;
+    let outcome = this.resolved.get(value);
+    if (!outcome) {
+      try {
+        outcome = { ok: true, value: resolveStartupValue(value, this.ctx, subject, what) };
+      } catch (error) {
+        outcome = { ok: false, error };
+      }
+      this.resolved.set(value, outcome);
+    }
+    if (!outcome.ok) throw outcome.error;
+    return outcome.value as T;
+  }
+
+  /** A string argument; what a function returns must be a non-empty string. */
+  private resolveString(value: StartupValue<string>, subject: string, what: string): string {
+    if (typeof value !== 'function') return value;
+    const resolved: unknown = this.resolve(value, subject, what);
+    if (typeof resolved !== 'string' || resolved === '') {
+      throw invalidValue(subject, what, resolved, 'a non-empty string');
+    }
+    return resolved;
+  }
+
+  /**
+   * An options argument; what a function returns must be an object, or `undefined` when the
+   * options are `optional`.
+   */
+  private resolveOptions<T extends object>(
+    value: StartupValue<T>,
+    subject: string,
+    what: string,
+  ): T;
+  private resolveOptions<T extends object>(
+    value: StartupValue<T | undefined> | undefined,
+    subject: string,
+    what: string,
+    optional: true,
+  ): T | undefined;
+  private resolveOptions<T extends object>(
+    value: StartupValue<T | undefined> | undefined,
+    subject: string,
+    what: string,
+    optional = false,
+  ): T | undefined {
+    if (typeof value !== 'function') return value;
+    const resolved: unknown = this.resolve(value, subject, what);
+    if (resolved === undefined && optional) return undefined;
+    if (typeof resolved !== 'object' || resolved === null || Array.isArray(resolved)) {
+      throw invalidValue(subject, what, resolved, 'an object');
+    }
+    return resolved as T;
   }
 
   private define(
@@ -493,6 +602,13 @@ function isDisabled(value: HandlerDisabled | undefined, label: string): boolean 
     );
   }
   return resolved;
+}
+
+/** The error for a startup function that returned `value` instead of `expected`. */
+function invalidValue(subject: string, what: string, value: unknown, expected: string) {
+  return new NatsConfigError(
+    `${subject}: ${what} resolved to ${describeValue(value)}; expected ${expected}`,
+  );
 }
 
 function describeValue(value: unknown): string {

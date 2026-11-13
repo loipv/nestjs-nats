@@ -98,6 +98,62 @@ describe('handler decorators', () => {
   });
 });
 
+describe('handler decorators given startup functions', () => {
+  const subject = () => 'orders.created';
+  const subscribeOptions = () => ({ queue: 'q' });
+  const consumeOptions = () => ({ stream: 'S', durable: 'd' });
+  const name = () => 'get';
+  const endpointOptions = () => ({ subject: 'svc.get' });
+
+  class Fns {
+    @Subscribe(subject, subscribeOptions)
+    onSub() {}
+
+    @Consume(consumeOptions)
+    onC() {}
+
+    @ConsumePush(consumeOptions)
+    onPush() {}
+
+    @ConsumeOrdered(() => ({ stream: 'S' }))
+    onOrdered() {}
+
+    @ServiceEndpoint(name, endpointOptions)
+    get() {}
+  }
+
+  it('stores the functions themselves', () => {
+    const sub = Reflect.getMetadata(NATS_SUBSCRIBE_METADATA, Fns.prototype.onSub);
+    expect(sub.subject).toBe(subject);
+    expect(sub.options).toBe(subscribeOptions);
+    expect(Reflect.getMetadata(NATS_CONSUME_METADATA, Fns.prototype.onC).options).toBe(
+      consumeOptions,
+    );
+    expect(Reflect.getMetadata(NATS_CONSUME_PUSH_METADATA, Fns.prototype.onPush).options).toBe(
+      consumeOptions,
+    );
+    expect(
+      typeof Reflect.getMetadata(NATS_CONSUME_ORDERED_METADATA, Fns.prototype.onOrdered).options,
+    ).toBe('function');
+    const endpoint = Reflect.getMetadata(NATS_ENDPOINT_METADATA, Fns.prototype.get);
+    expect(endpoint.name).toBe(name);
+    expect(endpoint.options).toBe(endpointOptions);
+  });
+
+  it('rejects @Subscribe given a function twice on one method', () => {
+    expect(() => {
+      class Orders {
+        @Subscribe(subject)
+        @Subscribe(subject)
+        on() {}
+      }
+      return Orders;
+    }).toThrow(
+      '@Subscribe is applied more than once to Orders.on; each handler decorator declares one handler per method',
+    );
+  });
+});
+
 describe('handler decorators applied more than once', () => {
   const TAIL = 'each handler decorator declares one handler per method';
 

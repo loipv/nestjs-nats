@@ -7,7 +7,13 @@ import {
   Logger,
   UseFilters,
 } from '@nestjs/common';
-import { APP_FILTER, DiscoveryModule, DiscoveryService, MetadataScanner } from '@nestjs/core';
+import {
+  APP_FILTER,
+  DiscoveryModule,
+  DiscoveryService,
+  MetadataScanner,
+  ModuleRef,
+} from '@nestjs/core';
 import { Test, type TestingModule } from '@nestjs/testing';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { NatsContext } from '../../../src/context/nats-context.js';
@@ -180,6 +186,7 @@ describe('HandlerExplorer without access to Nest exception filters', () => {
       moduleRef.get(DiscoveryService),
       moduleRef.get(MetadataScanner),
       ecc as never,
+      moduleRef.get(ModuleRef),
     ).explore();
     expect(ecc.create).toHaveBeenCalled();
     for (const call of ecc.create.mock.calls as unknown[][]) {
