@@ -15,6 +15,7 @@ Decorator-driven [NATS](https://nats.io) integration for [NestJS](https://nestjs
 - `NatsClient` for fire-and-forget publish and request/reply, and `JetStreamClient` for publishing with acknowledgements and de-duplication. See [Publishing](./docs/publishing.md).
 - Declarative streams and consumers, synced at startup with four modes from create-or-update to read-only verification. See [Streams and consumers](./docs/streams.md).
 - Retry with exponential backoff and an optional dead-letter queue (DLQ), idempotency with a pluggable store (in memory, or shared through a JetStream KV bucket with `@loipv/nestjs-nats/kv`), and batch processing for `@Subscribe`, `@Consume` and `@ConsumePush`. See [Retry and dead-letter queue](./docs/retry-and-dlq.md), [Idempotency](./docs/idempotency.md) and [Batch processing](./docs/batching.md#batch-processing).
+- Handler timeouts (`timeout`, `handlerTimeout`): a handler that runs too long fails like any error, frees its slot and sees `ctx.signal` aborted. See [Handler timeout](./docs/handlers.md#handler-timeout).
 - Batched JetStream publishing with `publishMany()` and an auto-flushing `batcher()`. See [Batch publishing](./docs/batching.md#batch-publishing).
 - All-or-nothing publishing with `publishAtomic()`: several messages stored as one atomic batch. See [Atomic batches](./docs/publishing.md#atomic-batches).
 - Several named connections in one application, each passing its options straight to the NATS client, so every NATS auth method and TLS/mTLS works unchanged. See [Connections](./docs/connections.md).
@@ -104,7 +105,7 @@ Handlers can live in any provider or controller, in any module. The library find
 | Page | Covers |
 |---|---|
 | [Connections](./docs/connections.md) | Options and authentication, logging, several named connections, restarting handlers |
-| [Handlers](./docs/handlers.md) | `@Subscribe`, `@Consume`, `@ConsumePush`, `@ConsumeOrdered`, `@NatsService`, parameter decorators, pipes and Nest enhancers |
+| [Handlers](./docs/handlers.md) | `@Subscribe`, `@Consume`, `@ConsumePush`, `@ConsumeOrdered`, `@NatsService`, disabling handlers, handler timeouts, parameter decorators, pipes and Nest enhancers |
 | [Consumers](./docs/consumers.md) | Pull, push and ordered consumers compared: load, acknowledgement, shutdown, limits |
 | [Publishing](./docs/publishing.md) | `NatsClient`, `JetStreamClient`, atomic batches, codecs |
 | [Streams and consumers](./docs/streams.md) | Declarative streams and consumers, sync modes |

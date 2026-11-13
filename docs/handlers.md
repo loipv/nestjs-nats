@@ -156,6 +156,57 @@ export class BillingHandlers {
 
 A function that throws, or a value that is not a boolean, fails startup with a `NatsConfigError` naming the handler. Disabling a `@Consume` or `@ConsumePush` handler does not delete its durable consumer: messages stay on it until a handler consumes them again. In tests, [`NatsTestHarness.dispatch()`](./testing.md#natstestingmodule-and-natstestharness) rejects a target naming a disabled handler.
 
+## Handler timeout
+
+A handler that never returns holds its slot forever: with `concurrency: 1` its consumer stops, and a `@Consume` message is heartbeated, so the server never redelivers it. Give handlers a deadline with `timeout` (in ms) on a handler, or with `handlerTimeout`, the default of every handler of a connection:
+
+```ts
+import { Injectable } from '@nestjs/common';
+import { Consume, Ctx, NatsJetStreamContext, NatsModule, Payload } from '@loipv/nestjs-nats';
+
+NatsModule.forRoot({
+  connection: { servers: 'nats://localhost:4222' },
+  handlerTimeout: 30_000,
+});
+
+@Injectable()
+export class BillingHandlers {
+  @Consume({ stream: 'ORDERS', durable: 'billing', timeout: 5_000 })
+  async bill(@Payload() order: { id: string }, @Ctx() ctx: NatsJetStreamContext) {
+    // ctx.signal aborts the request when the handler times out.
+    await fetch(`https://billing.example.com/orders/${order.id}`, {
+      method: 'POST',
+      signal: ctx.signal,
+    });
+  }
+}
+```
+
+There is no timeout by default. A handler's `timeout` wins over `handlerTimeout`, and `timeout: false` turns it off for that handler. A value must be a number of ms above `0` and at most `2147483647`; anything else fails startup with a `NatsConfigError`. Every handler decorator takes `timeout`, `@CloudEventRouter` included. The timeout covers the handler with its guards, pipes, interceptors and exception filters, not decoding the payload, plugins or the idempotency store.
+
+When the timeout passes:
+
+- The run fails with a `NatsHandlerTimeoutError`, handled like any handler error: it is retryable by default (`retry.isRetryable` can change that), then dead-lettered or dropped. See [Retry and dead-letter queue](./retry-and-dlq.md).
+- The handler's slot is freed at once, so the next message runs.
+- `ctx.signal` is aborted with that error as its reason. Every context has a `signal`, a batch's too; it is never aborted otherwise. Pass it to what the handler awaits so the run stops.
+- What the handler returns later is ignored and logged as a warning. An error it throws later is logged as an error, unless it is the abort itself (the `NatsHandlerTimeoutError`, or an `AbortError`), which is a warning.
+
+| Handler | After the timeout |
+|---|---|
+| `@Consume`, `@ConsumePush` | `nak(delay)`, or dead-lettered, as for any error. The message is no longer heartbeated. With `ack: 'manual'`, a `ctx.ack()` the handler calls later does nothing: the message is already settled |
+| `@Subscribe` | Retried in the process after the delay |
+| Request to `@Subscribe`, `@ServiceEndpoint` | The requester gets an error reply `504`, `Handler timed out` |
+| `batch` | The whole batch fails, each message with its own attempt. A `{ failed }` the handler returns later is ignored |
+| `@ConsumeOrdered` | Retried in place after the delay |
+| `@CloudEventRouter` | The timeout applies to the `@OnCloudEvent` method the event is routed to |
+
+Limits:
+
+- **A handler cannot be stopped from outside.** One that ignores `ctx.signal` keeps running until it ends on its own. Meanwhile its message can be redelivered and run again alongside it, unless the handler enables [idempotency](./idempotency.md): the key of a timed-out run stays in progress until that run ends.
+- **More runs than `concurrency`.** A timed-out run that is still going on holds no slot, so more runs than `concurrency` can be in progress at once.
+- **Listeners.** A `ctx.signal` listener that throws raises an uncaught exception, as for any `EventTarget` in Node.
+- **Shutdown** waits for timed-out runs still going on, within `shutdown.drainTimeout`. See [Lifecycle](./lifecycle.md).
+
 ## Parameters, pipes and Nest enhancers
 
 | Decorator | Value |

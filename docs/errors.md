@@ -11,6 +11,7 @@
 | `NatsDecodeError` | A payload could not be decoded, or a message is not a valid CloudEvent |
 | `NatsAtomicPublishError` | `JetStreamClient.publishAtomic()` failed or was aborted. None of the messages was stored, except after a timeout waiting for the commit's ack: the server may have stored the batch then (see [Atomic batches](./publishing.md#atomic-batches)). It has the `subject` of the first message and the `count` of messages, and its `cause`, when it has one, is a copy of the underlying error with credentials masked: that is the error `publishAtomic()` rejects with when sending or committing the batch fails. When the batch is aborted before it is sent, `publishAtomic()` rejects with the failing plugin's own error (unchanged) or, for the staging timeout or a plugin that did not pass a message on, with an abort error that has no `cause`; the abort error that plugins see through `next()` keeps the plugin's raw error as `cause`, so it is not masked. Invalid arguments throw a `NatsConfigError` instead |
 | `NatsRequestError` | `NatsClient.request()` failed. See `code` |
+| `NatsHandlerTimeoutError` | A handler did not finish within its [`timeout`](./handlers.md#handler-timeout). It has the `handler` (`Class.method`) and the `timeout` in ms. It is handled like any handler error: retried (it is retryable by default), dead-lettered, or answered with a `504` |
 | `NonRetryableError` | Throw it yourself to tell the library not to retry a message. It goes straight to the DLQ if there is one, else it is dropped |
 
 A failing request handler or service endpoint replies with the `Nats-Service-Error` and `Nats-Service-Error-Code` headers:
@@ -19,4 +20,5 @@ A failing request handler or service endpoint replies with the `Nats-Service-Err
 |---|---|---|
 | `HttpException` | its status | its message |
 | `NatsDecodeError` | `400` | `Bad Request` |
+| `NatsHandlerTimeoutError` | `504` | `Handler timed out` |
 | anything else | `500` | `Internal Server Error`. Internal details are never sent |

@@ -20,7 +20,7 @@ NatsModule.forRoot({
 ```
 
 1. **Stop intake.** Subscriptions and consumers stop receiving messages. An ordered consumer also abandons a retry wait in progress (logged as a warning). A batch that is being collected is handed to its handler.
-2. **Wait for in-flight handlers.** Phases 1 and 2 together wait for up to `drainTimeout`.
+2. **Wait for in-flight handlers**, including runs that outlived their [`timeout`](./handlers.md#handler-timeout) and are still going on. Phases 1 and 2 together wait for up to `drainTimeout`.
 3. **Force stop.** JetStream messages that are being processed, collected into a batch, waiting for a batch slot, or queued for a free handler slot or for a batch (as many as a push consumer has received) are `nak`'d so the server redelivers them. Pending in-process retries are cancelled, and core messages that were collected or queued but never started are dropped. When something was forced, a warning per connection summarises the `nak`'d messages and cancelled retries, and a core handler may log a further warning about the dropped messages.
 4. **Close connections.** Each connection runs its close hooks (open `batcher()`s flush here, and `NatsClient.publish()` messages still in the outbound plugins are sent), then drains. If this takes longer than `drainTimeout`, the connection is closed without draining and a warning is logged. This also happens when the server is unreachable. A forced close that does not finish within 1 second is abandoned with a warning.
 5. **Close idempotency stores.** The `close()` of each store is called, within what is left of the bound of phase 4, but never less than 1 second (or `drainTimeout`, if that is shorter). A store that has not closed by then is abandoned with a warning.
