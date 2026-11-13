@@ -60,6 +60,9 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
   private readonly info: HandlerInfo;
   private readonly label: string;
   private readonly concurrency: number;
+  /** Resolves once every run that outlived the handler's timeout has ended. */
+  private readonly lingering: () => Promise<void>;
+
   private readonly batch?: ResolvedBatchOptions;
   /** `@ConsumePush`: messages are read as soon as they arrive, not when a slot is free. */
   private readonly push: boolean;
@@ -97,6 +100,7 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     this.info = pipeline.info;
     this.retry = pipeline.retry;
     this.run = pipeline.run;
+    this.lingering = pipeline.lingering;
     this.push = def.delivery === 'push';
     this.label = `${def.className}.${def.methodName} on "${def.options.stream}/${def.options.durable}"${this.push ? ' (push)' : ''}`;
     this.batch = resolveBatchOptions(def.options.batch);
@@ -191,6 +195,7 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     await this.loop;
     await this.dispatcher.idle();
     if (this.stopping) this.stopHeartbeat();
+    await this.lingering();
   }
 
   forceStop(): ForceStopResult {

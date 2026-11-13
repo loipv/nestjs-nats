@@ -1,13 +1,13 @@
 import type { ConsumerMessages, JsMsg } from '@nats-io/jetstream';
 import { JetStreamApiCodes, JetStreamApiError } from '@nats-io/jetstream';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RestartBinding } from '../../../src/adapters/adapter.js';
 import { OrderedConsumerAdapter } from '../../../src/adapters/ordered-consumer.adapter.js';
 import type { ConnectionEntry } from '../../../src/connection/connection-registry.js';
 import { NatsOrderedContext } from '../../../src/context/nats-ordered-context.js';
 import type { HandlerDefinition } from '../../../src/discovery/handler-explorer.js';
 import { NatsConfigError } from '../../../src/errors/errors.js';
-import { tick } from '../../support/async.js';
+import { never, tick } from '../../support/async.js';
 
 /**
  * Push-driven async iterable whose `close()` ends iteration after buffered items, and
@@ -100,6 +100,7 @@ function setup(
     /** `js().publish` (DLQ publishes). */
     publish?: () => Promise<unknown>;
     restart?: RestartBinding;
+    timeout?: number;
   } = {},
 ) {
   const fake = fakeMessages();
@@ -135,6 +136,7 @@ function setup(
       headersOnly: opts.headersOnly,
       retry: opts.retry,
       dlq: opts.dlq ?? false,
+      timeout: opts.timeout,
     },
     invoke,
   } as unknown as HandlerDefinition & { kind: 'ordered' };
@@ -506,5 +508,68 @@ describe('OrderedConsumerAdapter', () => {
       expect(get).toHaveBeenCalledTimes(1);
       expect(logger.error).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('OrderedConsumerAdapter timeout', () => {
+  const retry = { initialDelay: 100, jitter: 0 };
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('retries in place a message whose handler outlived its timeout', async () => {
+    let attempts = 0;
+    const { adapter, fake } = setup(
+      () => {
+        attempts++;
+        return attempts === 1 ? never() : Promise.resolve();
+      },
+      { timeout: 50, retry },
+    );
+    await adapter.start();
+    fake.push(fakeMsg(1) as unknown as JsMsg);
+    await tick();
+    expect(attempts).toBe(1);
+    await vi.advanceTimersByTimeAsync(50);
+    await vi.advanceTimersByTimeAsync(100);
+    await tick();
+    expect(attempts).toBe(2);
+    await adapter.stop();
+  });
+
+  it('waits at idle() for a run that outlived its timeout', async () => {
+    let attempts = 0;
+    let finish!: () => void;
+    const { adapter, fake } = setup(
+      () => {
+        attempts++;
+        return attempts === 1
+          ? new Promise<void>((resolve) => (finish = resolve))
+          : Promise.resolve();
+      },
+      { timeout: 50, retry },
+    );
+    await adapter.start();
+    fake.push(fakeMsg(1) as unknown as JsMsg);
+    await tick();
+    await vi.advanceTimersByTimeAsync(150);
+    await tick();
+    expect(attempts).toBe(2);
+    await adapter.stop();
+    let idle = false;
+    const idling = adapter.idle().then(() => {
+      idle = true;
+    });
+    await tick();
+    await tick();
+    expect(idle).toBe(false);
+    finish();
+    await idling;
+    expect(idle).toBe(true);
   });
 });

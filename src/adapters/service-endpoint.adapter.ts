@@ -28,6 +28,8 @@ interface EndpointRuntime {
   limiter: Limiter;
   codec: Codec;
   label: string;
+  /** Resolves once every run that outlived the endpoint's timeout has ended. */
+  lingering: () => Promise<void>;
 }
 
 /** One registration of the service: a restart creates a new one. */
@@ -60,7 +62,7 @@ export class NatsServiceAdapter implements HandlerAdapter {
   ) {
     this.endpoints = endpoints.map((def) => {
       // Requests are never retried: errors are answered with an error reply.
-      const { run, info, codec } = createHandlerPipeline(
+      const { run, info, codec, lingering } = createHandlerPipeline(
         { ...def, service: options },
         entry,
         defaultPipelineDeps,
@@ -71,6 +73,7 @@ export class NatsServiceAdapter implements HandlerAdapter {
         run,
         limiter: createLimiter(1),
         codec,
+        lingering,
         label: `${def.className}.${def.methodName} on service "${options.name}" endpoint "${def.endpoint}"`,
       };
     });
@@ -167,6 +170,7 @@ export class NatsServiceAdapter implements HandlerAdapter {
     // Loops end once the stopped service's subscriptions have yielded their buffered messages.
     await Promise.all(this.loops);
     await Promise.all(this.endpoints.map((e) => e.limiter.idle()));
+    await Promise.all(this.endpoints.map((e) => e.lingering()));
   }
 
   forceStop(): ForceStopResult {

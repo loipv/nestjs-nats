@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RestartBinding } from '../../../src/adapters/adapter.js';
 import {
   NatsServiceAdapter,
@@ -6,7 +6,7 @@ import {
 } from '../../../src/adapters/service-endpoint.adapter.js';
 import type { ConnectionEntry } from '../../../src/connection/connection-registry.js';
 import { NatsConfigError } from '../../../src/errors/errors.js';
-import { tick } from '../../support/async.js';
+import { never, tick } from '../../support/async.js';
 
 const svcm = vi.hoisted(() => ({ add: vi.fn() }));
 vi.mock('@nats-io/services', () => ({
@@ -488,5 +488,66 @@ describe('NatsServiceAdapter', () => {
       await adapter.stop();
       await adapter.idle();
     });
+  });
+});
+
+describe('NatsServiceAdapter timeout', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('replies 504 to a request that outlived its timeout, then serves the next one', async () => {
+    const { iterators, entry, endpoint } = setup((p) =>
+      p === 'hang' ? never() : Promise.resolve({ echo: p }),
+    );
+    const adapter = new NatsServiceAdapter(
+      { name: 'svc', version: '1' },
+      [endpoint('a', { timeout: 50 })],
+      entry,
+    );
+    await adapter.start();
+    const [hang, next] = [fakeMsg('hang'), fakeMsg('hi')];
+    iterators.get('a')?.push(hang);
+    iterators.get('a')?.push(next);
+    await tick();
+    expect(next.respond).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(50);
+    await tick();
+    await tick();
+    expect(hang.respondError).toHaveBeenCalledExactlyOnceWith(504, 'Handler timed out');
+    expect(next.respond).toHaveBeenCalledOnce();
+    await adapter.stop();
+  });
+
+  it('waits at idle() for a run that outlived its timeout', async () => {
+    let finish!: () => void;
+    const { iterators, entry, endpoint } = setup(
+      () => new Promise<unknown>((resolve) => (finish = () => resolve(undefined))),
+    );
+    const adapter = new NatsServiceAdapter(
+      { name: 'svc', version: '1' },
+      [endpoint('a', { timeout: 50 })],
+      entry,
+    );
+    await adapter.start();
+    iterators.get('a')?.push(fakeMsg('hang'));
+    await tick();
+    await vi.advanceTimersByTimeAsync(50);
+    await tick();
+    await adapter.stop();
+    let idle = false;
+    const idling = adapter.idle().then(() => {
+      idle = true;
+    });
+    await tick();
+    await tick();
+    expect(idle).toBe(false);
+    finish();
+    await idling;
+    expect(idle).toBe(true);
   });
 });

@@ -74,6 +74,8 @@ export class OrderedConsumerAdapter implements HandlerAdapter {
   private readonly run: (d: InternalDelivery) => Promise<void>;
   private readonly info: HandlerInfo;
   private readonly label: string;
+  /** Resolves once every run that outlived the handler's timeout has ended. */
+  private readonly lingering: () => Promise<void>;
   /** Aborted at shutdown: cancels the retry wait and the DLQ publish retries. */
   private readonly abort = new AbortController();
   private messages?: ConsumerMessages;
@@ -94,6 +96,7 @@ export class OrderedConsumerAdapter implements HandlerAdapter {
     this.info = pipeline.info;
     this.retry = pipeline.retry;
     this.run = pipeline.run;
+    this.lingering = pipeline.lingering;
     this.label = `${def.className}.${def.methodName} on "${def.options.stream}" (ordered)`;
     this.supervisor = new RestartSupervisor({
       policy: restart.policy,
@@ -160,6 +163,7 @@ export class OrderedConsumerAdapter implements HandlerAdapter {
   async idle(): Promise<void> {
     await this.supervisor.settled();
     await this.loop;
+    await this.lingering();
   }
 
   forceStop(): ForceStopResult {

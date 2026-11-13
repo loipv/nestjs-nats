@@ -1,9 +1,9 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HandlerState, RestartBinding } from '../../../src/adapters/adapter.js';
 import { CoreSubscriptionAdapter } from '../../../src/adapters/core-subscription.adapter.js';
 import type { ConnectionEntry } from '../../../src/connection/connection-registry.js';
 import type { HandlerDefinition } from '../../../src/discovery/handler-explorer.js';
-import { tick } from '../../support/async.js';
+import { never, tick } from '../../support/async.js';
 
 /** Push-driven subscription whose `drain()` ends iteration after buffered messages. */
 function fakeSubscription() {
@@ -660,5 +660,83 @@ describe('CoreSubscriptionAdapter restart', () => {
     expect(states.slice(0, 2)).toEqual(['running', 'restarting']);
     await adapter.stop();
     await adapter.idle();
+  });
+});
+
+describe('CoreSubscriptionAdapter timeout', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('frees the slot of a handler that outlived its timeout', async () => {
+    const handled: unknown[] = [];
+    const { adapter, fake } = setup(
+      (p) => {
+        handled.push(p);
+        return p === 1 ? never() : Promise.resolve();
+      },
+      [],
+      { retry: false },
+      { timeout: 50 },
+    );
+    await adapter.start();
+    fake.push(fakeMsg(1));
+    fake.push(fakeMsg(2));
+    await tick();
+    expect(handled).toEqual([1]);
+    await vi.advanceTimersByTimeAsync(50);
+    await tick();
+    expect(handled).toEqual([1, 2]);
+    await adapter.stop();
+  });
+
+  it('replies 504 to a request that outlived its timeout', async () => {
+    const { adapter, fake, logger } = setup(() => never(), [], {}, { timeout: 50 });
+    await adapter.start();
+    const msg = { ...fakeMsg(1), reply: '_INBOX.1' };
+    fake.push(msg);
+    await tick();
+    await vi.advanceTimersByTimeAsync(50);
+    await tick();
+    expect(msg.respond).toHaveBeenCalledTimes(1);
+    const [, opts] = msg.respond.mock.calls[0] as unknown as [
+      Uint8Array,
+      { headers: { get(k: string): string } },
+    ];
+    expect(opts.headers.get('Nats-Service-Error-Code')).toBe('504');
+    expect(opts.headers.get('Nats-Service-Error')).toBe('Handler timed out');
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Replied 504 to request on "a.b" for C.m: Handler C.m did not finish within 50 ms',
+    );
+    await adapter.stop();
+  });
+
+  it('waits at idle() for a run that outlived its timeout', async () => {
+    let finish!: () => void;
+    const { adapter, fake } = setup(
+      () => new Promise<void>((resolve) => (finish = resolve)),
+      [],
+      { retry: false },
+      { timeout: 50 },
+    );
+    await adapter.start();
+    fake.push(fakeMsg(1));
+    await tick();
+    await vi.advanceTimersByTimeAsync(50);
+    await adapter.stop();
+    let idle = false;
+    const idling = adapter.idle().then(() => {
+      idle = true;
+    });
+    await tick();
+    await tick();
+    expect(idle).toBe(false);
+    finish();
+    await idling;
+    expect(idle).toBe(true);
   });
 });

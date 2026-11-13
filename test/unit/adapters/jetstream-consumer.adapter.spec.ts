@@ -7,7 +7,7 @@ import type { NatsJetStreamContext } from '../../../src/context/nats-context.js'
 import type { HandlerDefinition } from '../../../src/discovery/handler-explorer.js';
 import { NatsConfigError } from '../../../src/errors/errors.js';
 import type { NatsStreamManager } from '../../../src/jetstream/stream-manager.js';
-import { tick } from '../../support/async.js';
+import { never, tick } from '../../support/async.js';
 
 /**
  * Push-driven async iterable whose `close()` ends iteration after buffered items, and
@@ -117,6 +117,7 @@ function setup(
     /** `js().publish` (DLQ publishes). */
     publish?: () => Promise<unknown>;
     restart?: RestartBinding;
+    timeout?: number;
   } = {},
 ) {
   const fake = fakeMessages();
@@ -161,6 +162,7 @@ function setup(
       dlq: opts.dlq,
       deliverGroup: opts.deliverGroup,
       config: opts.config,
+      timeout: opts.timeout,
     },
     invoke,
   } as unknown as HandlerDefinition & { kind: 'consume' };
@@ -1378,5 +1380,107 @@ describe('JetStreamConsumerAdapter', () => {
       await adapter.stop();
       await adapter.idle();
     });
+  });
+});
+
+describe('JetStreamConsumerAdapter timeout', () => {
+  const retry = { initialDelay: 100, jitter: 0 };
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('naks a message whose handler outlived its timeout with the backoff, freeing its slot', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const handled: unknown[] = [];
+    const { adapter, fake } = setup(
+      (p) => {
+        handled.push(p);
+        return p === 1 ? never() : Promise.resolve();
+      },
+      { timeout: 50, retry },
+    );
+    await adapter.start();
+    const [m1, m2] = [fakeMsg(1), fakeMsg(2)];
+    fake.push(m1 as unknown as JsMsg);
+    fake.push(m2 as unknown as JsMsg);
+    await tick();
+    expect(handled).toEqual([1]);
+    await vi.advanceTimersByTimeAsync(50);
+    await tick();
+    expect(m1.nak).toHaveBeenCalledExactlyOnceWith(100);
+    expect(handled).toEqual([1, 2]);
+    expect(m2.ack).toHaveBeenCalledOnce();
+    await adapter.stop();
+  });
+
+  it('ignores a manual ack the handler sends after its timeout', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let finish!: () => void;
+    const { adapter, fake, logger } = setup(
+      async (_p, ctx) => {
+        await new Promise<void>((resolve) => (finish = resolve));
+        (ctx as NatsJetStreamContext).ack();
+      },
+      { timeout: 50, ack: 'manual', retry },
+    );
+    await adapter.start();
+    const m = fakeMsg(1);
+    fake.push(m as unknown as JsMsg);
+    await tick();
+    await vi.advanceTimersByTimeAsync(50);
+    await tick();
+    expect(m.nak).toHaveBeenCalledExactlyOnceWith(100);
+    finish();
+    await tick();
+    await tick();
+    expect(m.ack).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
+    await adapter.stop();
+    await adapter.idle();
+  });
+
+  it('stops heartbeating a message once its handler timed out', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+    const { adapter, fake } = setup(() => never(), {
+      timeout: 250,
+      retry,
+      consumerConfig: { ack_wait: 200_000_000, max_deliver: -1 },
+    });
+    await adapter.start();
+    const m = fakeMsg(1);
+    fake.push(m as unknown as JsMsg);
+    await tick();
+    await vi.advanceTimersByTimeAsync(249);
+    const beats = m.working.mock.calls.length;
+    expect(beats).toBeGreaterThan(0);
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(m.working).toHaveBeenCalledTimes(beats);
+    await adapter.stop();
+  });
+
+  it('waits at idle() for a run that outlived its timeout', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let finish!: () => void;
+    const { adapter, fake } = setup(() => new Promise<void>((resolve) => (finish = resolve)), {
+      timeout: 50,
+      retry,
+    });
+    await adapter.start();
+    fake.push(fakeMsg(1) as unknown as JsMsg);
+    await tick();
+    await vi.advanceTimersByTimeAsync(50);
+    await adapter.stop();
+    let idle = false;
+    const idling = adapter.idle().then(() => {
+      idle = true;
+    });
+    await tick();
+    await tick();
+    expect(idle).toBe(false);
+    finish();
+    await idling;
+    expect(idle).toBe(true);
   });
 });

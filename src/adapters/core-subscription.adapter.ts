@@ -36,6 +36,9 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
   private readonly info: HandlerInfo;
   private readonly label: string;
   private readonly batch?: ResolvedBatchOptions;
+  /** Resolves once every run that outlived the handler's timeout has ended. */
+  private readonly lingering: () => Promise<void>;
+
   private sub?: Subscription;
   private loop?: Promise<void>;
   private stopping = false;
@@ -54,6 +57,7 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
     this.codec = pipeline.codec;
     this.info = pipeline.info;
     this.run = pipeline.run;
+    this.lingering = pipeline.lingering;
     this.label = `${def.className}.${def.methodName} on "${def.subject}"`;
     this.batch = resolveBatchOptions(def.options.batch);
     this.supervisor = new RestartSupervisor({
@@ -137,6 +141,7 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
     // The loop ends once the drained subscription has yielded its buffered messages.
     await this.loop;
     await this.dispatcher.idle();
+    await this.lingering();
   }
 
   forceStop(): ForceStopResult {
