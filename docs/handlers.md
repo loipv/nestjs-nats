@@ -2,6 +2,8 @@
 
 [Back to the README](../README.md)
 
+Each handler decorator declares one handler. Applying the same decorator twice to one method (two `@Subscribe`, say), or twice to one class (`@NatsService`, `@CloudEventRouter`), throws a `NatsConfigError` when the class is defined. Decorators of different kinds can share a method: `@Subscribe` and `@Consume` on one method make two handlers. To receive several subjects, use a [wildcard](#subscribesubject-options-core-nats) or one method per subject.
+
 ## `@Subscribe(subject, options?)`: core NATS
 
 ```ts

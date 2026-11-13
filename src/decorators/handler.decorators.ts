@@ -1,7 +1,7 @@
 import type { ConsumerConfig } from '@nats-io/jetstream';
-import { SetMetadata } from '@nestjs/common';
 import type { BatchOptions } from '../batch/collector.js';
 import type { Codec } from '../codec/codec.js';
+import { NatsConfigError } from '../errors/errors.js';
 import type { IdempotencyOptions } from '../idempotency/idempotency.js';
 import type { DlqOptions } from '../settlement/dlq.js';
 import type { RetryOptions } from '../settlement/retry.js';
@@ -128,26 +128,68 @@ export interface ServiceEndpointOptions {
   disabled?: HandlerDisabled;
 }
 
+/**
+ * Internal: a method decorator storing `value` under `key` on the method, as Nest's
+ * `SetMetadata` does. The same decorator applied twice to one method throws a
+ * `NatsConfigError`: the second would silently replace the first. `name` is the decorator's
+ * name in that error, such as `'@Subscribe'`.
+ */
+export function methodMetadata(key: string, name: string, value: unknown): MethodDecorator {
+  return (target, propertyKey, descriptor) => {
+    const method = descriptor.value as object;
+    if (Reflect.hasOwnMetadata(key, method)) {
+      // `target` is the prototype for an instance method, the class for a static one.
+      const owner = typeof target === 'function' ? target : target.constructor;
+      throw new NatsConfigError(
+        `${name} is applied more than once to ${owner.name}.${String(propertyKey)}; each handler decorator declares one handler per method`,
+      );
+    }
+    Reflect.defineMetadata(key, value, method);
+    return descriptor;
+  };
+}
+
+/**
+ * Internal: a class decorator storing `value` under `key` on the class. The same decorator
+ * applied twice to one class throws a `NatsConfigError`; a subclass may apply it again.
+ * `declares` ends the error, such as `'one service'`.
+ */
+export function classMetadata(
+  key: string,
+  name: string,
+  value: unknown,
+  declares: string,
+): ClassDecorator {
+  return (target) => {
+    if (Reflect.hasOwnMetadata(key, target)) {
+      throw new NatsConfigError(
+        `${name} is applied more than once to ${target.name}; each class declares ${declares}`,
+      );
+    }
+    Reflect.defineMetadata(key, value, target);
+  };
+}
+
 export function Subscribe(subject: string, options?: SubscribeOptions): MethodDecorator {
-  return SetMetadata(NATS_SUBSCRIBE_METADATA, { subject, options }) as MethodDecorator;
+  return methodMetadata(NATS_SUBSCRIBE_METADATA, '@Subscribe', { subject, options });
 }
 
 export function Consume(options: ConsumeOptions): MethodDecorator {
-  return SetMetadata(NATS_CONSUME_METADATA, { options }) as MethodDecorator;
+  return methodMetadata(NATS_CONSUME_METADATA, '@Consume', { options });
 }
 
 export function ConsumePush(options: ConsumePushOptions): MethodDecorator {
-  return SetMetadata(NATS_CONSUME_PUSH_METADATA, { options }) as MethodDecorator;
+  return methodMetadata(NATS_CONSUME_PUSH_METADATA, '@ConsumePush', { options });
 }
 
 export function ConsumeOrdered(options: ConsumeOrderedOptions): MethodDecorator {
-  return SetMetadata(NATS_CONSUME_ORDERED_METADATA, { options }) as MethodDecorator;
+  return methodMetadata(NATS_CONSUME_ORDERED_METADATA, '@ConsumeOrdered', { options });
 }
 
 export function NatsService(options: NatsServiceOptions): ClassDecorator {
-  return SetMetadata(NATS_SERVICE_METADATA, options) as ClassDecorator;
+  return classMetadata(NATS_SERVICE_METADATA, '@NatsService', options, 'one service');
 }
 
 export function ServiceEndpoint(name: string, options?: ServiceEndpointOptions): MethodDecorator {
-  return SetMetadata(NATS_ENDPOINT_METADATA, { name, options }) as MethodDecorator;
+  return methodMetadata(NATS_ENDPOINT_METADATA, '@ServiceEndpoint', { name, options });
 }

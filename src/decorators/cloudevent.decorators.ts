@@ -1,11 +1,14 @@
 import type { ConsumerConfig } from '@nats-io/jetstream';
-import { SetMetadata } from '@nestjs/common';
 import type { Codec } from '../codec/codec.js';
 import type { IdempotencyOptions } from '../idempotency/idempotency.js';
 import type { DlqOptions } from '../settlement/dlq.js';
 import type { RetryOptions } from '../settlement/retry.js';
 import { NATS_CLOUD_EVENT_ROUTER_METADATA, NATS_ON_CLOUD_EVENT_METADATA } from './constants.js';
-import type { HandlerDisabled, OrderedDeliverPolicy } from './handler.decorators.js';
+import {
+  classMetadata,
+  type HandlerDisabled,
+  type OrderedDeliverPolicy,
+} from './handler.decorators.js';
 
 /**
  * Options of `@CloudEventRouter`: exactly one source for the whole class, plus what to do
@@ -59,7 +62,12 @@ export type CloudEventRouterOptions = (
  * consumer and hands each to the `@OnCloudEvent` method whose type pattern matches it best.
  */
 export function CloudEventRouter(options: CloudEventRouterOptions): ClassDecorator {
-  return SetMetadata(NATS_CLOUD_EVENT_ROUTER_METADATA, options) as ClassDecorator;
+  return classMetadata(
+    NATS_CLOUD_EVENT_ROUTER_METADATA,
+    '@CloudEventRouter',
+    options,
+    'one router',
+  );
 }
 
 /**

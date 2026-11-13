@@ -18,6 +18,7 @@ import {
   Subscribe,
 } from '../../../src/decorators/handler.decorators.js';
 import { Ctx, Headers, Msg, Payload, Subject } from '../../../src/decorators/param.decorators.js';
+import { NatsConfigError } from '../../../src/errors/errors.js';
 
 const Custom = createParamDecorator((_d: unknown, _c: unknown) => 1);
 const pipeInstance: PipeTransform = { transform: (v) => v };
@@ -94,5 +95,102 @@ describe('handler decorators', () => {
     expect(NATS_CONSUME_ORDERED_METADATA).toBe('nats:consume-ordered');
     expect(NATS_SERVICE_METADATA).toBe('nats:service');
     expect(NATS_ENDPOINT_METADATA).toBe('nats:endpoint');
+  });
+});
+
+describe('handler decorators applied more than once', () => {
+  const TAIL = 'each handler decorator declares one handler per method';
+
+  const methodDecorators: Array<[string, () => MethodDecorator]> = [
+    ['@Subscribe', () => Subscribe('orders.created')],
+    ['@Consume', () => Consume({ stream: 'ORDERS', durable: 'billing' })],
+    ['@ConsumePush', () => ConsumePush({ stream: 'ORDERS', durable: 'billing' })],
+    ['@ConsumeOrdered', () => ConsumeOrdered({ stream: 'ORDERS' })],
+    ['@ServiceEndpoint', () => ServiceEndpoint('get')],
+  ];
+
+  /** Applies `decorators` to `Orders.prototype.on`, the last one first (as TypeScript does). */
+  function decorateOrdersOn(decorators: MethodDecorator[]): void {
+    class Orders {
+      on() {}
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(Orders.prototype, 'on');
+    for (const decorate of [...decorators].reverse()) {
+      decorate(Orders.prototype, 'on', descriptor as PropertyDescriptor);
+    }
+  }
+
+  it.each(methodDecorators)('rejects %s twice on one method', (name, decorator) => {
+    const apply = () => decorateOrdersOn([decorator(), decorator()]);
+    expect(apply).toThrow(NatsConfigError);
+    expect(apply).toThrow(`${name} is applied more than once to Orders.on; ${TAIL}`);
+  });
+
+  it('rejects two @Subscribe written on one method, even with different subjects', () => {
+    expect(() => {
+      class Orders {
+        @Subscribe('orders.created')
+        @Subscribe('orders.updated')
+        on() {}
+      }
+      return Orders;
+    }).toThrow(`@Subscribe is applied more than once to Orders.on; ${TAIL}`);
+  });
+
+  it('names the class of a static method', () => {
+    expect(() => {
+      // biome-ignore lint/complexity/noStaticOnlyClass: the decorated method must be static
+      class Jobs {
+        @Subscribe('a')
+        @Subscribe('b')
+        static run() {}
+      }
+      return Jobs;
+    }).toThrow(`@Subscribe is applied more than once to Jobs.run; ${TAIL}`);
+  });
+
+  it('accepts handler decorators of different kinds on one method', () => {
+    expect(() =>
+      decorateOrdersOn(methodDecorators.map(([, decorator]) => decorator())),
+    ).not.toThrow();
+  });
+
+  it('accepts a decorated override of a decorated method', () => {
+    class Base {
+      @Subscribe('a')
+      on() {}
+    }
+    class Child extends Base {
+      @Subscribe('b')
+      override on() {}
+    }
+    expect(Reflect.getMetadata(NATS_SUBSCRIBE_METADATA, Base.prototype.on)).toMatchObject({
+      subject: 'a',
+    });
+    expect(Reflect.getMetadata(NATS_SUBSCRIBE_METADATA, Child.prototype.on)).toMatchObject({
+      subject: 'b',
+    });
+  });
+
+  it('rejects @NatsService twice on one class', () => {
+    const apply = () => {
+      @NatsService({ name: 'a', version: '1.0.0' })
+      @NatsService({ name: 'b', version: '1.0.0' })
+      class Billing {}
+      return Billing;
+    };
+    expect(apply).toThrow(NatsConfigError);
+    expect(apply).toThrow(
+      '@NatsService is applied more than once to Billing; each class declares one service',
+    );
+  });
+
+  it('accepts @NatsService on a subclass of a service', () => {
+    @NatsService({ name: 'base', version: '1.0.0' })
+    class Base {}
+    @NatsService({ name: 'child', version: '2.0.0' })
+    class Child extends Base {}
+    expect(Reflect.getMetadata(NATS_SERVICE_METADATA, Base)).toMatchObject({ name: 'base' });
+    expect(Reflect.getMetadata(NATS_SERVICE_METADATA, Child)).toMatchObject({ name: 'child' });
   });
 });
