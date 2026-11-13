@@ -8,7 +8,13 @@ import type {
   InboundMessage,
   InternalDelivery,
 } from '../pipeline/delivery.js';
-import { FAILURES, messageContexts, recordOutcome, SKIPPED } from '../pipeline/delivery.js';
+import {
+  FAILURES,
+  LINGERING,
+  messageContexts,
+  recordOutcome,
+  SKIPPED,
+} from '../pipeline/delivery.js';
 import type { InboundMiddleware, Next } from '../pipeline/types.js';
 import type { RetryPolicy } from '../settlement/retry.js';
 import { errorMessage, errorTrace } from '../util/errors.js';
@@ -150,6 +156,21 @@ export function createIdempotency(cfg: IdempotencyConfig): InboundMiddleware {
     );
   }
 
+  /**
+   * Completes the keys of the messages that succeeded and frees those of the batch messages
+   * that failed on their own (recorded in `FAILURES`), which are retried.
+   */
+  async function settle(
+    d: Delivery,
+    claimed: Array<{ key: string; msg: InboundMessage }>,
+  ): Promise<void> {
+    const failures = (d as Partial<InternalDelivery>)[FAILURES];
+    const succeeded: string[] = [];
+    const failed: string[] = [];
+    for (const { key, msg } of claimed) (failures?.has(msg) ? failed : succeeded).push(key);
+    await Promise.all([complete(d, succeeded), release(d, failed)]);
+  }
+
   return {
     async handle(d: Delivery, next: Next): Promise<void> {
       const skipped = (d as InternalDelivery)[SKIPPED];
@@ -203,15 +224,17 @@ export function createIdempotency(cfg: IdempotencyConfig): InboundMiddleware {
       try {
         await next();
       } catch (err) {
-        await release(d, keysOf(claimed));
+        const lingering = (d as Partial<InternalDelivery>)[LINGERING];
+        if (lingering) {
+          // The handler outlived its timeout and still runs: a redelivery must find its keys
+          // in progress until that run ends, and then done (or free, when it failed).
+          void lingering.then((ok) => (ok ? settle(d, claimed) : release(d, keysOf(claimed))));
+        } else {
+          await release(d, keysOf(claimed));
+        }
         throw err;
       }
-      // Messages of a batch that failed on their own are retried: free their keys.
-      const failures = (d as Partial<InternalDelivery>)[FAILURES];
-      const succeeded: string[] = [];
-      const failed: string[] = [];
-      for (const { key, msg } of claimed) (failures?.has(msg) ? failed : succeeded).push(key);
-      await Promise.all([complete(d, succeeded), release(d, failed)]);
+      await settle(d, claimed);
     },
   };
 }

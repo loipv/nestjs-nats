@@ -6,6 +6,7 @@ import {
   NatsContext,
   NatsJetStreamContext,
 } from '../../../src/context/nats-context.js';
+import { NatsHandlerTimeoutError } from '../../../src/errors/errors.js';
 import {
   createIdempotency,
   IdempotencyStoreError,
@@ -20,13 +21,16 @@ import {
 import { compose } from '../../../src/pipeline/compose.js';
 import {
   type Delivery,
+  FAILURES,
   HANDLER_DEFINITION,
   type InboundMessage,
   type InternalDelivery,
+  LINGERING,
   SKIPPED,
 } from '../../../src/pipeline/delivery.js';
 import { resolveRetryPolicy } from '../../../src/settlement/retry.js';
 import { createSettlement } from '../../../src/settlement/settlement.js';
+import { tick } from '../../support/async.js';
 import { mockLogger } from '../../support/logger.js';
 
 function hdrs(init: Record<string, string>) {
@@ -512,5 +516,91 @@ describe('resolveIdempotency', () => {
     store.claim.mockResolvedValueOnce('in-progress');
     await resolveIdempotency(entryWith(store), true, false)?.handle(off.d, async () => {});
     expect(off.raw.nak).toHaveBeenCalledWith(1000);
+  });
+});
+
+describe('createIdempotency with a run that outlived its timeout', () => {
+  const KEY = 'consume:ORD/d|m1';
+
+  /** A `next()` that times out, leaving its run going on until `finish(ok)`. */
+  function timingOut(d: InternalDelivery) {
+    let finish!: (ok: boolean) => void;
+    const late = new Promise<boolean>((resolve) => {
+      finish = resolve;
+    });
+    const next = vi.fn(async () => {
+      d[LINGERING] = late;
+      throw new NatsHandlerTimeoutError('H.on', 100);
+    });
+    return { next, finish };
+  }
+
+  async function handled(store: IdempotencyStore) {
+    const { d, log, msg } = jsDelivery();
+    const { next, finish } = timingOut(d);
+    await expect(createIdempotency(cfg(store)).handle(d, next)).rejects.toBeInstanceOf(
+      NatsHandlerTimeoutError,
+    );
+    return { d, log, msg, finish };
+  }
+
+  it('keeps the keys claimed while the run goes on', async () => {
+    const store = fakeStore();
+    await handled(store);
+    await tick();
+    expect(store.release).not.toHaveBeenCalled();
+    expect(store.complete).not.toHaveBeenCalled();
+  });
+
+  it('completes the keys once the run finishes', async () => {
+    const store = fakeStore();
+    const { finish } = await handled(store);
+    finish(true);
+    await tick();
+    expect(store.complete).toHaveBeenCalledExactlyOnceWith(KEY, 1000);
+    expect(store.release).not.toHaveBeenCalled();
+  });
+
+  it('releases the keys once the run fails', async () => {
+    const store = fakeStore();
+    const { finish } = await handled(store);
+    finish(false);
+    await tick();
+    expect(store.release).toHaveBeenCalledExactlyOnceWith(KEY);
+    expect(store.complete).not.toHaveBeenCalled();
+  });
+
+  it('releases the key of a message the finished run failed', async () => {
+    const store = fakeStore();
+    const { d, msg, finish } = await handled(store);
+    (d as { [FAILURES]?: Map<InboundMessage, unknown> })[FAILURES] = new Map([
+      [msg, new Error('x')],
+    ]);
+    finish(true);
+    await tick();
+    expect(store.release).toHaveBeenCalledExactlyOnceWith(KEY);
+    expect(store.complete).not.toHaveBeenCalled();
+  });
+
+  it('logs a deferred complete that fails', async () => {
+    const store = fakeStore();
+    store.complete.mockImplementation(() => Promise.reject(new Error('store down')));
+    const { log, finish } = await handled(store);
+    finish(true);
+    await tick();
+    expect(log.warn).toHaveBeenCalledWith(
+      `Failed to complete idempotency key "${KEY}": store down`,
+    );
+  });
+
+  it('still releases at once a failure that did not outlive a timeout', async () => {
+    const store = fakeStore();
+    const { d } = jsDelivery();
+    await expect(
+      createIdempotency(cfg(store)).handle(d, async () => {
+        throw new Error('boom');
+      }),
+    ).rejects.toThrow('boom');
+    expect(store.release).toHaveBeenCalledExactlyOnceWith(KEY);
   });
 });
