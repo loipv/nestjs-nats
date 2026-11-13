@@ -13,13 +13,14 @@ import {
   NATS_SERVICE_METADATA,
   NATS_SUBSCRIBE_METADATA,
 } from './constants.js';
-import type { StartupValue } from './startup-value.js';
+import type { StartupContext, StartupValue } from './startup-value.js';
 
 /**
- * Whether a handler is skipped: a boolean, or a function called at application startup
- * (decorator arguments are evaluated at import time, before configuration is loaded).
+ * Whether a handler is skipped: a boolean, or a function called once at application startup
+ * (decorator arguments are evaluated at import time, before configuration is loaded). The
+ * function receives the application's providers, as a decorator's startup function does.
  */
-export type HandlerDisabled = boolean | (() => boolean);
+export type HandlerDisabled = boolean | ((ctx: StartupContext) => boolean);
 
 export interface SubscribeOptions {
   connection?: string;
@@ -214,7 +215,7 @@ export function ConsumeOrdered(options: StartupValue<ConsumeOrderedOptions>): Me
   return methodMetadata(NATS_CONSUME_ORDERED_METADATA, '@ConsumeOrdered', { options });
 }
 
-export function NatsService(options: NatsServiceOptions): ClassDecorator {
+export function NatsService(options: StartupValue<NatsServiceOptions>): ClassDecorator {
   return classMetadata(NATS_SERVICE_METADATA, '@NatsService', options, 'one service');
 }
 

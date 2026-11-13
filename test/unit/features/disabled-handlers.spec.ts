@@ -13,6 +13,7 @@ import {
   ServiceEndpoint,
   Subscribe,
 } from '../../../src/decorators/handler.decorators.js';
+import type { StartupContext } from '../../../src/decorators/startup-value.js';
 import {
   type DisabledHandler,
   type ExploreOptions,
@@ -145,6 +146,42 @@ describe('disabled handlers', () => {
     const mgr = { has: () => true, get: () => ({ options: {} }) } as unknown as ConnectionRegistry;
     expect(() => validateHandlers(defs, mgr)).not.toThrow();
     expect(names(defs)).toEqual(['Handlers.replacement']);
+  });
+
+  it('gives a disabled function the providers of the application, calling it once', async () => {
+    const off = vi.fn(({ get }: StartupContext) => get<{ off: boolean }>('FLAGS').off);
+    @Injectable()
+    class Handlers {
+      @Subscribe('a', { disabled: off }) a() {}
+      @Subscribe('b') b() {}
+    }
+    const moduleRef = await Test.createTestingModule({
+      imports: [DiscoveryModule],
+      providers: [HandlerExplorer, Handlers, { provide: 'FLAGS', useValue: { off: true } }],
+    }).compile();
+    const explorer = moduleRef.get(HandlerExplorer);
+    expect(names(explorer.explore())).toEqual(['Handlers.b']);
+    expect(names(explorer.explore())).toEqual(['Handlers.b']);
+    expect(off).toHaveBeenCalledOnce();
+    await moduleRef.close();
+  });
+
+  it('skips a handler disabled by its options function without validating the rest', async () => {
+    @Injectable()
+    class Handlers {
+      @Consume(() => ({ stream: '', durable: '', concurrency: -1, disabled: true })) off() {}
+    }
+    const onDisabled = vi.fn();
+    const defs = await explore([Handlers], { onDisabled });
+    expect(defs).toEqual([]);
+    expect(onDisabled).toHaveBeenCalledExactlyOnceWith({
+      kind: 'consume',
+      className: 'Handlers',
+      methodName: 'off',
+      connection: 'default',
+    });
+    const mgr = { has: () => true, get: () => ({ options: {} }) } as unknown as ConnectionRegistry;
+    expect(() => validateHandlers(defs, mgr)).not.toThrow();
   });
 
   it('rejects a disabled function that throws, naming the handler', async () => {

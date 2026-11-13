@@ -9,6 +9,7 @@ import {
   type HandlerDisabled,
   type OrderedDeliverPolicy,
 } from './handler.decorators.js';
+import type { StartupValue } from './startup-value.js';
 
 /**
  * Options of `@CloudEventRouter`: exactly one source for the whole class, plus what to do
@@ -66,7 +67,7 @@ export type CloudEventRouterOptions = (
  * Receives CloudEvents (binary or structured) on one subscription, pull, push or ordered
  * consumer and hands each to the `@OnCloudEvent` method whose type pattern matches it best.
  */
-export function CloudEventRouter(options: CloudEventRouterOptions): ClassDecorator {
+export function CloudEventRouter(options: StartupValue<CloudEventRouterOptions>): ClassDecorator {
   return classMetadata(
     NATS_CLOUD_EVENT_ROUTER_METADATA,
     '@CloudEventRouter',

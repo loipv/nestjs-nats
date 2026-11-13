@@ -3,6 +3,7 @@ import { Injectable, Module, type Provider, Scope, type Type } from '@nestjs/com
 import { DiscoveryModule } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import { describe, expect, it, vi } from 'vitest';
+import { CloudEventRouter, OnCloudEvent } from '../../../src/decorators/cloudevent.decorators.js';
 import {
   Consume,
   ConsumeOrdered,
@@ -282,5 +283,93 @@ describe('HandlerExplorer startup values of method decorators', () => {
         'NATS handler H.get: @ServiceEndpoint options resolved to null; expected an object',
       );
     });
+  });
+});
+
+describe('HandlerExplorer startup values of class decorators', () => {
+  it('resolves @NatsService options once for every endpoint of the class', async () => {
+    const service = vi.fn((ctx: StartupContext) => ({
+      name: `${config(ctx).prefix}-billing`,
+      version: '1.0.0',
+      connection: 'svcconn',
+    }));
+    @Injectable()
+    @NatsService(service)
+    class Billing {
+      @ServiceEndpoint('a') a() {}
+      @ServiceEndpoint('b') b() {}
+      @ServiceEndpoint('c') c() {}
+    }
+    const defs = await explore(Billing);
+    expect(defs).toHaveLength(3);
+    for (const def of defs) {
+      expect(def).toMatchObject({
+        kind: 'service-endpoint',
+        connection: 'svcconn',
+        service: { name: 'prod-billing', connection: 'svcconn' },
+      });
+    }
+    expect(service).toHaveBeenCalledOnce();
+  });
+
+  it('resolves @CloudEventRouter options', async () => {
+    @Injectable()
+    @CloudEventRouter(() => ({ subscribe: 'events', unmatched: 'term' }))
+    class Events {
+      @OnCloudEvent('order.created') on() {}
+    }
+    const [def] = await explore(Events);
+    expect(def).toMatchObject({
+      kind: 'subscribe',
+      subject: 'events',
+      methodName: '@CloudEventRouter',
+      router: { unmatched: 'term' },
+    });
+  });
+
+  it('checks resolved @CloudEventRouter options like written ones', async () => {
+    @Injectable()
+    @CloudEventRouter(() => ({ subscribe: 'a', unmatched: 'drop' }) as never)
+    class Events {
+      @OnCloudEvent('order.created') on() {}
+    }
+    expect((await exploreError(Events)).message).toBe(
+      `@CloudEventRouter Events has invalid unmatched "drop"; expected 'ack', 'term' or 'dlq'`,
+    );
+  });
+
+  it('rejects @NatsService options resolved to no object', async () => {
+    @Injectable()
+    @NatsService(() => null as never)
+    class Billing {
+      @ServiceEndpoint('a') a() {}
+    }
+    expect((await exploreError(Billing)).message).toBe(
+      '@NatsService Billing: @NatsService options resolved to null; expected an object',
+    );
+  });
+
+  it('rejects @CloudEventRouter options resolved to no object', async () => {
+    @Injectable()
+    @CloudEventRouter(() => null as never)
+    class Events {
+      @OnCloudEvent('order.created') on() {}
+    }
+    expect((await exploreError(Events)).message).toBe(
+      '@CloudEventRouter Events: @CloudEventRouter options resolved to null; expected an object',
+    );
+  });
+
+  it('names the class when a class options function throws', async () => {
+    @Injectable()
+    @NatsService(() => {
+      throw new Error('no config');
+    })
+    class Billing {
+      @ServiceEndpoint('a') a() {}
+    }
+    expect((await exploreError(Billing)).message).toBe(
+      '@NatsService Billing failed to resolve its @NatsService options: no config',
+    );
   });
 });

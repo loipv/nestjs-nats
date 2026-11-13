@@ -133,8 +133,10 @@ export class HandlerExplorer {
    * included (with their current instance) so validation can reject them.
    * `useExisting` aliases are skipped and an instance reachable through several wrappers
    * (other modules, other tokens) is explored once. Disabled handlers are left out (and
-   * reported to `onDisabled`); their `disabled` functions are called on every call. Throws a
-   * `NatsConfigError` for an invalid `@CloudEventRouter`/`@OnCloudEvent` setup or `disabled`.
+   * reported to `onDisabled`). Startup functions (decorator arguments and `disabled`) run on
+   * the first call only: later calls reuse what they returned or threw. Throws a
+   * `NatsConfigError` for an invalid `@CloudEventRouter`/`@OnCloudEvent` setup, decorator
+   * argument or `disabled`.
    */
   explore(options: ExploreOptions = {}): HandlerDefinition[] {
     const wrappers = [...this.discovery.getProviders(), ...this.discovery.getControllers()];
@@ -145,17 +147,19 @@ export class HandlerExplorer {
       if (wrapper.isAlias || !instance || typeof instance !== 'object' || !metatype) continue;
       if (seen.has(instance)) continue;
       seen.add(instance);
-      const service: NatsServiceOptions | undefined = Reflect.getMetadata(
+      const className = instance.constructor.name;
+      const service = this.classOptions<NatsServiceOptions>(
         NATS_SERVICE_METADATA,
         instance.constructor,
+        '@NatsService',
       );
-      const routerOptions: CloudEventRouterOptions | undefined = Reflect.getMetadata(
+      const routerOptions = this.classOptions<CloudEventRouterOptions>(
         NATS_CLOUD_EVENT_ROUTER_METADATA,
         instance.constructor,
+        '@CloudEventRouter',
       );
-      const className = instance.constructor.name;
       const serviceDisabled =
-        service !== undefined && isDisabled(service.disabled, `@NatsService ${className}`);
+        service !== undefined && this.isDisabled(service.disabled, `@NatsService ${className}`);
       const routes: Array<{ pattern: string; methodName: string }> = [];
       const prototype = Object.getPrototypeOf(instance) as object;
       for (const methodName of this.scanner.getAllMethodNames(prototype)) {
@@ -178,7 +182,7 @@ export class HandlerExplorer {
         }
         for (const spec of specs) {
           const disabled =
-            isDisabled(spec.options.disabled, `NATS handler ${className}.${methodName}`) ||
+            this.isDisabled(spec.options.disabled, `NATS handler ${className}.${methodName}`) ||
             (spec.kind === 'service-endpoint' && serviceDisabled);
           if (disabled) {
             options.onDisabled?.({
@@ -193,7 +197,7 @@ export class HandlerExplorer {
         }
       }
       if (!routerOptions) continue;
-      if (isDisabled(routerOptions.disabled, `@CloudEventRouter ${className}`)) {
+      if (this.isDisabled(routerOptions.disabled, `@CloudEventRouter ${className}`)) {
         options.onDisabled?.({
           kind: routerKind(routerOptions),
           className,
@@ -424,17 +428,64 @@ export class HandlerExplorer {
    */
   private resolve<T>(value: StartupValue<T>, subject: string, what: string): T {
     if (typeof value !== 'function') return value;
-    let outcome = this.resolved.get(value);
+    return this.once(value, () => resolveStartupValue(value, this.ctx, subject, what));
+  }
+
+  /** What `run` returns or throws, run on the first call for `fn` only. */
+  private once<T>(fn: object, run: () => T): T {
+    let outcome = this.resolved.get(fn);
     if (!outcome) {
       try {
-        outcome = { ok: true, value: resolveStartupValue(value, this.ctx, subject, what) };
+        outcome = { ok: true, value: run() };
       } catch (error) {
         outcome = { ok: false, error };
       }
-      this.resolved.set(value, outcome);
+      this.resolved.set(fn, outcome);
     }
     if (!outcome.ok) throw outcome.error;
     return outcome.value as T;
+  }
+
+  /**
+   * The options of a class decorator stored under `key` on `target`, resolved; `undefined`
+   * when the class lacks it. `name` (e.g. `'@NatsService'`) names it in errors.
+   */
+  private classOptions<T extends object>(
+    key: string,
+    target: abstract new (...args: never) => unknown,
+    name: string,
+  ): T | undefined {
+    const value: StartupValue<T> | undefined = Reflect.getMetadata(key, target);
+    if (value === undefined) return undefined;
+    return this.resolveOptions(value, `${name} ${target.name}`, `${name} options`);
+  }
+
+  /**
+   * Resolves a `disabled` option: `false` when unset, the boolean, or what the function
+   * returns (called once per application, with the providers). Throws a `NatsConfigError`
+   * naming `label` when the function throws or the value is not a boolean.
+   */
+  private isDisabled(value: HandlerDisabled | undefined, label: string): boolean {
+    if (value === undefined) return false;
+    const resolved: unknown =
+      typeof value === 'function'
+        ? this.once(value, () => {
+            try {
+              return value(this.ctx);
+            } catch (err) {
+              throw new NatsConfigError(
+                `${label} failed to resolve disabled: ${errorMessage(err)}`,
+                { cause: err },
+              );
+            }
+          })
+        : value;
+    if (typeof resolved !== 'boolean') {
+      throw new NatsConfigError(
+        `${label} has invalid disabled ${describeValue(resolved)}; expected a boolean or a function returning one`,
+      );
+    }
+    return resolved;
   }
 
   /** A string argument; what a function returns must be a non-empty string. */
@@ -577,31 +628,6 @@ function routerKind(options: CloudEventRouterOptions): HandlerKind {
   if ('consume' in options || 'consumePush' in options) return 'consume';
   if ('consumeOrdered' in options) return 'ordered';
   return 'subscribe';
-}
-
-/**
- * Resolves a `disabled` option: `false` when unset, the boolean, or what the function returns.
- * Throws a `NatsConfigError` naming `label` when the function throws or the value is not a
- * boolean.
- */
-function isDisabled(value: HandlerDisabled | undefined, label: string): boolean {
-  if (value === undefined) return false;
-  let resolved: unknown = value;
-  if (typeof value === 'function') {
-    try {
-      resolved = value();
-    } catch (err) {
-      throw new NatsConfigError(`${label} failed to resolve disabled: ${errorMessage(err)}`, {
-        cause: err,
-      });
-    }
-  }
-  if (typeof resolved !== 'boolean') {
-    throw new NatsConfigError(
-      `${label} has invalid disabled ${describeValue(resolved)}; expected a boolean or a function returning one`,
-    );
-  }
-  return resolved;
 }
 
 /** The error for a startup function that returned `value` instead of `expected`. */

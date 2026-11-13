@@ -32,6 +32,8 @@ import type {
   OrderedDeliverPolicy,
   PublishManyResult,
   RetryOptions,
+  StartupContext,
+  StartupValue,
   SubscribeOptions,
 } from '../../../src/index.js';
 import * as api from '../../../src/index.js';
@@ -205,7 +207,9 @@ it('exports the reliability types', () => {
   expectTypeOf<ConsumePushOptions>().toHaveProperty('durable');
   expectTypeOf<ConsumeOrderedOptions>().toHaveProperty('deliverPolicy');
   expectTypeOf<OrderedDeliverPolicy>().not.toBeAny();
-  expectTypeOf<HandlerDisabled>().toEqualTypeOf<boolean | (() => boolean)>();
+  expectTypeOf<HandlerDisabled>().toEqualTypeOf<boolean | ((ctx: StartupContext) => boolean)>();
+  expectTypeOf<StartupValue<string>>().toEqualTypeOf<string | ((ctx: StartupContext) => string)>();
+  expectTypeOf<StartupContext['get']>().returns.not.toBeAny();
   expectTypeOf<SubscribeOptions>().toHaveProperty('disabled');
   expectTypeOf<CloudEventRouterOptions>().toHaveProperty('disabled');
   expectTypeOf<NatsServiceOptions>().toHaveProperty('disabled');

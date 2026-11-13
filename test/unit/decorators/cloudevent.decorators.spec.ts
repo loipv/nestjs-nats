@@ -30,6 +30,25 @@ describe('@CloudEventRouter', () => {
     );
   });
 
+  it('stores a startup function itself', () => {
+    const options = () => ({ subscribe: 'events' });
+    @CloudEventRouter(options)
+    class Events {}
+    expect(Reflect.getMetadata(NATS_CLOUD_EVENT_ROUTER_METADATA, Events)).toBe(options);
+  });
+
+  it('rejects a startup function applied twice to one class', () => {
+    const options = () => ({ subscribe: 'events' });
+    expect(() => {
+      @CloudEventRouter(options)
+      @CloudEventRouter(options)
+      class Events {}
+      return Events;
+    }).toThrow(
+      '@CloudEventRouter is applied more than once to Events; each class declares one router',
+    );
+  });
+
   it('accepts a router on a subclass of a router', () => {
     @CloudEventRouter({ subscribe: 'a' })
     class Base {}
