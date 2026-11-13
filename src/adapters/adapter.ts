@@ -20,6 +20,8 @@ export interface ForceStopResult {
   nakked: number;
   /** Pending in-process retries that were cancelled. */
   cancelledRetries: number;
+  /** Runs that outlived their handler's timeout and were still going on, left behind. */
+  abandonedRuns: number;
 }
 
 export type HandlerState = 'running' | 'restarting' | 'failed';

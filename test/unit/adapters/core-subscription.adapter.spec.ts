@@ -200,7 +200,7 @@ describe('CoreSubscriptionAdapter', () => {
     await tick();
     await adapter.stop();
     await adapter.idle();
-    expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 1 });
+    expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 1, abandonedRuns: 0 });
   });
 
   it('replies with an error and warns once for 5xx', async () => {
@@ -235,7 +235,7 @@ describe('CoreSubscriptionAdapter', () => {
     await adapter.start();
     await adapter.stop();
     await adapter.idle();
-    expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0 });
+    expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0, abandonedRuns: 0 });
   });
 
   describe('batch', () => {
@@ -378,7 +378,7 @@ describe('CoreSubscriptionAdapter', () => {
       fake.push(fakeMsg(1));
       fake.push(fakeMsg(2));
       await tick();
-      expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0 });
+      expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0, abandonedRuns: 0 });
       expect(logger.warn).toHaveBeenCalledWith(
         'Dropped 2 unstarted messages (collected or queued) for C.m on "a.b" at forced stop',
       );
@@ -739,6 +739,7 @@ describe('CoreSubscriptionAdapter timeout', () => {
     await tick();
     await tick();
     expect(idle).toBe(false);
+    expect(adapter.forceStop().abandonedRuns).toBe(1);
     finish();
     await idling;
     expect(idle).toBe(true);

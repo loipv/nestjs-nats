@@ -19,6 +19,7 @@ import {
   createDelivery,
   FAILURES,
   type InternalDelivery,
+  LINGERING,
   SKIPPED,
 } from '../../../src/pipeline/delivery.js';
 import { invokeHandler } from '../../../src/pipeline/invoker.js';
@@ -390,6 +391,37 @@ describe('batch idempotency', () => {
     expect(raws[3]?.nak).toHaveBeenCalledExactlyOnceWith(100);
     expect(s.complete.mock.calls).toEqual([['consume:ORD/d|a', 1000]]);
     expect(s.release.mock.calls).toEqual([['consume:ORD/d|d']]);
+  });
+
+  it('settles the keys of a batch that outlived its timeout by what it reports late', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const s = store([]);
+      const late = { failed: [{ msg: 1, error: new Error('late') }] };
+      const { d, raws } = jsBatch(
+        ['1', '2'],
+        () => new Promise((resolve) => setTimeout(() => resolve(late), 100)),
+        [],
+        ['a', 'b'],
+      );
+      const idem = createIdempotency({ store: s, ttl: 1000, inProgressNakMs: 50 });
+      const run = compose<InternalDelivery>([toMw(settlement()), toMw(idem)], (x) =>
+        invokeHandler(x, { timeout: 50 }),
+      )(d);
+      await vi.advanceTimersByTimeAsync(50);
+      await run;
+      // Timed out: every message is retried, and the keys stay in progress meanwhile.
+      expect(raws[0]?.nak).toHaveBeenCalledExactlyOnceWith(100);
+      expect(raws[1]?.nak).toHaveBeenCalledExactlyOnceWith(100);
+      expect(s.complete).not.toHaveBeenCalled();
+      expect(s.release).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(d[LINGERING]).resolves.toBe(true);
+      expect(s.complete.mock.calls).toEqual([['consume:ORD/d|a', 1000]]);
+      expect(s.release.mock.calls).toEqual([['consume:ORD/d|b']]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('releases every claim when the handler throws', async () => {

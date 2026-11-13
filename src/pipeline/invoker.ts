@@ -31,7 +31,8 @@ function timed<T>(
   d: InternalDelivery,
   handler: string,
   call: () => Promise<T>,
-  contexts: ReadonlyArray<{ [ABORT_HANDLER](reason: unknown): void }>,
+  /** The contexts to abort at the timeout; only built if it fires. */
+  contexts: () => ReadonlyArray<{ [ABORT_HANDLER](reason: unknown): void }>,
   timeout: number | false | undefined,
 ): Promise<T> {
   if (!timeout) return call();
@@ -40,7 +41,7 @@ function timed<T>(
     handler,
     logger: d.logger,
     abort: (reason) => {
-      for (const context of contexts) context[ABORT_HANDLER](reason);
+      for (const context of contexts()) context[ABORT_HANDLER](reason);
     },
     linger: (run) => {
       d[LINGERING] = run;
@@ -89,7 +90,7 @@ export async function invokeHandler(d: InternalDelivery, opts: InvokeOptions = {
     d,
     `${d.handler.className}.${d.handler.methodName}`,
     async () => unwrap(await d[HANDLER_DEFINITION].invoke(payload, context)),
-    [context],
+    () => [context],
     timeout,
   );
 }
@@ -122,7 +123,7 @@ async function invokeRoute(
       d,
       `${d.handler.className}.${target.methodName}`,
       async () => unwrap(await target.invoke(data, ctx)),
-      [ctx],
+      () => [ctx],
       timeout,
     );
     return;
@@ -173,7 +174,7 @@ async function invokeBatch(
     d,
     `${d.handler.className}.${d.handler.methodName}`,
     async () => applyFailed(d, view, await unwrap(await d[HANDLER_DEFINITION].invoke(items, view))),
-    [view, batch, ...batch.messages],
+    () => [view, batch, ...batch.messages],
     timeout,
   );
 }

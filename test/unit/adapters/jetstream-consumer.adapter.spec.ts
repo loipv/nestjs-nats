@@ -367,7 +367,7 @@ describe('JetStreamConsumerAdapter', () => {
     expect(a.ack).toHaveBeenCalledTimes(1);
 
     await adapter.stop();
-    expect(adapter.forceStop()).toEqual({ nakked: 1, cancelledRetries: 0 });
+    expect(adapter.forceStop()).toEqual({ nakked: 1, cancelledRetries: 0, abandonedRuns: 0 });
     expect(b.nak).toHaveBeenCalledTimes(1);
     expect(a.nak).not.toHaveBeenCalled();
 
@@ -375,7 +375,7 @@ describe('JetStreamConsumerAdapter', () => {
     await adapter.idle();
     // Already settled by forceStop: the handler finishing does not ack it.
     expect(b.ack).not.toHaveBeenCalled();
-    expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0 });
+    expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0, abandonedRuns: 0 });
   });
 
   it('forceStop survives a nak that throws and does not count it', async () => {
@@ -388,7 +388,7 @@ describe('JetStreamConsumerAdapter', () => {
     fake.push(m as unknown as JsMsg);
     await tick();
     await adapter.stop();
-    expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0 });
+    expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0, abandonedRuns: 0 });
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringMatching(/Failed to nak/),
       expect.stringContaining('closed'),
@@ -753,7 +753,7 @@ describe('JetStreamConsumerAdapter', () => {
       await tick();
       await tick();
       await adapter.stop();
-      expect(adapter.forceStop()).toEqual({ nakked: 2, cancelledRetries: 0 });
+      expect(adapter.forceStop()).toEqual({ nakked: 2, cancelledRetries: 0, abandonedRuns: 0 });
       for (const m of msgs) expect(m.nak).toHaveBeenCalledTimes(1);
     });
 
@@ -795,7 +795,7 @@ describe('JetStreamConsumerAdapter', () => {
       expect(batches).toEqual([[1, 2]]);
       await adapter.stop(); // flushes [3], which waits for the only slot
       await tick();
-      expect(adapter.forceStop()).toEqual({ nakked: 3, cancelledRetries: 0 });
+      expect(adapter.forceStop()).toEqual({ nakked: 3, cancelledRetries: 0, abandonedRuns: 0 });
       for (const m of [a, b, c]) expect(m.nak).toHaveBeenCalledTimes(1);
       release();
       await adapter.idle();
@@ -811,7 +811,7 @@ describe('JetStreamConsumerAdapter', () => {
       fake.push(a as unknown as JsMsg);
       fake.push(b as unknown as JsMsg);
       await tick();
-      expect(adapter.forceStop()).toEqual({ nakked: 2, cancelledRetries: 0 });
+      expect(adapter.forceStop()).toEqual({ nakked: 2, cancelledRetries: 0, abandonedRuns: 0 });
       expect(a.nak).toHaveBeenCalledTimes(1);
       expect(b.nak).toHaveBeenCalledTimes(1);
       await adapter.stop();
@@ -1069,7 +1069,7 @@ describe('JetStreamConsumerAdapter', () => {
       expect(handled).toEqual([1]);
       await adapter.stop();
       // The hung one, and the two waiting for its slot.
-      expect(adapter.forceStop()).toEqual({ nakked: 3, cancelledRetries: 0 });
+      expect(adapter.forceStop()).toEqual({ nakked: 3, cancelledRetries: 0, abandonedRuns: 0 });
       for (const m of msgs) expect(m.nak).toHaveBeenCalledTimes(1);
       release();
       await adapter.idle();
@@ -1107,7 +1107,7 @@ describe('JetStreamConsumerAdapter', () => {
       // [1, 2] hangs, [3, 4] waits for its slot, 5..8 wait behind that batch.
       expect(batches).toEqual([[1, 2]]);
       await adapter.stop();
-      expect(adapter.forceStop()).toEqual({ nakked: 8, cancelledRetries: 0 });
+      expect(adapter.forceStop()).toEqual({ nakked: 8, cancelledRetries: 0, abandonedRuns: 0 });
       for (const m of msgs) expect(m.nak).toHaveBeenCalledTimes(1);
       release();
       await adapter.idle();
@@ -1479,6 +1479,7 @@ describe('JetStreamConsumerAdapter timeout', () => {
     await tick();
     await tick();
     expect(idle).toBe(false);
+    expect(adapter.forceStop().abandonedRuns).toBe(1);
     finish();
     await idling;
     expect(idle).toBe(true);

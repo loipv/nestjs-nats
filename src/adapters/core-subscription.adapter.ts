@@ -39,6 +39,7 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
   private readonly batch?: ResolvedBatchOptions;
   /** Resolves once every run that outlived the handler's timeout has ended. */
   private readonly lingering: () => Promise<void>;
+  private readonly lingeringRuns: () => number;
   private readonly idempotent: boolean;
 
   private sub?: Subscription;
@@ -60,6 +61,7 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
     this.info = pipeline.info;
     this.run = pipeline.run;
     this.lingering = pipeline.lingering;
+    this.lingeringRuns = pipeline.lingeringRuns;
     this.idempotent = pipeline.idempotent;
     this.label = `${def.className}.${def.methodName} on "${def.subject}"`;
     this.batch = resolveBatchOptions(def.options.batch);
@@ -155,7 +157,11 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
         `Dropped ${dropped} unstarted message${dropped === 1 ? '' : 's'} (collected or queued) for ${this.label} at forced stop`,
       );
     }
-    return { nakked: 0, cancelledRetries: this.dispatcher.cancelRetries() };
+    return {
+      nakked: 0,
+      cancelledRetries: this.dispatcher.cancelRetries(),
+      abandonedRuns: this.lingeringRuns(),
+    };
   }
 
   private async consume(sub: Subscription): Promise<void> {

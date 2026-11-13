@@ -62,6 +62,7 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
   private readonly concurrency: number;
   /** Resolves once every run that outlived the handler's timeout has ended. */
   private readonly lingering: () => Promise<void>;
+  private readonly lingeringRuns: () => number;
 
   private readonly batch?: ResolvedBatchOptions;
   /** `@ConsumePush`: messages are read as soon as they arrive, not when a slot is free. */
@@ -101,6 +102,7 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     this.retry = pipeline.retry;
     this.run = pipeline.run;
     this.lingering = pipeline.lingering;
+    this.lingeringRuns = pipeline.lingeringRuns;
     this.push = def.delivery === 'push';
     this.label = `${def.className}.${def.methodName} on "${def.options.stream}/${def.options.durable}"${this.push ? ' (push)' : ''}`;
     this.batch = resolveBatchOptions(def.options.batch);
@@ -215,7 +217,11 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     // Received but not started (collected, or in a batch waiting for a slot).
     for (const msg of this.dispatcher.abandon()) nak(() => msg.nak());
     this.unsettled.clear();
-    return { nakked, cancelledRetries: this.dispatcher.cancelRetries() };
+    return {
+      nakked,
+      cancelledRetries: this.dispatcher.cancelRetries(),
+      abandonedRuns: this.lingeringRuns(),
+    };
   }
 
   private async openPull(): Promise<Intake> {

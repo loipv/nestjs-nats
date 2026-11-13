@@ -333,7 +333,7 @@ describe('NatsServiceAdapter', () => {
     await adapter.start();
     await adapter.stop();
     await adapter.idle();
-    expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0 });
+    expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0, abandonedRuns: 0 });
   });
   it('reports why the service stopped when its iterators end before it reports stopped', async () => {
     const { service, logger, entry, endpoint } = setup();
@@ -546,6 +546,7 @@ describe('NatsServiceAdapter timeout', () => {
     await tick();
     await tick();
     expect(idle).toBe(false);
+    expect(adapter.forceStop().abandonedRuns).toBe(1);
     finish();
     await idling;
     expect(idle).toBe(true);

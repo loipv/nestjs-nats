@@ -199,7 +199,7 @@ describe('OrderedConsumerAdapter', () => {
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('abandoned at shutdown'));
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('stream seq 7'));
     expect(invoke).toHaveBeenCalledTimes(1);
-    expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0 });
+    expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0, abandonedRuns: 0 });
   });
 
   it('does not count a retry wait that stop() already cancelled', async () => {
@@ -211,7 +211,7 @@ describe('OrderedConsumerAdapter', () => {
     await tick();
     // forceStop() right after stop(), before the cancelled wait has returned.
     void adapter.stop();
-    expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0 });
+    expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0, abandonedRuns: 0 });
     await adapter.idle();
   });
 
@@ -248,7 +248,7 @@ describe('OrderedConsumerAdapter', () => {
     fake.push(fakeMsg(1));
     await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
     await tick();
-    expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 1 });
+    expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 1, abandonedRuns: 0 });
     await adapter.stop();
     await adapter.idle();
   });
@@ -574,6 +574,7 @@ describe('OrderedConsumerAdapter timeout', () => {
     await tick();
     await tick();
     expect(idle).toBe(false);
+    expect(adapter.forceStop().abandonedRuns).toBe(1);
     finish();
     await idling;
     expect(idle).toBe(true);

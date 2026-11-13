@@ -171,6 +171,12 @@ describe('NatsJetStreamContext', () => {
     expect(ctx.settled).toBe(false);
   });
 
+  it('working() does nothing once the message is settled', () => {
+    ctx.nak(1000);
+    ctx.working();
+    expect(raw.working).not.toHaveBeenCalled();
+  });
+
   it('working() does not settle and can repeat', () => {
     ctx.working();
     ctx.working();

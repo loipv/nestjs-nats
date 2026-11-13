@@ -98,7 +98,10 @@ export class NonRetryableError extends NatsModuleError {}
  * or answered with a `504`) while the handler may still be running.
  */
 export class NatsHandlerTimeoutError extends NatsModuleError {
-  /** `Class.method` of the handler. */
+  /**
+   * `Class.method` of the handler; for a `@CloudEventRouter`, of the `@OnCloudEvent` method
+   * the event was routed to.
+   */
   readonly handler: string;
   /** The handler's timeout, in ms. */
   readonly timeout: number;

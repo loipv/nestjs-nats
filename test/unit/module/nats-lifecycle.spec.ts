@@ -29,7 +29,7 @@ function fakeAdapter(overrides: Partial<HandlerAdapter> = {}) {
     start: vi.fn(async () => {}),
     stop: vi.fn(async () => {}),
     idle: vi.fn(async () => {}),
-    forceStop: vi.fn((): ForceStopResult => ({ nakked: 0, cancelledRetries: 0 })),
+    forceStop: vi.fn((): ForceStopResult => ({ nakked: 0, cancelledRetries: 0, abandonedRuns: 0 })),
     ...overrides,
   };
 }
@@ -139,7 +139,7 @@ describe('NatsLifecycle shutdown', () => {
     const { manager, entries } = fakeManager({ default: { shutdown: { drainTimeout: 1000 } } });
     const hanging = fakeAdapter({
       idle: vi.fn(never),
-      forceStop: vi.fn(() => ({ nakked: 3, cancelledRetries: 0 })),
+      forceStop: vi.fn(() => ({ nakked: 3, cancelledRetries: 0, abandonedRuns: 0 })),
     });
     const quiet = fakeAdapter();
     const lifecycle = await startLifecycle(manager, [{ adapter: hanging }, { adapter: quiet }]);
@@ -165,7 +165,7 @@ describe('NatsLifecycle shutdown', () => {
   it('cancels pending retries even when idle in time', async () => {
     const { manager, entries } = fakeManager({ default: { shutdown: { drainTimeout: 1000 } } });
     const adapter = fakeAdapter({
-      forceStop: vi.fn(() => ({ nakked: 0, cancelledRetries: 2 })),
+      forceStop: vi.fn(() => ({ nakked: 0, cancelledRetries: 2, abandonedRuns: 0 })),
     });
     const lifecycle = await startLifecycle(manager, [{ adapter }]);
 
@@ -179,6 +179,18 @@ describe('NatsLifecycle shutdown', () => {
     );
   });
 
+  it('counts the runs that outlived their timeout and were abandoned', async () => {
+    const { manager, entries } = fakeManager({ default: { shutdown: { drainTimeout: 1000 } } });
+    const adapter = fakeAdapter({
+      forceStop: vi.fn(() => ({ nakked: 0, cancelledRetries: 0, abandonedRuns: 2 })),
+    });
+    const lifecycle = await startLifecycle(manager, [{ adapter }]);
+    await lifecycle.beforeApplicationShutdown();
+    expect(entries.get('default')?.logger.warn).toHaveBeenCalledExactlyOnceWith(
+      'NATS connection "default" shutdown: nak\'d 0 unsettled JetStream messages and cancelled 0 pending retries; abandoned 2 handler runs that outlived their timeout',
+    );
+  });
+
   it('logs nothing when there was nothing to force', async () => {
     const { manager, entries } = fakeManager({ default: {} });
     const lifecycle = await startLifecycle(manager, [{ adapter: fakeAdapter() }]);
@@ -189,7 +201,7 @@ describe('NatsLifecycle shutdown', () => {
   it('sums the forced work of each connection into one line', async () => {
     const { manager, entries } = fakeManager({ a: {}, b: {} });
     const forced = (nakked: number, cancelledRetries: number) =>
-      fakeAdapter({ forceStop: vi.fn(() => ({ nakked, cancelledRetries })) });
+      fakeAdapter({ forceStop: vi.fn(() => ({ nakked, cancelledRetries, abandonedRuns: 0 })) });
     const lifecycle = await startLifecycle(manager, [
       { adapter: forced(1, 1), connection: 'a' },
       { adapter: forced(2, 0), connection: 'a' },
@@ -356,7 +368,7 @@ describe('NatsLifecycle failed bootstrap', () => {
       }),
       forceStop: vi.fn(() => {
         order.push('forceStop');
-        return { nakked: 0, cancelledRetries: 0 };
+        return { nakked: 0, cancelledRetries: 0, abandonedRuns: 0 };
       }),
     });
     const failing = fakeAdapter({

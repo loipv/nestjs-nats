@@ -763,3 +763,28 @@ describe('NatsTestHarness with startup values', () => {
   it('still resolves a handler with a written subject', async () =>
     expect((await h.dispatch({ subject: 'orders.updated' }, 4)).result).toEqual({ updated: 4 }));
 });
+
+describe('NatsTestHarness with an invalid module handlerTimeout', () => {
+  @Injectable()
+  class Timed {
+    @Subscribe('timed.a')
+    on() {}
+  }
+
+  it.each([[-1], [Number.POSITIVE_INFINITY], ['5']])(
+    'fails dispatch() as bootstrap would for %s',
+    async (handlerTimeout) => {
+      const moduleRef = await Test.createTestingModule({
+        imports: [NatsTestingModule.forRoot({ handlerTimeout: handlerTimeout as never })],
+        providers: [Timed],
+      })
+        .setLogger(silentLogger)
+        .compile();
+      const h = NatsTestHarness.create(moduleRef);
+      await expect(h.dispatch({ subject: 'timed.a' }, 1)).rejects.toThrow(
+        `NATS connection "default" has invalid handlerTimeout ${String(handlerTimeout)}; expected a number of ms in (0, 2147483647] or false`,
+      );
+      await moduleRef.close();
+    },
+  );
+});

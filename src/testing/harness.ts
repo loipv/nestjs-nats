@@ -22,6 +22,7 @@ import {
   type InboundMessage,
   type MessageOutcome,
 } from '../pipeline/delivery.js';
+import { assertTimeout } from '../pipeline/handler-timeout.js';
 import {
   batchRequestError,
   isReplyDelivery,
@@ -271,6 +272,11 @@ export class NatsTestHarness {
   /** The discovered handlers, validated on first use as bootstrap validates them. */
   private explore(): HandlerDefinition[] {
     if (!this.handlers) {
+      // As the module init of NatsModule validates it (the testing module has none).
+      for (const name of this.registry.names()) {
+        const { handlerTimeout } = this.registry.get(name).options;
+        assertTimeout(handlerTimeout, `NATS connection "${name}"`, 'handlerTimeout');
+      }
       this.disabled.clear();
       const defs = this.explorer.explore({ onDisabled: (d) => this.disabled.add(label(d)) });
       validateHandlers(defs, this.registry);

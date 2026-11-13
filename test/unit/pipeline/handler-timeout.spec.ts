@@ -101,6 +101,22 @@ describe('invokeWithin', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('hands the run over before aborting it', async () => {
+    const order: string[] = [];
+    const run = deferred<string>();
+    const result = invokeWithin(() => run.promise, {
+      timeout: 5000,
+      handler: 'Orders.on',
+      logger: mockLogger(),
+      linger: () => order.push('linger'),
+      abort: () => order.push('abort'),
+    });
+    const failed = expect(result).rejects.toBeInstanceOf(NatsHandlerTimeoutError);
+    await vi.advanceTimersByTimeAsync(5000);
+    await failed;
+    expect(order).toEqual(['linger', 'abort']);
+  });
+
   it('fails a run still pending at the timeout, aborting it once and handing it over', async () => {
     const run = deferred<string>();
     const t = within(() => run.promise);
@@ -157,6 +173,41 @@ describe('invokeWithin', () => {
         'Handler Orders.on stopped 1234 ms after its 5000 ms timeout',
       );
       expect(t.logger.error).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['an error caused by the timeout', (e: Error) => new Error('wrapped', { cause: e })],
+      [
+        'an error caused by an AbortError',
+        () =>
+          new Error('wrapped', {
+            cause: Object.assign(new Error('aborted'), { name: 'AbortError' }),
+          }),
+      ],
+      [
+        'a CanceledError (axios)',
+        () => Object.assign(new Error('canceled'), { name: 'CanceledError' }),
+      ],
+    ])('warns that it stopped when it rejects with %s', async (_, reason) => {
+      const run = deferred<string>();
+      const t = await timedOut(run.promise);
+      run.reject(reason(t.error));
+      await expect(t.lingering()).resolves.toBe(false);
+      expect(t.logger.warn).toHaveBeenCalledExactlyOnceWith(
+        'Handler Orders.on stopped 0 ms after its 5000 ms timeout',
+      );
+      expect(t.logger.error).not.toHaveBeenCalled();
+    });
+
+    it.each([[null], [undefined]])('logs a late rejection with %s', async (reason) => {
+      const run = deferred<string>();
+      const t = await timedOut(run.promise);
+      run.reject(reason);
+      await expect(t.lingering()).resolves.toBe(false);
+      expect(t.logger.error).toHaveBeenCalledOnce();
+      expect(t.logger.error.mock.calls[0]?.[0]).toBe(
+        `Handler Orders.on failed 0 ms after its 5000 ms timeout: ${String(reason)}`,
+      );
     });
 
     it('logs an error, with the stack, when it fails otherwise', async () => {

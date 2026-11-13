@@ -77,6 +77,7 @@ export class OrderedConsumerAdapter implements HandlerAdapter {
   private readonly label: string;
   /** Resolves once every run that outlived the handler's timeout has ended. */
   private readonly lingering: () => Promise<void>;
+  private readonly lingeringRuns: () => number;
   private readonly idempotent: boolean;
   /** Aborted at shutdown: cancels the retry wait and the DLQ publish retries. */
   private readonly abort = new AbortController();
@@ -99,6 +100,7 @@ export class OrderedConsumerAdapter implements HandlerAdapter {
     this.retry = pipeline.retry;
     this.run = pipeline.run;
     this.lingering = pipeline.lingering;
+    this.lingeringRuns = pipeline.lingeringRuns;
     this.idempotent = pipeline.idempotent;
     this.label = `${def.className}.${def.methodName} on "${def.options.stream}" (ordered)`;
     this.supervisor = new RestartSupervisor({
@@ -174,7 +176,7 @@ export class OrderedConsumerAdapter implements HandlerAdapter {
     // cancelled is not cancelled here.
     const cancelledRetries = this.waiting && !this.stopping ? 1 : 0;
     this.abort.abort();
-    return { nakked: 0, cancelledRetries };
+    return { nakked: 0, cancelledRetries, abandonedRuns: this.lingeringRuns() };
   }
 
   /** Creates the ordered consumer, a missing stream being a configuration error. */

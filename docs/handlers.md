@@ -63,7 +63,7 @@ With `ack: 'auto'` the outcome of each message is decided as follows:
 
 The full rules, including `@Subscribe`, are in [Retry and dead-letter queue](./retry-and-dlq.md).
 
-With `ack: 'manual'` you settle the message yourself with `ctx.ack()`, `ctx.nak(delayMs?)` or `ctx.term(reason?)`. If the handler throws before settling, the library handles the failure like in `'auto'` mode (retry, then DLQ). If it throws after settling, the message stays as you settled it, and the error is kept on the [message outcome](./plugins.md#observing-outcomes) (so a [tracing](./tracing.md) span is marked as failed). If the handler returns without settling, the message stays unacknowledged until the consumer's `ack_wait` runs out. Only the first settle call takes effect. Long-running work needs no `ctx.working()` call: the library [extends the ack deadline for you](./retry-and-dlq.md).
+With `ack: 'manual'` you settle the message yourself with `ctx.ack()`, `ctx.nak(delayMs?)` or `ctx.term(reason?)`. If the handler throws before settling, the library handles the failure like in `'auto'` mode (retry, then DLQ). If it throws after settling, the message stays as you settled it, and the error is kept on the [message outcome](./plugins.md#observing-outcomes) (so a [tracing](./tracing.md) span is marked as failed). If the handler returns without settling, the message stays unacknowledged until the consumer's `ack_wait` runs out. Only the first settle call takes effect, and `ctx.working()` does nothing once the message is settled. Long-running work needs no `ctx.working()` call: the library [extends the ack deadline for you](./retry-and-dlq.md).
 
 ## `@ConsumePush(options)`: JetStream push consumer
 
@@ -238,6 +238,7 @@ Limits:
 - **A handler cannot be stopped from outside.** One that ignores `ctx.signal` keeps running until it ends on its own. Meanwhile its message can be redelivered and run again alongside it, unless the handler enables [idempotency](./idempotency.md): the key of a timed-out run stays in progress until that run ends.
 - **With idempotency, the retry waits for the timed-out run.** A `@Subscribe` retry is scheduled once that run ends, and only if it failed. An ordered consumer waits for that run before it retries the message in place, and moves on to the next message if the run succeeded. A JetStream message is redelivered meanwhile and `nak`'d as in progress each time. Each of these redeliveries counts towards its attempts and the consumer's `max_deliver`, so after a long run that then fails, the message can go to the DLQ (or, under a small `max_deliver`, stop being redelivered) after one more attempt.
 - **More runs than `concurrency`.** A timed-out run that is still going on holds no slot, so more runs than `concurrency` can be in progress at once.
+- **Ordered consumers lose their order.** Without idempotency, the in-place retry of a timed-out `@ConsumeOrdered` message, and the messages after it, run while the timed-out run is still going on: the consumer no longer handles one message at a time in stream order. With idempotency it waits for that run first, as described above.
 - **Listeners.** A `ctx.signal` listener that throws raises an uncaught exception, as for any `EventTarget` in Node.
 - **Shutdown** waits for timed-out runs still going on, within `shutdown.drainTimeout`. See [Lifecycle](./lifecycle.md).
 

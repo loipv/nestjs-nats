@@ -158,7 +158,9 @@ export class NatsJetStreamContext extends NatsContext<JsMsg> {
     this.#settledBy = { op: 'term' };
   }
 
+  /** Extends the ack deadline of an unsettled message; does nothing once it is settled. */
   working(): void {
+    if (this.#settled) return;
     this.raw.working();
   }
 }

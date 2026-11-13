@@ -64,7 +64,6 @@ export function invokeWithin<T>(call: () => Promise<T>, o: InvokeWithinOptions):
       const error = new NatsHandlerTimeoutError(o.handler, o.timeout);
       const since = Date.now();
       const late = () => `${Date.now() - since} ms after its ${o.timeout} ms timeout`;
-      o.abort(error);
       o.linger(
         run.then(
           () => {
@@ -73,7 +72,7 @@ export function invokeWithin<T>(call: () => Promise<T>, o: InvokeWithinOptions):
           },
           (err: unknown) => {
             // A handler that stopped on `ctx.signal` did what it should: not an error.
-            if (err === error || (err as { name?: unknown } | null)?.name === 'AbortError') {
+            if (stoppedBy(err, error)) {
               o.logger.warn(`Handler ${o.handler} stopped ${late()}`);
             } else {
               o.logger.error(
@@ -86,6 +85,8 @@ export function invokeWithin<T>(call: () => Promise<T>, o: InvokeWithinOptions):
         ),
       );
       reject(error);
+      // Last: what a listener of `ctx.signal` does cannot affect the bookkeeping above.
+      o.abort(error);
     }, o.timeout);
     // The run itself keeps the process alive if it has to; the timer must not.
     timer.unref();
@@ -102,4 +103,22 @@ export function invokeWithin<T>(call: () => Promise<T>, o: InvokeWithinOptions):
       },
     );
   });
+}
+
+/** Names of the errors that report a cancelled operation (`CanceledError` is axios's). */
+const CANCELLED = new Set(['AbortError', 'CanceledError']);
+
+/**
+ * Whether `err` reports that the run stopped on its abort: it is the timeout `error`, an
+ * `AbortError` or a `CanceledError`, or has one of them as a `cause` (a few levels deep).
+ */
+function stoppedBy(err: unknown, error: NatsHandlerTimeoutError): boolean {
+  let current = err;
+  for (let depth = 0; depth < 5 && typeof current === 'object' && current !== null; depth++) {
+    if (current === error) return true;
+    const { name, cause } = current as { name?: unknown; cause?: unknown };
+    if (typeof name === 'string' && CANCELLED.has(name)) return true;
+    current = cause;
+  }
+  return current === error;
 }

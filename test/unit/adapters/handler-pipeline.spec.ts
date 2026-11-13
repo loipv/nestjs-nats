@@ -353,8 +353,10 @@ describe('createHandlerPipeline timeout', () => {
     });
     await vi.advanceTimersByTimeAsync(1000);
     expect(done).toBe(false);
+    expect(p.lingeringRuns()).toBe(1);
     finish();
     await waiting;
     expect(done).toBe(true);
+    expect(p.lingeringRuns()).toBe(0);
   });
 });

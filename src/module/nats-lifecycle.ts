@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { DiscoveryService } from '@nestjs/core';
 import type { InstanceWrapper } from '@nestjs/core/injector/instance-wrapper.js';
-import { type HandlerAdapter, type RestartBinding } from '../adapters/adapter.js';
+import type { ForceStopResult, HandlerAdapter, RestartBinding } from '../adapters/adapter.js';
 import { CoreSubscriptionAdapter } from '../adapters/core-subscription.adapter.js';
 import { JetStreamConsumerAdapter } from '../adapters/jetstream-consumer.adapter.js';
 import { OrderedConsumerAdapter } from '../adapters/ordered-consumer.adapter.js';
@@ -256,14 +256,15 @@ export class NatsLifecycle
 
   /** Force-stops every adapter and logs, per connection, one line summing what was forced. */
   private forceStopAdapters(adapters: ManagedAdapter[]): void {
-    const totals = new Map<ConnectionEntry, { nakked: number; cancelledRetries: number }>();
+    const totals = new Map<ConnectionEntry, ForceStopResult>();
     for (const { adapter, entry } of adapters) {
-      const total = totals.get(entry) ?? { nakked: 0, cancelledRetries: 0 };
+      const total = totals.get(entry) ?? { nakked: 0, cancelledRetries: 0, abandonedRuns: 0 };
       totals.set(entry, total);
       try {
-        const { nakked, cancelledRetries } = adapter.forceStop();
+        const { nakked, cancelledRetries, abandonedRuns } = adapter.forceStop();
         total.nakked += nakked;
         total.cancelledRetries += cancelledRetries;
+        total.abandonedRuns += abandonedRuns;
       } catch (err) {
         entry.logger.error(
           `NATS connection "${entry.name}" failed to force-stop a handler`,
@@ -271,10 +272,15 @@ export class NatsLifecycle
         );
       }
     }
-    for (const [entry, { nakked, cancelledRetries }] of totals) {
-      if (nakked === 0 && cancelledRetries === 0) continue;
+    for (const [entry, { nakked, cancelledRetries, abandonedRuns }] of totals) {
+      if (nakked === 0 && cancelledRetries === 0 && abandonedRuns === 0) continue;
+      // Runs that outlived their timeout are what kept shutdown waiting when nothing else did.
+      const abandoned =
+        abandonedRuns > 0
+          ? `; abandoned ${plural(abandonedRuns, 'handler run', 'handler runs')} that outlived their timeout`
+          : '';
       entry.logger.warn(
-        `NATS connection "${entry.name}" shutdown: nak'd ${plural(nakked, 'unsettled JetStream message', 'unsettled JetStream messages')} and cancelled ${plural(cancelledRetries, 'pending retry', 'pending retries')}`,
+        `NATS connection "${entry.name}" shutdown: nak'd ${plural(nakked, 'unsettled JetStream message', 'unsettled JetStream messages')} and cancelled ${plural(cancelledRetries, 'pending retry', 'pending retries')}${abandoned}`,
       );
     }
   }

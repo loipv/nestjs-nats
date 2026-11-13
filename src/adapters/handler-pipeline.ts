@@ -44,6 +44,8 @@ export interface HandlerPipeline {
   dlq: DlqPolicy | false;
   /** Resolves once every run of this handler that outlived its timeout has ended. */
   lingering(): Promise<void>;
+  /** How many runs of this handler that outlived its timeout are still going on. */
+  lingeringRuns(): number;
   /**
    * Whether the handler enables idempotency: a retry of a message whose timed-out run still
    * goes on would then find its key in progress, so in-process retries wait for that run.
@@ -55,10 +57,18 @@ export interface HandlerPipeline {
  * Wraps `run` to keep the runs that outlived the handler's timeout (`d[LINGERING]`) until
  * they end, for `lingering()`.
  */
-function trackLingering(run: (d: InternalDelivery) => Promise<void>): {
+function trackLingering(
+  run: (d: InternalDelivery) => Promise<void>,
+  timeout: number | false,
+): {
   run: (d: InternalDelivery) => Promise<void>;
   lingering: () => Promise<void>;
+  lingeringRuns: () => number;
 } {
+  // Without a timeout no run outlives it: no wrapper on the hot path.
+  if (timeout === false) {
+    return { run, lingering: () => Promise.resolve(), lingeringRuns: () => 0 };
+  }
   const runs = new Set<Promise<boolean>>();
   return {
     run: async (d) => {
@@ -76,6 +86,7 @@ function trackLingering(run: (d: InternalDelivery) => Promise<void>): {
     lingering: async () => {
       while (runs.size > 0) await Promise.all(runs);
     },
+    lingeringRuns: () => runs.size,
   };
 }
 
@@ -94,11 +105,15 @@ export function createHandlerPipeline(
   const info = toHandlerInfo(def);
   const plugins = entry.options.plugins ?? [];
   const timeout = resolveHandlerTimeout(entry.options.handlerTimeout, def.options.timeout);
-  const terminal = (d: InternalDelivery) => invokeHandler(d, { timeout });
+  const invokeOptions = { timeout };
+  const terminal = (d: InternalDelivery) => invokeHandler(d, invokeOptions);
   if (def.kind === 'service-endpoint') {
     // Requests are never retried: errors are answered with an error reply.
     const settlement = createSettlement({ entry, retry: false, dlq: false });
-    const tracked = trackLingering(buildInboundPipeline({ plugins, core: [settlement] }, terminal));
+    const tracked = trackLingering(
+      buildInboundPipeline({ plugins, core: [settlement] }, terminal),
+      timeout,
+    );
     return { ...tracked, codec, info, retry: false, dlq: false, idempotent: false };
   }
   const retry = resolveRetryPolicy(entry.options.retry, def.options.retry);
@@ -115,6 +130,7 @@ export function createHandlerPipeline(
       { plugins, core: idempotency ? [settlement, idempotency] : [settlement] },
       terminal,
     ),
+    timeout,
   );
   return { ...tracked, codec, info, retry, dlq, idempotent: idempotency !== undefined };
 }
