@@ -706,3 +706,60 @@ describe('NatsTestHarness CloudEventRouter on push and ordered consumers', () =>
     expect(bySubject).toMatchObject({ settlement: 'none', result: { route: 'ordered', p: 2 } });
   });
 });
+
+describe('NatsTestHarness with startup values', () => {
+  @Injectable()
+  class Configured {
+    @Subscribe(({ get }) => `${get<{ prefix: string }>('CONFIG').prefix}.orders.created`)
+    created(@Payload() p: unknown) {
+      return { created: p };
+    }
+
+    @Consume(({ get }) => ({
+      stream: 'ORDERS',
+      durable: `${get<{ prefix: string }>('CONFIG').prefix}-billing`,
+      config: { filter_subject: 'billing.*' },
+    }))
+    bill(@Payload() p: unknown) {
+      return { billed: p };
+    }
+
+    @Subscribe('orders.updated')
+    updated(@Payload() p: unknown) {
+      return { updated: p };
+    }
+  }
+
+  let moduleRef: TestingModule;
+  let h: NatsTestHarness;
+
+  beforeAll(async () => {
+    moduleRef = await Test.createTestingModule({
+      imports: [NatsTestingModule.forRoot()],
+      providers: [Configured, { provide: 'CONFIG', useValue: { prefix: 'prod' } }],
+    })
+      .setLogger(silentLogger)
+      .compile();
+    h = NatsTestHarness.create(moduleRef);
+  });
+
+  afterAll(async () => {
+    await moduleRef.close();
+  });
+
+  it('resolves a handler by the subject its function returned', async () => {
+    const r = await h.dispatch({ subject: 'prod.orders.created' }, 1);
+    expect(r.result).toEqual({ created: 1 });
+    await expect(h.dispatch({ subject: 'orders.created' }, 1)).rejects.toThrow(NatsConfigError);
+  });
+
+  it('resolves it by name, and a consumer through its resolved options', async () => {
+    expect((await h.dispatch({ handler: 'Configured.created' }, 2)).result).toEqual({
+      created: 2,
+    });
+    expect((await h.dispatch({ subject: 'billing.eu' }, 3)).result).toEqual({ billed: 3 });
+  });
+
+  it('still resolves a handler with a written subject', async () =>
+    expect((await h.dispatch({ subject: 'orders.updated' }, 4)).result).toEqual({ updated: 4 }));
+});
