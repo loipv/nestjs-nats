@@ -582,6 +582,23 @@ describe('createIdempotency with a run that outlived its timeout', () => {
     expect(store.complete).not.toHaveBeenCalled();
   });
 
+  it('hands the delivery a lingering run that ends only once its keys are settled', async () => {
+    let completed!: () => void;
+    const store = fakeStore();
+    store.complete.mockImplementation(() => new Promise<void>((resolve) => (completed = resolve)));
+    const { d, finish } = await handled(store);
+    let ended = false;
+    void (d[LINGERING] as Promise<boolean>).then(() => {
+      ended = true;
+    });
+    finish(true);
+    await tick();
+    expect(store.complete).toHaveBeenCalledOnce();
+    expect(ended).toBe(false);
+    completed();
+    await expect(d[LINGERING]).resolves.toBe(true);
+  });
+
   it('logs a deferred complete that fails', async () => {
     const store = fakeStore();
     store.complete.mockImplementation(() => Promise.reject(new Error('store down')));

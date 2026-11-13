@@ -227,8 +227,12 @@ export function createIdempotency(cfg: IdempotencyConfig): InboundMiddleware {
         const lingering = (d as Partial<InternalDelivery>)[LINGERING];
         if (lingering) {
           // The handler outlived its timeout and still runs: a redelivery must find its keys
-          // in progress until that run ends, and then done (or free, when it failed).
-          void lingering.then((ok) => (ok ? settle(d, claimed) : release(d, keysOf(claimed))));
+          // in progress until that run ends, and then done (or free, when it failed). The
+          // delivery's run now ends once that is written, so shutdown waits for the store too.
+          (d as InternalDelivery)[LINGERING] = lingering.then(async (ok) => {
+            await (ok ? settle(d, claimed) : release(d, keysOf(claimed)));
+            return ok;
+          });
         } else {
           await release(d, keysOf(claimed));
         }
