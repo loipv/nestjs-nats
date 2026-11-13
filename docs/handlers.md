@@ -144,7 +144,8 @@ export class BillingHandlers {
   @Consume(({ get }) => ({
     stream: get(ConfigService).getOrThrow<string>('ORDERS_STREAM'),
     durable: 'billing',
-    concurrency: get(ConfigService).get<number>('BILLING_CONCURRENCY') ?? 1,
+    // Values read from `.env` are strings.
+    concurrency: Number(get(ConfigService).get<string>('BILLING_CONCURRENCY') ?? 1),
   }))
   bill(@Payload() order: { id: string }) {}
 
@@ -162,7 +163,7 @@ export class BillingHandlers {
 
 Every handler decorator takes a `disabled` option (default `false`): `@Subscribe`, `@Consume`, `@ConsumePush`, `@ConsumeOrdered`, `@ServiceEndpoint`, `@NatsService` and [`@CloudEventRouter`](./cloudevents.md#receiving-cloudevents). A disabled handler is left out at startup as if its decorator were absent: nothing subscribes, consumes or registers it, and its options are not validated, so a disabled `@Consume` may keep the durable of the handler replacing it. Startup logs `NATS handler Class.method (kind) is disabled` for each one.
 
-`disabled` can be a function too. It receives the same `{ get }` and runs once per application, like the functions above. It can also be part of what an options function returns; that function still runs for a disabled handler, which is how its `disabled` is read:
+`disabled` can be a function too. It receives the same `{ get }` and runs once per application, like the functions above. It can also be part of what an options function returns; that function still runs for a disabled handler, which is how its `disabled` is read. The subject or endpoint name of a disabled handler is not resolved, nor is any argument of an endpoint of a disabled `@NatsService`, so their functions may read configuration that is absent where the handler is off:
 
 ```ts
 import { Injectable } from '@nestjs/common';

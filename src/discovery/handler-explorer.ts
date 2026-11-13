@@ -77,6 +77,13 @@ type HandlerSpec =
 
 export type HandlerDefinition = HandlerBase & HandlerSpec;
 
+/** A handler left out by its `disabled` (or its `@NatsService`'s): what `onDisabled` reports. */
+interface DisabledSpec {
+  kind: HandlerKind;
+  disabled: true;
+  connection: string;
+}
+
 /** A handler skipped by its `disabled` option (or its `@NatsService`'s). */
 export interface DisabledHandler {
   kind: HandlerKind;
@@ -164,7 +171,12 @@ export class HandlerExplorer {
       const prototype = Object.getPrototypeOf(instance) as object;
       for (const methodName of this.scanner.getAllMethodNames(prototype)) {
         const method = instance[methodName as keyof typeof instance];
-        const specs = this.specsFor(method, service, `NATS handler ${className}.${methodName}`);
+        const specs = this.specsFor(
+          method,
+          service,
+          serviceDisabled,
+          `NATS handler ${className}.${methodName}`,
+        );
         const patterns = this.patternsFor(method);
         if (patterns.length > 0) {
           const label = `${instance.constructor.name}.${methodName}`;
@@ -181,15 +193,12 @@ export class HandlerExplorer {
           for (const pattern of patterns) routes.push({ pattern, methodName });
         }
         for (const spec of specs) {
-          const disabled =
-            this.isDisabled(spec.options.disabled, `NATS handler ${className}.${methodName}`) ||
-            (spec.kind === 'service-endpoint' && serviceDisabled);
-          if (disabled) {
+          if ('disabled' in spec) {
             options.onDisabled?.({
               kind: spec.kind,
               className,
               methodName,
-              connection: connectionOf(spec, service),
+              connection: spec.connection,
             });
             continue;
           }
@@ -354,55 +363,70 @@ export class HandlerExplorer {
   }
 
   /**
-   * The handler specs of a method's decorators, their startup functions resolved. `subject`
-   * (e.g. `NATS handler Orders.on`) names the method in errors.
+   * The handler specs of a method's decorators, their startup functions resolved, or a
+   * `DisabledSpec` for each disabled one. A handler's options are resolved first, to read its
+   * `disabled`; the subject or endpoint name of a disabled handler is not resolved, and no
+   * argument of an endpoint of a disabled service (`serviceDisabled`) is. `subject` (e.g.
+   * `NATS handler Orders.on`) names the method in errors.
    */
   private specsFor(
     method: unknown,
     service: NatsServiceOptions | undefined,
+    serviceDisabled: boolean,
     subject: string,
-  ): HandlerSpec[] {
+  ): Array<HandlerSpec | DisabledSpec> {
     if (typeof method !== 'function') return [];
-    const specs: HandlerSpec[] = [];
+    const specs: Array<HandlerSpec | DisabledSpec> = [];
+    /** The disabled entry of a `kind` handler with `options`, if `disabled` is set. */
+    const disabledSpec = (
+      kind: HandlerKind,
+      options: { connection?: string; disabled?: HandlerDisabled },
+    ): DisabledSpec | undefined =>
+      this.isDisabled(options.disabled, subject)
+        ? {
+            kind,
+            disabled: true,
+            connection: options.connection ?? service?.connection ?? DEFAULT_CONNECTION,
+          }
+        : undefined;
     const sub:
       | { subject: StartupValue<string>; options?: StartupValue<SubscribeOptions | undefined> }
       | undefined = Reflect.getMetadata(NATS_SUBSCRIBE_METADATA, method);
     if (sub) {
-      specs.push({
-        kind: 'subscribe',
-        subject: this.resolveString(sub.subject, subject, '@Subscribe subject'),
-        options: this.resolveOptions(sub.options, subject, '@Subscribe options', true) ?? {},
-      });
+      const options = this.resolveOptions(sub.options, subject, '@Subscribe options', true) ?? {};
+      specs.push(
+        disabledSpec('subscribe', options) ?? {
+          kind: 'subscribe',
+          subject: this.resolveString(sub.subject, subject, '@Subscribe subject'),
+          options,
+        },
+      );
     }
     const consume: { options: StartupValue<ConsumeOptions> } | undefined = Reflect.getMetadata(
       NATS_CONSUME_METADATA,
       method,
     );
     if (consume) {
-      specs.push({
-        kind: 'consume',
-        delivery: 'pull',
-        options: this.resolveOptions(consume.options, subject, '@Consume options'),
-      });
+      const options = this.resolveOptions(consume.options, subject, '@Consume options');
+      specs.push(
+        disabledSpec('consume', options) ?? { kind: 'consume', delivery: 'pull', options },
+      );
     }
     const push: { options: StartupValue<ConsumePushOptions> } | undefined = Reflect.getMetadata(
       NATS_CONSUME_PUSH_METADATA,
       method,
     );
     if (push) {
-      specs.push({
-        kind: 'consume',
-        delivery: 'push',
-        options: this.resolveOptions(push.options, subject, '@ConsumePush options'),
-      });
+      const options = this.resolveOptions(push.options, subject, '@ConsumePush options');
+      specs.push(
+        disabledSpec('consume', options) ?? { kind: 'consume', delivery: 'push', options },
+      );
     }
     const ordered: { options: StartupValue<ConsumeOrderedOptions> } | undefined =
       Reflect.getMetadata(NATS_CONSUME_ORDERED_METADATA, method);
     if (ordered) {
-      specs.push({
-        kind: 'ordered',
-        options: this.resolveOptions(ordered.options, subject, '@ConsumeOrdered options'),
-      });
+      const options = this.resolveOptions(ordered.options, subject, '@ConsumeOrdered options');
+      specs.push(disabledSpec('ordered', options) ?? { kind: 'ordered', options });
     }
     const endpoint:
       | {
@@ -411,13 +435,24 @@ export class HandlerExplorer {
         }
       | undefined = Reflect.getMetadata(NATS_ENDPOINT_METADATA, method);
     if (endpoint) {
-      specs.push({
-        kind: 'service-endpoint',
-        endpoint: this.resolveString(endpoint.name, subject, '@ServiceEndpoint name'),
-        options:
-          this.resolveOptions(endpoint.options, subject, '@ServiceEndpoint options', true) ?? {},
-        service,
-      });
+      if (serviceDisabled) {
+        specs.push({
+          kind: 'service-endpoint',
+          disabled: true,
+          connection: service?.connection ?? DEFAULT_CONNECTION,
+        });
+      } else {
+        const options =
+          this.resolveOptions(endpoint.options, subject, '@ServiceEndpoint options', true) ?? {};
+        specs.push(
+          disabledSpec('service-endpoint', options) ?? {
+            kind: 'service-endpoint',
+            endpoint: this.resolveString(endpoint.name, subject, '@ServiceEndpoint name'),
+            options,
+            service,
+          },
+        );
+      }
     }
     return specs;
   }
@@ -633,8 +668,21 @@ function routerKind(options: CloudEventRouterOptions): HandlerKind {
 /** The error for a startup function that returned `value` instead of `expected`. */
 function invalidValue(subject: string, what: string, value: unknown, expected: string) {
   return new NatsConfigError(
-    `${subject}: ${what} resolved to ${describeValue(value)}; expected ${expected}`,
+    `${subject}: ${what} resolved to ${describeResolved(value)}; expected ${expected}`,
   );
+}
+
+/**
+ * A value a startup function returned, for an error: a primitive as JSON, an object, array or
+ * function by its kind only, so a provider returned by mistake (with its secrets) is not
+ * printed.
+ */
+function describeResolved(value: unknown): string {
+  if (typeof value === 'bigint') return `${value}n`;
+  if (typeof value === 'function') return 'a function';
+  if (Array.isArray(value)) return 'an array';
+  if (typeof value === 'object' && value !== null) return 'an object';
+  return JSON.stringify(value) ?? String(value);
 }
 
 function describeValue(value: unknown): string {

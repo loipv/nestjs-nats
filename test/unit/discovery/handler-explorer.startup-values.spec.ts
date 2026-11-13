@@ -260,7 +260,7 @@ describe('HandlerExplorer startup values of method decorators', () => {
       [null, 'null'],
       [undefined, 'undefined'],
       ['S', '"S"'],
-      [['S'], '["S"]'],
+      [['S'], 'an array'],
     ])('when the @Consume options function returns %j', async (value, shown) => {
       @Injectable()
       class H {
@@ -371,5 +371,100 @@ describe('HandlerExplorer startup values of class decorators', () => {
     expect((await exploreError(Billing)).message).toBe(
       '@NatsService Billing failed to resolve its @NatsService options: no config',
     );
+  });
+});
+
+describe('HandlerExplorer startup values of disabled handlers', () => {
+  const onDisabled = vi.fn();
+
+  async function skipped(...providers: Type[]) {
+    onDisabled.mockClear();
+    const moduleRef = await app(providers);
+    try {
+      return { defs: moduleRef.get(HandlerExplorer).explore({ onDisabled }), onDisabled };
+    } finally {
+      await moduleRef.close();
+    }
+  }
+
+  it('does not resolve the subject of a disabled @Subscribe', async () => {
+    const subject = vi.fn(() => '');
+    @Injectable()
+    class H {
+      @Subscribe(subject, () => ({ disabled: true }))
+      on() {}
+
+      @Subscribe(
+        () => {
+          throw new Error('no subject');
+        },
+        { disabled: true },
+      )
+      off() {}
+    }
+    const { defs } = await skipped(H);
+    expect(defs).toEqual([]);
+    expect(onDisabled).toHaveBeenCalledTimes(2);
+    expect(subject).not.toHaveBeenCalled();
+  });
+
+  it('does not resolve the name of a disabled @ServiceEndpoint', async () => {
+    @Injectable()
+    @NatsService({ name: 'svc', version: '1.0.0' })
+    class H {
+      @ServiceEndpoint(() => '', { disabled: true })
+      get() {}
+    }
+    expect((await skipped(H)).defs).toEqual([]);
+  });
+
+  it('resolves no endpoint argument of a disabled @NatsService', async () => {
+    const options = vi.fn(() => {
+      throw new Error('no endpoint config');
+    });
+    @Injectable()
+    @NatsService(() => ({ name: 'svc', version: '1.0.0', connection: 'svc', disabled: true }))
+    class H {
+      @ServiceEndpoint(() => undefined as unknown as string)
+      a() {}
+
+      @ServiceEndpoint('b', options)
+      b() {}
+    }
+    const { defs } = await skipped(H);
+    expect(defs).toEqual([]);
+    expect(options).not.toHaveBeenCalled();
+    expect(onDisabled.mock.calls.map(([d]) => d)).toEqual([
+      { kind: 'service-endpoint', className: 'H', methodName: 'a', connection: 'svc' },
+      { kind: 'service-endpoint', className: 'H', methodName: 'b', connection: 'svc' },
+    ]);
+  });
+});
+
+describe('HandlerExplorer startup value errors', () => {
+  it.each([
+    ['a whole object, without its contents', { prefix: 'p', natsPassword: 'hunter2' }, 'an object'],
+    [
+      'a circular object',
+      (() => {
+        const o: Record<string, unknown> = {};
+        o.self = o;
+        return o;
+      })(),
+      'an object',
+    ],
+    ['a BigInt', 10n, '10n'],
+    ['a function', () => 'x', 'a function'],
+  ])('describes %s', async (_, value, shown) => {
+    @Injectable()
+    class H {
+      @Subscribe(() => value as unknown as string)
+      on() {}
+    }
+    const err = await exploreError(H);
+    expect(err.message).toBe(
+      `NATS handler H.on: @Subscribe subject resolved to ${shown}; expected a non-empty string`,
+    );
+    expect(err.message).not.toContain('hunter2');
   });
 });
