@@ -125,6 +125,12 @@ export const SKIPPED: unique symbol = Symbol('nats.skipped');
 /** Internal: key of the messages of a batch that failed while the others succeeded. */
 export const FAILURES: unique symbol = Symbol('nats.failures');
 
+/**
+ * Internal: key of the run of a handler that outlived its timeout, set by the invoker: it
+ * resolves `true` when that run finishes, `false` when it fails, and never rejects.
+ */
+export const LINGERING: unique symbol = Symbol('nats.lingering');
+
 /** Internal: a delivery as built by the adapters, carrying the full handler definition. */
 export interface InternalDelivery extends Delivery {
   readonly [HANDLER_DEFINITION]: HandlerDefinition;
@@ -139,6 +145,8 @@ export interface InternalDelivery extends Delivery {
   readonly [RETRY_SCHEDULER]?: (msg: InboundMessage, delayMs: number) => void;
   /** Aborts the in-place waits of the settlement; set by the ordered adapter. */
   readonly [ABORT_SIGNAL]?: AbortSignal;
+  /** The run that outlived the handler's timeout, if it did; set by the invoker. */
+  [LINGERING]?: Promise<boolean>;
 }
 
 /** One message of a delivery together with its own context. */

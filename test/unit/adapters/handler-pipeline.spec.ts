@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createHandlerPipeline,
   defaultPipelineDeps,
@@ -7,9 +7,11 @@ import { type Codec, jsonCodec } from '../../../src/codec/codec.js';
 import type { ConnectionEntry } from '../../../src/connection/connection-registry.js';
 import { NatsContext, NatsJetStreamContext } from '../../../src/context/nats-context.js';
 import type { HandlerDefinition } from '../../../src/discovery/handler-explorer.js';
+import { NatsHandlerTimeoutError } from '../../../src/errors/errors.js';
 import type { IdempotencyStore } from '../../../src/idempotency/store.js';
 import { createDelivery } from '../../../src/pipeline/delivery.js';
 import type { NatsPlugin } from '../../../src/pipeline/types.js';
+import { never } from '../../support/async.js';
 import { mockLogger } from '../../support/logger.js';
 
 const enc = new TextEncoder();
@@ -60,12 +62,12 @@ function consumeDef(options: Record<string, unknown> = {}, invoke = vi.fn()) {
   } as unknown as HandlerDefinition;
 }
 
-function endpointDef(invoke = vi.fn()) {
+function endpointDef(invoke = vi.fn(), options: Record<string, unknown> = {}) {
   return {
     ...base,
     kind: 'service-endpoint',
     endpoint: 'e',
-    options: {},
+    options,
     service: { name: 'svc', version: '1.0.0' },
     invoke,
   } as unknown as HandlerDefinition;
@@ -242,5 +244,117 @@ describe('createHandlerPipeline', () => {
     });
     await p.run(d);
     expect([...d.outcomes.values()]).toEqual([{ action: 'none' }]);
+  });
+});
+
+/** A core delivery of `def` (`kind: 'service'` for an endpoint). */
+function coreDelivery(def: HandlerDefinition) {
+  const raw = { subject: 'a.b', reply: '', data: enc.encode('{"x":1}') };
+  return createDelivery({
+    definition: def,
+    connection: 'default',
+    batch: false,
+    parts: [
+      {
+        message: { subject: raw.subject, data: raw.data, raw: raw as never, attempt: 1 },
+        context: new NatsContext({
+          kind: def.kind === 'service-endpoint' ? 'service' : 'core',
+          connection: 'default',
+          raw: raw as never,
+        }),
+      },
+    ],
+    codec: jsonCodec(),
+    logger: mockLogger(),
+  });
+}
+
+describe('createHandlerPipeline timeout', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Runs a hanging `def` with `module` options; the outcome of its message after `ms`. */
+  async function outcomeAfter(
+    ms: number,
+    def: HandlerDefinition,
+    module: Record<string, unknown> = {},
+  ) {
+    const p = createHandlerPipeline(def, entryWith(module), defaultPipelineDeps);
+    const d = coreDelivery(def);
+    void p.run(d).catch(() => {});
+    await vi.advanceTimersByTimeAsync(ms);
+    return d.outcomes.get(d.messages[0] as never);
+  }
+
+  it("times a handler out after the module's handlerTimeout when it sets none", async () => {
+    const def = subscribeDef(
+      {},
+      vi.fn(() => never()),
+    );
+    expect(await outcomeAfter(99, def, { handlerTimeout: 100 })).toBeUndefined();
+    const outcome = await outcomeAfter(100, def, { handlerTimeout: 100 });
+    expect(outcome).toMatchObject({ action: 'drop' });
+    expect((outcome as { error: unknown }).error).toBeInstanceOf(NatsHandlerTimeoutError);
+  });
+
+  it("lets the handler's timeout win, and false turn it off", async () => {
+    const fast = subscribeDef(
+      { timeout: 50 },
+      vi.fn(() => never()),
+    );
+    expect(await outcomeAfter(50, fast, { handlerTimeout: 1000 })).toMatchObject({
+      action: 'drop',
+    });
+    const off = subscribeDef(
+      { timeout: false },
+      vi.fn(() => never()),
+    );
+    expect(await outcomeAfter(10_000, off, { handlerTimeout: 100 })).toBeUndefined();
+  });
+
+  it('times out a service endpoint, rejecting the run for its error reply', async () => {
+    const def = endpointDef(
+      vi.fn(() => never()),
+      { timeout: 50 },
+    );
+    const p = createHandlerPipeline(def, entryWith(), defaultPipelineDeps);
+    const failed = p.run(coreDelivery(def)).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(await failed).toBeInstanceOf(NatsHandlerTimeoutError);
+  });
+
+  it('lingering() resolves at once when no run outlived its timeout', async () => {
+    const p = createHandlerPipeline(
+      subscribeDef({ timeout: 50 }),
+      entryWith(),
+      defaultPipelineDeps,
+    );
+    await expect(p.lingering()).resolves.toBeUndefined();
+  });
+
+  it('lingering() waits for a run that outlived its timeout until it ends', async () => {
+    let finish!: () => void;
+    const def = subscribeDef(
+      { timeout: 50 },
+      vi.fn(() => new Promise<void>((resolve) => (finish = resolve))),
+    );
+    const p = createHandlerPipeline(def, entryWith(), defaultPipelineDeps);
+    const running = p.run(coreDelivery(def));
+    await vi.advanceTimersByTimeAsync(50);
+    await running;
+    let done = false;
+    const waiting = p.lingering().then(() => {
+      done = true;
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(done).toBe(false);
+    finish();
+    await waiting;
+    expect(done).toBe(true);
   });
 });
