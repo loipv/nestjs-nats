@@ -2,7 +2,7 @@
 
 [Back to the README](../README.md)
 
-1. **Module init:** connect, failing fast if this does not work, then sync declared streams and consumers.
+1. **Module init:** connect, failing fast if this does not work, then sync declared streams and consumers. When a connection sets `jetstream.removedFields: 'reset'`, handlers are discovered here as well, to check the consumers they declare before any sync.
 2. **Application bootstrap:** discover handlers, validate them, and start subscriptions, consumers and services. If any step of module init or bootstrap fails, the library shuts down as described below (what was already started is stopped, connections and idempotency stores are closed) before the error is rethrown.
 3. **Shutdown:** see below.
 

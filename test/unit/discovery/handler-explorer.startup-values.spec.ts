@@ -184,6 +184,52 @@ describe('HandlerExplorer startup values of method decorators', () => {
     expect(shared).toHaveBeenCalledOnce();
   });
 
+  it('gets a provider by an abstract class token', async () => {
+    abstract class Settings {
+      abstract readonly subject: string;
+    }
+    @Injectable()
+    class H {
+      @Subscribe(({ get }) => get(Settings).subject)
+      on() {}
+    }
+    const moduleRef = await app([
+      H,
+      { provide: Settings, useValue: { subject: 'abstract.subject' } },
+    ]);
+    const [def] = moduleRef.get(HandlerExplorer).explore();
+    await moduleRef.close();
+    expect(def).toMatchObject({ subject: 'abstract.subject' });
+  });
+
+  it('calls a function shared by @Subscribe options and by two @NatsService classes once', async () => {
+    const options = vi.fn(() => ({ queue: 'workers' }));
+    const service = vi.fn(() => ({ name: 'svc', version: '1.0.0' }));
+    @Injectable()
+    class Subs {
+      @Subscribe('a', options) a() {}
+      @Subscribe('b', options) b() {}
+    }
+    @Injectable()
+    @NatsService(service)
+    class First {
+      @ServiceEndpoint('first') first() {}
+    }
+    @Injectable()
+    @NatsService(service)
+    class Second {
+      @ServiceEndpoint('second') second() {}
+    }
+    const defs = await explore(Subs, First, Second);
+    const by = (m: string) => defs.find((d) => d.methodName === m);
+    expect(by('a')).toMatchObject({ subject: 'a', options: { queue: 'workers' } });
+    expect(by('b')).toMatchObject({ subject: 'b', options: { queue: 'workers' } });
+    expect(by('first')).toMatchObject({ endpoint: 'first', service: { name: 'svc' } });
+    expect(by('second')).toMatchObject({ endpoint: 'second', service: { name: 'svc' } });
+    expect(options).toHaveBeenCalledOnce();
+    expect(service).toHaveBeenCalledOnce();
+  });
+
   describe('fails startup', () => {
     it.each([
       ['a request-scoped provider', 'SCOPED'],

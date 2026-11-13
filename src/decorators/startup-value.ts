@@ -1,4 +1,4 @@
-import type { Type } from '@nestjs/common';
+import type { Abstract, Type } from '@nestjs/common';
 import { NatsConfigError } from '../errors/errors.js';
 import { errorMessage } from '../util/errors.js';
 
@@ -12,7 +12,7 @@ export type StartupValue<T> = T | ((ctx: StartupContext) => T);
 /** What a startup function receives. */
 export interface StartupContext {
   /** Any provider of the application, such as `ConfigService` (looked up in every module). */
-  get<T>(token: Type<T> | string | symbol): T;
+  get<T>(token: Type<T> | Abstract<T> | string | symbol): T;
 }
 
 /**
