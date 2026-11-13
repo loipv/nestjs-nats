@@ -51,6 +51,11 @@ export type CloudEventRouterOptions = (
   dlq?: DlqOptions | boolean;
   idempotency?: boolean | IdempotencyOptions;
   /**
+   * Longest run of the `@OnCloudEvent` method an event is routed to, in ms (see
+   * `SubscribeOptions.timeout`). Default: the module's `handlerTimeout`, else none.
+   */
+  timeout?: number | false;
+  /**
    * Skips the router and all its `@OnCloudEvent` routes: nothing subscribes, consumes or
    * validates it. A function is called at application startup. Default `false`.
    */

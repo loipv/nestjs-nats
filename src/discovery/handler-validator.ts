@@ -3,6 +3,7 @@ import type { ConnectionRegistry } from '../connection/connection-registry.js';
 import type { ConsumePushOptions } from '../decorators/handler.decorators.js';
 import { NatsConfigError } from '../errors/errors.js';
 import { DEFAULT_IDEMPOTENCY_TTL } from '../idempotency/idempotency.js';
+import { assertTimeout } from '../pipeline/handler-timeout.js';
 import type { DlqOptions } from '../settlement/dlq.js';
 import { resolveRetryPolicy } from '../settlement/retry.js';
 import type { HandlerDefinition } from './handler-explorer.js';
@@ -31,6 +32,7 @@ export function validateHandlers(defs: HandlerDefinition[], mgr: ConnectionRegis
         `NATS handler ${label(def)} references unknown NATS connection "${def.connection}"`,
       );
     }
+    assertTimeout(def.options.timeout, `NATS handler ${label(def)}`, 'timeout');
     if (def.kind === 'ordered') validateOrdered(def);
     if (def.kind !== 'service-endpoint') {
       validateRetry(def, mgr);

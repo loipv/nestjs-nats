@@ -34,6 +34,12 @@ export interface SubscribeOptions {
    */
   batch?: BatchOptions;
   /**
+   * Longest run of the handler, in ms; past it the run counts as failed and `ctx.signal` is
+   * aborted (see "Handler timeout" in docs/handlers.md). `false` turns off the module's
+   * `handlerTimeout`. Default: the module's `handlerTimeout`, else none.
+   */
+  timeout?: number | false;
+  /**
    * Skips this handler: nothing subscribes, consumes or validates it, as if the decorator
    * were absent. A function is called at application startup, after configuration
    * (e.g. `.env`) is loaded. Default `false`.
@@ -57,6 +63,12 @@ export interface ConsumeOptions {
    * `@Ctx() ctx: NatsBatchContext`). Not allowed with `ack: 'manual'`.
    */
   batch?: BatchOptions;
+  /**
+   * Longest run of the handler, in ms; past it the run counts as failed and `ctx.signal` is
+   * aborted (see "Handler timeout" in docs/handlers.md). `false` turns off the module's
+   * `handlerTimeout`. Default: the module's `handlerTimeout`, else none.
+   */
+  timeout?: number | false;
   /**
    * Skips this handler: nothing subscribes, consumes or validates it, as if the decorator
    * were absent. A function is called at application startup, after configuration
@@ -101,6 +113,12 @@ export interface ConsumeOrderedOptions {
   dlq?: DlqOptions | boolean;
   idempotency?: boolean | IdempotencyOptions;
   /**
+   * Longest run of the handler, in ms; past it the run counts as failed and `ctx.signal` is
+   * aborted (see "Handler timeout" in docs/handlers.md). `false` turns off the module's
+   * `handlerTimeout`. Default: the module's `handlerTimeout`, else none.
+   */
+  timeout?: number | false;
+  /**
    * Skips this handler: nothing subscribes, consumes or validates it, as if the decorator
    * were absent. A function is called at application startup, after configuration
    * (e.g. `.env`) is loaded. Default `false`.
@@ -124,6 +142,12 @@ export interface ServiceEndpointOptions {
   queue?: string;
   metadata?: Record<string, string>;
   codec?: Codec;
+  /**
+   * Longest run of the handler, in ms; past it the run counts as failed and `ctx.signal` is
+   * aborted (see "Handler timeout" in docs/handlers.md). `false` turns off the module's
+   * `handlerTimeout`. Default: the module's `handlerTimeout`, else none.
+   */
+  timeout?: number | false;
   /** Skips this endpoint; see `SubscribeOptions.disabled`. */
   disabled?: HandlerDisabled;
 }

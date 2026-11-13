@@ -287,6 +287,11 @@ describe('@CloudEventRouter discovery', () => {
     expect(def.router?.unmatched).toBe('term');
   });
 
+  it('passes its timeout on to the definition', async () => {
+    const def = await routerDef({ subscribe: 'events', timeout: 100 });
+    expect(def.options.timeout).toBe(100);
+  });
+
   it('builds a push consumer definition from consumePush', async () => {
     const def = await routerDef({
       consumePush: { stream: 'S', durable: 'd', deliverGroup: 'g', config: { ack_wait: 1 } },

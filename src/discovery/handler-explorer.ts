@@ -227,14 +227,14 @@ export class HandlerExplorer {
         `${label} must set exactly one of subscribe, consume, consumePush or consumeOrdered`,
       );
     }
-    const { connection, concurrency, codec, retry, dlq, idempotency } = options;
+    const { connection, concurrency, codec, retry, dlq, idempotency, timeout } = options;
     if (set[0] !== 'subscribe' && 'queue' in options && options.queue !== undefined) {
       throw new NatsConfigError(`${label} sets queue, which only applies to subscribe`);
     }
     if (set[0] === 'consumeOrdered' && concurrency !== undefined) {
       throw new NatsConfigError(`${label} with consumeOrdered does not support concurrency`);
     }
-    const common = defined({ connection, concurrency, codec, retry, dlq, idempotency });
+    const common = defined({ connection, concurrency, codec, retry, dlq, idempotency, timeout });
     let spec: HandlerSpec;
     if (set[0] === 'subscribe') {
       const { subscribe, queue } = options as Extract<

@@ -52,6 +52,11 @@ export interface NatsModuleOptions {
   dlq?: DlqOptions | boolean;
   /** Defaults for handlers that enable idempotency: the store and the key TTL (ms, default 300_000). */
   idempotency?: { store?: IdempotencyStore; ttl?: number };
+  /**
+   * Default `timeout` of the connection's handlers, in ms: a run that outlives it counts as
+   * failed. A handler's own `timeout` (or `false`) wins. Default: none.
+   */
+  handlerTimeout?: number | false;
   shutdown?: { drainTimeout?: number };
   logger?: false | LoggerService;
 }

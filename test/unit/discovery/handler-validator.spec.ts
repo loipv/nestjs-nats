@@ -67,7 +67,7 @@ function endpointDef(service: unknown, o: Opts = {}): HandlerDefinition {
     ...base(o),
     kind: 'service-endpoint',
     endpoint: 'ep',
-    options: {},
+    options: o.options ?? {},
     service,
   } as never;
 }
@@ -422,5 +422,32 @@ describe('validateHandlers', () => {
       expect(() => validateHandlers([orderedDef({ connection: 'x' })], mgr)).toThrow(
         /unknown NATS connection "x"/,
       ));
+  });
+});
+
+describe('validateHandlers timeout', () => {
+  const service = { name: 'svc', version: '1.0.0' };
+  const kinds = [
+    ['subscribe', (timeout: unknown) => def({ options: { timeout } })],
+    ['consume', (timeout: unknown) => consumeDef('S', 'd', { options: { timeout } })],
+    ['ordered', (timeout: unknown) => orderedDef({ options: { timeout } })],
+    ['service-endpoint', (timeout: unknown) => endpointDef(service, { options: { timeout } })],
+  ] as const;
+
+  describe.each(kinds)('on a %s handler', (_, make) => {
+    it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 31, '5'])(
+      'rejects %s',
+      (timeout) => {
+        const check = () => validateHandlers([make(timeout)], mgr);
+        expect(check).toThrow(NatsConfigError);
+        expect(check).toThrow(
+          `NATS handler H.on has invalid timeout ${String(timeout)}; expected a number of ms in (0, 2147483647] or false`,
+        );
+      },
+    );
+
+    it.each([1, 2 ** 31 - 1, false, undefined])('accepts %s', (timeout) => {
+      expect(() => validateHandlers([make(timeout)], mgr)).not.toThrow();
+    });
   });
 });

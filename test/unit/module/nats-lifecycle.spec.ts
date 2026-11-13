@@ -456,6 +456,20 @@ describe('NatsLifecycle declarations', () => {
     expect(manager.closeAll).toHaveBeenCalled();
   });
 
+  it('rejects an invalid handlerTimeout before syncing anything', async () => {
+    const ensureStream = vi.spyOn(NatsStreamManager.prototype, 'ensureStream');
+    const { manager } = fakeManager({
+      default: { handlerTimeout: 0, streams: [{ name: 'S', subjects: ['s.>'] }] },
+    });
+    await expect(lifecycleWith(manager).onModuleInit()).rejects.toThrow(
+      new NatsConfigError(
+        'NATS connection "default" has invalid handlerTimeout 0; expected a number of ms in (0, 2147483647] or false',
+      ),
+    );
+    expect(ensureStream).not.toHaveBeenCalled();
+    expect(manager.closeAll).toHaveBeenCalled();
+  });
+
   function syncSpies() {
     return {
       ensureStream: vi

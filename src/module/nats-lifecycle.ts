@@ -24,6 +24,7 @@ import { NatsConfigError } from '../errors/errors.js';
 import type { IdempotencyStore } from '../idempotency/store.js';
 import { NatsStreamManager } from '../jetstream/stream-manager.js';
 import { rejectReservedMetadata } from '../jetstream/stream-sync.js';
+import { assertTimeout } from '../pipeline/handler-timeout.js';
 import { type RestartPolicy, resolveRestartPolicy } from '../settlement/restart.js';
 import { errorMessage, errorTrace } from '../util/errors.js';
 import { settlesWithin } from '../util/timeout.js';
@@ -76,6 +77,10 @@ export class NatsLifecycle
 
   async onModuleInit(): Promise<void> {
     try {
+      for (const name of this.manager.names()) {
+        const { handlerTimeout } = this.manager.get(name).options;
+        assertTimeout(handlerTimeout, `NATS connection "${name}"`, 'handlerTimeout');
+      }
       // Once per (store, connection) pair, before anything else uses the stores.
       await this.bindIdempotencyStores();
       const declarations = this.collectDeclarations();
