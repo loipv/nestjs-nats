@@ -31,6 +31,7 @@ export {
   Subscribe,
 } from './decorators/handler.decorators.js';
 export { CloudEvent, Ctx, Headers, Msg, Payload, Subject } from './decorators/param.decorators.js';
+export type { StartupContext, StartupValue } from './decorators/startup-value.js';
 export type { NatsRequestErrorCode } from './errors/errors.js';
 export {
   NatsAtomicPublishError,
