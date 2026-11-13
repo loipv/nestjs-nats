@@ -1,6 +1,10 @@
 import { headers } from '@nats-io/transport-node';
 import { describe, expect, it, vi } from 'vitest';
-import { NatsContext, NatsJetStreamContext } from '../../../src/context/nats-context.js';
+import {
+  ABORT_HANDLER,
+  NatsContext,
+  NatsJetStreamContext,
+} from '../../../src/context/nats-context.js';
 import { NatsOrderedContext } from '../../../src/context/nats-ordered-context.js';
 import { NatsConfigError } from '../../../src/errors/errors.js';
 
@@ -67,5 +71,20 @@ describe('NatsOrderedContext', () => {
     expect(raw.nak).not.toHaveBeenCalled();
     expect(raw.term).not.toHaveBeenCalled();
     expect(raw.working).not.toHaveBeenCalled();
+  });
+});
+
+describe('NatsOrderedContext signal', () => {
+  it('is aborted by ABORT_HANDLER, like every context', () => {
+    const ctx = new NatsOrderedContext({
+      connection: 'default',
+      raw: fakeJsMsg() as never,
+      attempt: 1,
+    });
+    expect(ctx.signal.aborted).toBe(false);
+    const reason = new Error('timed out');
+    ctx[ABORT_HANDLER](reason);
+    expect(ctx.signal.aborted).toBe(true);
+    expect(ctx.signal.reason).toBe(reason);
   });
 });

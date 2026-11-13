@@ -15,12 +15,17 @@ export interface NatsContextInit<R extends NatsMsg | JsMsg = NatsMsg | JsMsg> {
 /** Internal: key of the `NatsContext.cloudEvent` presetting setter (used by the router). */
 export const CLOUD_EVENT: unique symbol = Symbol('nats.cloudEvent');
 
+/** Internal: key of the method aborting a context's `signal` (the handler timed out). */
+export const ABORT_HANDLER: unique symbol = Symbol('nats.abortHandler');
+
 export class NatsContext<R extends NatsMsg | JsMsg = NatsMsg | JsMsg> {
   readonly #kind: NatsContextKind;
   readonly #connection: string;
   readonly #raw: R;
   #headers?: Record<string, string | string[]>;
   #cloudEvent?: { meta: CloudEventMeta | undefined };
+  /** Created on first use: most handlers never read `signal`. */
+  #abort?: AbortController;
 
   constructor(init: NatsContextInit<R>) {
     this.#kind = init.kind;
@@ -66,6 +71,22 @@ export class NatsContext<R extends NatsMsg | JsMsg = NatsMsg | JsMsg> {
   get cloudEvent(): CloudEventMeta | undefined {
     this.#cloudEvent ??= { meta: readCloudEventMeta(this.#raw) };
     return this.#cloudEvent.meta;
+  }
+
+  /**
+   * Aborted when the handler outlives its `timeout`, with the `NatsHandlerTimeoutError` as its
+   * reason; never aborted otherwise. Pass it to what the handler awaits (`fetch`, a driver) so
+   * a timed-out run stops.
+   */
+  get signal(): AbortSignal {
+    this.#abort ??= new AbortController();
+    return this.#abort.signal;
+  }
+
+  /** Internal: aborts `signal` (the first reason is kept). */
+  [ABORT_HANDLER](reason: unknown): void {
+    this.#abort ??= new AbortController();
+    this.#abort.abort(reason);
   }
 
   /** Internal: presets `cloudEvent` when the router has already read it. */

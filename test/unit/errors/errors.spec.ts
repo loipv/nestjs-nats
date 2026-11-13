@@ -4,6 +4,7 @@ import {
   NatsConfigError,
   NatsConnectionError,
   NatsDecodeError,
+  NatsHandlerTimeoutError,
   NatsModuleError,
   NatsRequestError,
   NonRetryableError,
@@ -18,6 +19,15 @@ describe('errors', () => {
     expect(e.name).toBe('NatsDecodeError');
     expect(e.message).toBe('x');
     expect(e.cause).toBe('c');
+  });
+
+  it('describes a handler that outlived its timeout', () => {
+    const e = new NatsHandlerTimeoutError('Orders.on', 5000);
+    expect(e).toBeInstanceOf(NatsModuleError);
+    expect(e.name).toBe('NatsHandlerTimeoutError');
+    expect(e.message).toBe('Handler Orders.on did not finish within 5000 ms');
+    expect(e.handler).toBe('Orders.on');
+    expect(e.timeout).toBe(5000);
   });
 
   it('uses the class name for simple subclasses', () => {

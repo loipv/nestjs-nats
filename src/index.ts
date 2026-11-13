@@ -37,6 +37,7 @@ export {
   NatsConfigError,
   NatsConnectionError,
   NatsDecodeError,
+  NatsHandlerTimeoutError,
   NatsModuleError,
   NatsRequestError,
   NonRetryableError,

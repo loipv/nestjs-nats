@@ -1,7 +1,7 @@
 import type { JsMsg } from '@nats-io/jetstream';
 import type { Msg as NatsMsg } from '@nats-io/transport-node';
 import { NatsModuleError } from '../errors/errors.js';
-import type { NatsContext } from './nats-context.js';
+import { ABORT_HANDLER, type NatsContext } from './nats-context.js';
 
 export interface NatsBatchContextInit {
   connection: string;
@@ -21,11 +21,28 @@ export class NatsBatchContext {
   /** The context of each message (a `NatsJetStreamContext` for `@Consume`). */
   readonly messages: ReadonlyArray<NatsContext>;
   readonly #onFail: NatsBatchContextInit['onFail'];
+  /** Created on first use: most handlers never read `signal`. */
+  #abort?: AbortController;
 
   constructor(init: NatsBatchContextInit) {
     this.connection = init.connection;
     this.messages = Object.freeze([...init.messages]);
     this.#onFail = init.onFail;
+  }
+
+  /**
+   * Aborted when the batch handler outlives its `timeout`, with the `NatsHandlerTimeoutError`
+   * as its reason (the signal of each message is aborted too); never aborted otherwise.
+   */
+  get signal(): AbortSignal {
+    this.#abort ??= new AbortController();
+    return this.#abort.signal;
+  }
+
+  /** Internal: aborts `signal` (the first reason is kept). */
+  [ABORT_HANDLER](reason: unknown): void {
+    this.#abort ??= new AbortController();
+    this.#abort.abort(reason);
   }
 
   /**

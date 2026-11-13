@@ -4,7 +4,11 @@ import {
   InternalServerErrorException,
 } from '@nestjs/common';
 import { describe, expect, it } from 'vitest';
-import { NatsDecodeError, NonRetryableError } from '../../../src/errors/errors.js';
+import {
+  NatsDecodeError,
+  NatsHandlerTimeoutError,
+  NonRetryableError,
+} from '../../../src/errors/errors.js';
 import {
   backoffDelay,
   DEFAULT_RETRY,
@@ -82,6 +86,7 @@ describe('defaultIsRetryable', () => {
     [new ForbiddenException(), false],
     [new InternalServerErrorException(), true],
     [new Error('x'), true],
+    [new NatsHandlerTimeoutError('Orders.on', 5000), true],
     ['str', true],
   ])('defaultIsRetryable(%s) = %s', (err, expected) =>
     expect(defaultIsRetryable(err)).toBe(expected),

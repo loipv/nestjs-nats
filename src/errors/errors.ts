@@ -92,3 +92,20 @@ export class NatsRequestError extends NatsModuleError {
 }
 
 export class NonRetryableError extends NatsModuleError {}
+
+/**
+ * A handler did not finish within its `timeout`: the run counts as failed (retried, dead-lettered
+ * or answered with a `504`) while the handler may still be running.
+ */
+export class NatsHandlerTimeoutError extends NatsModuleError {
+  /** `Class.method` of the handler. */
+  readonly handler: string;
+  /** The handler's timeout, in ms. */
+  readonly timeout: number;
+
+  constructor(handler: string, timeout: number) {
+    super(`Handler ${handler} did not finish within ${timeout} ms`);
+    this.handler = handler;
+    this.timeout = timeout;
+  }
+}

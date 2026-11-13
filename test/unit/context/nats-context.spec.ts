@@ -1,6 +1,7 @@
 import { headers } from '@nats-io/transport-node';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  ABORT_HANDLER,
   CLOUD_EVENT,
   NatsContext,
   NatsJetStreamContext,
@@ -177,5 +178,62 @@ describe('NatsJetStreamContext', () => {
     expect(ctx.settled).toBe(false);
     ctx.ack();
     expect(raw.ack).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe.each([
+  [
+    'NatsContext',
+    () =>
+      new NatsContext({
+        kind: 'core',
+        connection: 'default',
+        raw: { subject: 's', reply: '' } as never,
+      }),
+  ],
+  [
+    'NatsJetStreamContext',
+    () =>
+      new NatsJetStreamContext({
+        kind: 'jetstream',
+        connection: 'default',
+        raw: fakeJsMsg() as never,
+      }),
+  ],
+])('%s signal', (_, make) => {
+  it('is a signal that is not aborted', () => {
+    const { signal } = make();
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal.aborted).toBe(false);
+  });
+
+  it('is the same signal on every read', () => {
+    const ctx = make();
+    expect(ctx.signal).toBe(ctx.signal);
+  });
+
+  it('is aborted with the reason given to ABORT_HANDLER', () => {
+    const ctx = make();
+    const { signal } = ctx;
+    const reason = new Error('timed out');
+    ctx[ABORT_HANDLER](reason);
+    expect(signal.aborted).toBe(true);
+    expect(signal.reason).toBe(reason);
+  });
+
+  it('is already aborted when first read after ABORT_HANDLER', () => {
+    const ctx = make();
+    const reason = new Error('timed out');
+    ctx[ABORT_HANDLER](reason);
+    expect(ctx.signal.aborted).toBe(true);
+    expect(ctx.signal.reason).toBe(reason);
+  });
+
+  it('keeps the first reason', () => {
+    const ctx = make();
+    const first = new Error('first');
+    ctx[ABORT_HANDLER](first);
+    ctx[ABORT_HANDLER](new Error('second'));
+    expect(ctx.signal.reason).toBe(first);
   });
 });

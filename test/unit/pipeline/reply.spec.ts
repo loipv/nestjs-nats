@@ -1,7 +1,7 @@
 import { InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { describe, expect, it } from 'vitest';
 import { NatsContext } from '../../../src/context/nats-context.js';
-import { NatsDecodeError } from '../../../src/errors/errors.js';
+import { NatsDecodeError, NatsHandlerTimeoutError } from '../../../src/errors/errors.js';
 import type { Delivery } from '../../../src/pipeline/delivery.js';
 import { isReplyDelivery, toServiceError } from '../../../src/pipeline/reply.js';
 
@@ -22,6 +22,12 @@ describe('toServiceError', () => {
     expect(toServiceError(new NatsDecodeError('x'))).toEqual({
       code: 400,
       description: 'Bad Request',
+    }));
+
+  it('maps a handler timeout to 504', () =>
+    expect(toServiceError(new NatsHandlerTimeoutError('Orders.on', 5000))).toEqual({
+      code: 504,
+      description: 'Handler timed out',
     }));
 
   it('hides internal errors', () =>
