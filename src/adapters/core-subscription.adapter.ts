@@ -11,6 +11,7 @@ import {
   type HandlerInfo,
   type InboundMessage,
   type InternalDelivery,
+  LINGERING,
 } from '../pipeline/delivery.js';
 import { batchRequestError, type ServiceError, toServiceError } from '../pipeline/reply.js';
 import { errorMessage, errorTrace } from '../util/errors.js';
@@ -38,6 +39,7 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
   private readonly batch?: ResolvedBatchOptions;
   /** Resolves once every run that outlived the handler's timeout has ended. */
   private readonly lingering: () => Promise<void>;
+  private readonly idempotent: boolean;
 
   private sub?: Subscription;
   private loop?: Promise<void>;
@@ -58,6 +60,7 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
     this.info = pipeline.info;
     this.run = pipeline.run;
     this.lingering = pipeline.lingering;
+    this.idempotent = pipeline.idempotent;
     this.label = `${def.className}.${def.methodName} on "${def.subject}"`;
     this.batch = resolveBatchOptions(def.options.batch);
     this.supervisor = new RestartSupervisor({
@@ -197,7 +200,7 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
   }
 
   private delivery(parts: DeliveryPart[], batch: boolean): InternalDelivery {
-    return createDelivery({
+    const d: InternalDelivery = createDelivery({
       definition: this.def,
       handler: this.info,
       connection: this.entry.name,
@@ -205,8 +208,26 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
       parts,
       codec: this.codec,
       logger: this.entry.logger,
-      retry: (msg: InboundMessage, delayMs: number) =>
-        this.dispatcher.scheduleRetry({ msg: msg.raw as Msg, attempt: msg.attempt }, delayMs),
+      retry: (msg: InboundMessage, delayMs: number) => this.retryLater(d, msg, delayMs),
+    });
+    return d;
+  }
+
+  /**
+   * Schedules the in-process retry of `msg`. With idempotency, a retry while the timed-out run
+   * of `d` still goes on would find the key in progress and be dropped: it is scheduled once
+   * that run ends, and only if it failed (when it succeeded, the message is done).
+   */
+  private retryLater(d: InternalDelivery, msg: InboundMessage, delayMs: number): void {
+    const retry = () =>
+      this.dispatcher.scheduleRetry({ msg: msg.raw as Msg, attempt: msg.attempt }, delayMs);
+    const late = d[LINGERING];
+    if (!this.idempotent || !late) {
+      retry();
+      return;
+    }
+    void late.then((ok) => {
+      if (!ok) retry();
     });
   }
 

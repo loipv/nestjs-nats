@@ -44,6 +44,11 @@ export interface HandlerPipeline {
   dlq: DlqPolicy | false;
   /** Resolves once every run of this handler that outlived its timeout has ended. */
   lingering(): Promise<void>;
+  /**
+   * Whether the handler enables idempotency: a retry of a message whose timed-out run still
+   * goes on would then find its key in progress, so in-process retries wait for that run.
+   */
+  idempotent: boolean;
 }
 
 /**
@@ -94,7 +99,7 @@ export function createHandlerPipeline(
     // Requests are never retried: errors are answered with an error reply.
     const settlement = createSettlement({ entry, retry: false, dlq: false });
     const tracked = trackLingering(buildInboundPipeline({ plugins, core: [settlement] }, terminal));
-    return { ...tracked, codec, info, retry: false, dlq: false };
+    return { ...tracked, codec, info, retry: false, dlq: false, idempotent: false };
   }
   const retry = resolveRetryPolicy(entry.options.retry, def.options.retry);
   const dlq = resolveDlqPolicy(def.kind, entry.options.dlq, def.options.dlq);
@@ -111,5 +116,5 @@ export function createHandlerPipeline(
       terminal,
     ),
   );
-  return { ...tracked, codec, info, retry, dlq };
+  return { ...tracked, codec, info, retry, dlq, idempotent: idempotency !== undefined };
 }

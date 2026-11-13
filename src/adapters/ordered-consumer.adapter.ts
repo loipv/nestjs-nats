@@ -21,6 +21,7 @@ import {
   type HandlerInfo,
   type InboundMessage,
   type InternalDelivery,
+  LINGERING,
 } from '../pipeline/delivery.js';
 import { backoffDelay, DEFAULT_RETRY, type RetryPolicy } from '../settlement/retry.js';
 import { errorTrace } from '../util/errors.js';
@@ -76,6 +77,7 @@ export class OrderedConsumerAdapter implements HandlerAdapter {
   private readonly label: string;
   /** Resolves once every run that outlived the handler's timeout has ended. */
   private readonly lingering: () => Promise<void>;
+  private readonly idempotent: boolean;
   /** Aborted at shutdown: cancels the retry wait and the DLQ publish retries. */
   private readonly abort = new AbortController();
   private messages?: ConsumerMessages;
@@ -97,6 +99,7 @@ export class OrderedConsumerAdapter implements HandlerAdapter {
     this.retry = pipeline.retry;
     this.run = pipeline.run;
     this.lingering = pipeline.lingering;
+    this.idempotent = pipeline.idempotent;
     this.label = `${def.className}.${def.methodName} on "${def.options.stream}" (ordered)`;
     this.supervisor = new RestartSupervisor({
       policy: restart.policy,
@@ -267,16 +270,41 @@ export class OrderedConsumerAdapter implements HandlerAdapter {
         retry.delayMs = backoffDelay(this.retry || DEFAULT_RETRY, attempt);
       }
       if (retry.delayMs === undefined) return true;
-      this.waiting = true;
-      const due = await sleep(retry.delayMs, this.abort.signal);
-      this.waiting = false;
-      if (!due) {
+      const abandoned = () => {
         this.entry.logger.warn(
           `Retry of ${this.label} (stream seq ${msg.info.streamSequence}) abandoned at shutdown`,
         );
         return false;
+      };
+      const late = (d as InternalDelivery)[LINGERING];
+      if (this.idempotent && late) {
+        // Retrying now would find the key held by the timed-out run: wait for that run. When
+        // it succeeded the message is done; when it failed its key is free for the retry.
+        this.waiting = true;
+        const ok = await this.untilEnded(late);
+        this.waiting = false;
+        if (ok === undefined) return abandoned();
+        if (ok) return true;
       }
+      this.waiting = true;
+      const due = await sleep(retry.delayMs, this.abort.signal);
+      this.waiting = false;
+      if (!due) return abandoned();
     }
+  }
+
+  /** What `run` resolves with, or `undefined` when shutdown aborts first. */
+  private untilEnded(run: Promise<boolean>): Promise<boolean | undefined> {
+    const { signal } = this.abort;
+    if (signal.aborted) return Promise.resolve(undefined);
+    return new Promise((resolve) => {
+      const onAbort = () => resolve(undefined);
+      signal.addEventListener('abort', onAbort, { once: true });
+      void run.then((ok) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(ok);
+      });
+    });
   }
 
   /** Surfaces consumer problems the library only reports through `status()` while it retries. */

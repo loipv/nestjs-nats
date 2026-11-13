@@ -1,5 +1,6 @@
 import type { ConsumerMessages, JsMsg } from '@nats-io/jetstream';
 import { JetStreamApiCodes, JetStreamApiError } from '@nats-io/jetstream';
+import { headers } from '@nats-io/transport-node';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RestartBinding } from '../../../src/adapters/adapter.js';
 import { OrderedConsumerAdapter } from '../../../src/adapters/ordered-consumer.adapter.js';
@@ -7,6 +8,7 @@ import type { ConnectionEntry } from '../../../src/connection/connection-registr
 import { NatsOrderedContext } from '../../../src/context/nats-ordered-context.js';
 import type { HandlerDefinition } from '../../../src/discovery/handler-explorer.js';
 import { NatsConfigError } from '../../../src/errors/errors.js';
+import { InMemoryIdempotencyStore } from '../../../src/idempotency/store.js';
 import { never, tick } from '../../support/async.js';
 
 /**
@@ -101,6 +103,7 @@ function setup(
     publish?: () => Promise<unknown>;
     restart?: RestartBinding;
     timeout?: number;
+    idempotency?: unknown;
   } = {},
 ) {
   const fake = fakeMessages();
@@ -114,10 +117,12 @@ function setup(
   });
   const get = vi.fn(opts.get ?? (() => Promise.resolve({ consume })));
   const logger = { log: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn() };
+  const store = new InMemoryIdempotencyStore();
   const entry = {
     name: 'default',
     options: { plugins: opts.plugins },
     logger,
+    idempotencyStore: () => store,
     nc: { isClosed: () => false },
     js: () => ({
       consumers: { get },
@@ -137,6 +142,7 @@ function setup(
       retry: opts.retry,
       dlq: opts.dlq ?? false,
       timeout: opts.timeout,
+      idempotency: opts.idempotency,
     },
     invoke,
   } as unknown as HandlerDefinition & { kind: 'ordered' };
@@ -571,5 +577,81 @@ describe('OrderedConsumerAdapter timeout', () => {
     finish();
     await idling;
     expect(idle).toBe(true);
+  });
+});
+
+describe('OrderedConsumerAdapter timeout with idempotency', () => {
+  const options = { timeout: 50, idempotency: true, retry: { initialDelay: 100, jitter: 0 } };
+
+  /** Message `seq` with the idempotency key `m<seq>`. */
+  function keyed(seq: number) {
+    const h = headers();
+    h.set('Nats-Msg-Id', `m${seq}`);
+    return { ...fakeMsg(seq), headers: h } as unknown as JsMsg;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('retries in place once the timed-out run has failed', async () => {
+    let runs = 0;
+    let fail!: (err: Error) => void;
+    const { adapter, fake } = setup(() => {
+      runs++;
+      return runs === 1 ? new Promise<void>((_, reject) => (fail = reject)) : Promise.resolve();
+    }, options);
+    await adapter.start();
+    fake.push(keyed(1));
+    await tick();
+    await vi.advanceTimersByTimeAsync(50);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(runs).toBe(1);
+    fail(new Error('late failure'));
+    await tick();
+    await tick();
+    await vi.advanceTimersByTimeAsync(100);
+    await tick();
+    expect(runs).toBe(2);
+    await adapter.stop();
+  });
+
+  it('moves on once the timed-out run succeeded, without running the message again', async () => {
+    const handled: unknown[] = [];
+    let finish!: () => void;
+    const { adapter, fake } = setup((p) => {
+      handled.push(p);
+      return p === 1 ? new Promise<void>((resolve) => (finish = resolve)) : Promise.resolve();
+    }, options);
+    await adapter.start();
+    fake.push(keyed(1));
+    fake.push(keyed(2));
+    await tick();
+    await vi.advanceTimersByTimeAsync(50);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(handled).toEqual([1]);
+    finish();
+    await tick();
+    await tick();
+    await tick();
+    expect(handled).toEqual([1, 2]);
+    await adapter.stop();
+  });
+
+  it('abandons the wait for the timed-out run at shutdown', async () => {
+    const { adapter, fake, logger } = setup(() => never(), options);
+    await adapter.start();
+    fake.push(keyed(1));
+    await tick();
+    await vi.advanceTimersByTimeAsync(50);
+    await adapter.stop();
+    await tick();
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Retry of C.m on "ORD" (ordered) (stream seq 1) abandoned at shutdown',
+    );
   });
 });

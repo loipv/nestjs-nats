@@ -1,8 +1,10 @@
+import { headers } from '@nats-io/transport-node';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HandlerState, RestartBinding } from '../../../src/adapters/adapter.js';
 import { CoreSubscriptionAdapter } from '../../../src/adapters/core-subscription.adapter.js';
 import type { ConnectionEntry } from '../../../src/connection/connection-registry.js';
 import type { HandlerDefinition } from '../../../src/discovery/handler-explorer.js';
+import { InMemoryIdempotencyStore } from '../../../src/idempotency/store.js';
 import { never, tick } from '../../support/async.js';
 
 /** Push-driven subscription whose `drain()` ends iteration after buffered messages. */
@@ -63,10 +65,12 @@ function setup(
 ) {
   const fake = fakeSubscription();
   const logger = { log: vi.fn(), error: vi.fn(), warn: vi.fn() };
+  const store = new InMemoryIdempotencyStore();
   const entry = {
     name: 'default',
     options: { plugins, ...moduleOptions },
     logger,
+    idempotencyStore: () => store,
     nc: {
       subscribe: vi.fn(() => fake.sub),
       flush: () => Promise.resolve(),
@@ -738,5 +742,77 @@ describe('CoreSubscriptionAdapter timeout', () => {
     finish();
     await idling;
     expect(idle).toBe(true);
+  });
+});
+
+describe('CoreSubscriptionAdapter timeout with idempotency', () => {
+  const options = { timeout: 50, idempotency: true, retry: { initialDelay: 100, jitter: 0 } };
+
+  /** A message with the idempotency key `m1`. */
+  function keyed(payload: unknown) {
+    const h = headers();
+    h.set('Nats-Msg-Id', 'm1');
+    return { ...fakeMsg(payload), headers: h };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('retries the message once its timed-out run has failed', async () => {
+    let runs = 0;
+    let fail!: (err: Error) => void;
+    const { adapter, fake } = setup(
+      () => {
+        runs++;
+        return runs === 1 ? new Promise<void>((_, reject) => (fail = reject)) : Promise.resolve();
+      },
+      [],
+      {},
+      options,
+    );
+    await adapter.start();
+    fake.push(keyed(1));
+    await tick();
+    await vi.advanceTimersByTimeAsync(50);
+    // Well past the retry delay: the retry waits for the timed-out run.
+    await vi.advanceTimersByTimeAsync(500);
+    expect(runs).toBe(1);
+    fail(new Error('late failure'));
+    await tick();
+    await tick();
+    await vi.advanceTimersByTimeAsync(100);
+    await tick();
+    expect(runs).toBe(2);
+    await adapter.stop();
+  });
+
+  it('does not retry the message when its timed-out run succeeds', async () => {
+    let runs = 0;
+    let finish!: () => void;
+    const { adapter, fake } = setup(
+      () => {
+        runs++;
+        return new Promise<void>((resolve) => (finish = resolve));
+      },
+      [],
+      {},
+      options,
+    );
+    await adapter.start();
+    fake.push(keyed(1));
+    await tick();
+    await vi.advanceTimersByTimeAsync(50);
+    finish();
+    await tick();
+    await tick();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(runs).toBe(1);
+    await adapter.stop();
+    expect(adapter.forceStop().cancelledRetries).toBe(0);
   });
 });
