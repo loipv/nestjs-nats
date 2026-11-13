@@ -8,6 +8,8 @@
 | `support/` | Helpers shared by unit tests | |
 | `setup/` | Vitest setup files | |
 
+`npm run test:cov` runs the unit tests with coverage and fails when it falls under the thresholds in `vitest.config.ts`. CI runs it once, in the `checks` job. The report is written to `coverage/`.
+
 ## Unit test layout
 
 `unit/` mirrors `src/`: the tests of `src/<dir>/<file>.ts` are in `unit/<dir>/<file>.spec.ts`.

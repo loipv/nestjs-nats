@@ -8,6 +8,13 @@ export default defineConfig({
     }),
   ],
   test: {
+    // `npm run test:cov` measures the unit tests only (they need no NATS server); the
+    // thresholds sit about one point under the coverage they reach, so CI fails on a drop.
+    coverage: {
+      provider: 'v8',
+      include: ['src/**/*.ts'],
+      thresholds: { lines: 94, statements: 92, functions: 93, branches: 89 },
+    },
     projects: [
       {
         test: {

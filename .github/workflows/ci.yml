@@ -30,6 +30,9 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run lint
       - run: npm run typecheck
+      # Unit tests with coverage, once: fails when coverage falls under the thresholds in
+      # vitest.config.ts. The test job below runs them again on every Node/Nest combination.
+      - run: npm run test:cov
       - run: npm run build
       - run: npm run check:pkg
       - run: npm run check:pack
