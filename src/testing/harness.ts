@@ -23,11 +23,7 @@ import {
   type MessageOutcome,
 } from '../pipeline/delivery.js';
 import { assertTimeout } from '../pipeline/handler-timeout.js';
-import {
-  isReplyDelivery,
-  type ServiceError,
-  toServiceError,
-} from '../pipeline/reply.js';
+import { isReplyDelivery, type ServiceError, toServiceError } from '../pipeline/reply.js';
 import { DLQ_HEADERS } from '../settlement/dlq.js';
 import type { PublishedMessage } from './fake-connection.js';
 import { fakeConnectionOf } from './mock-clients.js';
