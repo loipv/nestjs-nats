@@ -9,7 +9,7 @@ The library reads and writes [CloudEvents](https://cloudevents.io) 1.0 following
 
 ## Publishing CloudEvents
 
-Pass `cloudEvent` to `NatsClient.publish()` or to `JetStreamClient.publish()` (also in the `opts` of `publishMany()` and `batcher().add()`). The data you pass is the event's `data`.
+Pass `cloudEvent` to `NatsClient.publish()` or to `JetStreamClient.publish()` (also in the `opts` of `publishMany()`). The data you pass is the event's `data`.
 
 ```ts
 import { Injectable } from '@nestjs/common';

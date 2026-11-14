@@ -1,7 +1,7 @@
 import type { MsgHdrs } from '@nats-io/transport-node';
 import { describe, expect, it, vi } from 'vitest';
 import type { ConnectionEntry } from '../../../src/connection/connection-registry.js';
-import { NatsConfigError, NatsModuleError } from '../../../src/errors/errors.js';
+import { NatsConfigError } from '../../../src/errors/errors.js';
 import { JetStreamClient } from '../../../src/jetstream/jetstream-client.js';
 import { tick } from '../../support/async.js';
 import { mockLogger } from '../../support/logger.js';
@@ -128,26 +128,5 @@ describe('JetStreamClient.publishMany', () => {
       NatsConfigError,
     );
     expect(publish).not.toHaveBeenCalled();
-  });
-});
-
-describe('JetStreamClient.batcher', () => {
-  it('is flushed and closed when the connection closes', async () => {
-    const { client, publish, hooks } = setup();
-    const batcher = client.batcher({ maxWait: 60_000 });
-    const added = batcher.add('orders.created', { id: 1 });
-    expect(publish).not.toHaveBeenCalled();
-    expect(hooks).toHaveLength(1);
-    await hooks[0]?.();
-    await expect(added).resolves.toEqual(ack(1));
-    await expect(batcher.add('orders.created', { id: 2 })).rejects.toThrow(NatsModuleError);
-  });
-
-  it('unregisters its close hook once closed', async () => {
-    const { client, off } = setup();
-    const batcher = client.batcher();
-    expect(off).not.toHaveBeenCalled();
-    await batcher.close();
-    expect(off).toHaveBeenCalledOnce();
   });
 });

@@ -41,13 +41,13 @@ NatsModule.forRoot({
 
 | Span | Kind | Created for |
 |---|---|---|
-| `publish <subject>` | `PRODUCER` | `NatsClient.publish()` and `JetStreamClient.publish()`, including every item of `publishMany()` and `batcher()`, and every message of `publishAtomic()` |
+| `publish <subject>` | `PRODUCER` | `NatsClient.publish()` and `JetStreamClient.publish()`, including every item of `publishMany()`, and every message of `publishAtomic()` |
 | `send <subject>` | `CLIENT` | `NatsClient.request()` |
 | `process <subject>` | `CONSUMER` | A message (or batch) handled by a `@Subscribe`, `@Consume`, `@ConsumePush`, `@ConsumeOrdered` or `@CloudEventRouter` that sends no reply |
 | `process <subject>` | `SERVER` | A message that expects a reply: a `@ServiceEndpoint`, or a request to a `@Subscribe` handler or to a `@CloudEventRouter` on a core subject |
 
 - **Propagation.** An outbound span's context is injected into the message headers (`traceparent`, `tracestate` and whatever else your propagator writes). A `process` span of a single message is a child of the context extracted from the message's headers, or starts a new trace if there is none. Without a `traceparent` header, the context comes from the [CloudEvents](./cloudevents.md) distributed tracing extension: the `ce-traceparent` and `ce-tracestate` headers of a binary event, else, for a structured event, the envelope's `traceparent` and `tracestate` attributes.
-- **Publish parent.** A `publish` or `send` span is a child of the span active where you called `publish()`, `request()`, `publishMany()` or `batcher().add()`. A batcher publishes each message in the context of the `add()` call that collected it, whichever call or timer triggers the flush.
+- **Publish parent.** A `publish` or `send` span is a child of the span active where you called `publish()`, `request()` or `publishMany()`.
 - **Batches.** A `process` span of a batch starts a new trace and has a link to the context of each message that carried one.
 - **Span scope.** The `process` span covers the handler and the settlement (ack, retry, dead-lettering), and spans you create in the handler are its children.
 - **Span end.** A `publish` or `send` span ends when the message was sent and its outcome (the ack, the reply or the error) is known. It can end just after `publish()` or `request()` has settled: they do not wait for the outbound plugins to return (see [Outbound timing](./plugins.md#outbound-timing)). If a plugin after the tracing plugin never passes the message on, the call rejects at its timeout, but the `publish` or `send` span never ends: the tracing plugin is still waiting for that plugin.

@@ -1,10 +1,4 @@
 import type { PubAck, StreamExpectations } from '@nats-io/jetstream';
-import {
-  Batcher,
-  type ContextRunner,
-  DEFAULT_BATCHER_MAX_SIZE,
-  DEFAULT_BATCHER_MAX_WAIT,
-} from '../batch/batcher.js';
 import type { CloudEventInit } from '../cloudevents/types.js';
 import type { Codec } from '../codec/codec.js';
 import type { NatsHeadersInit } from '../codec/headers.js';
@@ -91,19 +85,6 @@ export class JetStreamClient {
     items: ReadonlyArray<{ subject: string; data?: unknown; opts?: JetStreamPublishOptions }>,
     opts: { window?: number } = {},
   ): Promise<PublishManyResult[]> {
-    return this.#publishMany(items, opts);
-  }
-
-  /** `publishMany`, running an item's publish through its `run` when it has one. */
-  async #publishMany(
-    items: ReadonlyArray<{
-      subject: string;
-      data?: unknown;
-      opts?: JetStreamPublishOptions;
-      run?: ContextRunner;
-    }>,
-    opts: { window?: number },
-  ): Promise<PublishManyResult[]> {
     const window = opts.window ?? DEFAULT_PUBLISH_WINDOW;
     if (!(window >= 1)) throw new NatsConfigError('publishMany window must be >= 1');
     const results = new Array<PublishManyResult>(items.length);
@@ -113,9 +94,8 @@ export class JetStreamClient {
         const i = next++;
         const item = items[i];
         if (!item) continue;
-        const publish = () => this.publish(item.subject, item.data, item.opts);
         try {
-          results[i] = { ok: true, ack: await (item.run ? item.run(publish) : publish()) };
+          results[i] = { ok: true, ack: await this.publish(item.subject, item.data, item.opts) };
         } catch (err) {
           results[i] = { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
         }
@@ -123,26 +103,5 @@ export class JetStreamClient {
     };
     await Promise.all(Array.from({ length: Math.min(Math.ceil(window), items.length) }, worker));
     return results;
-  }
-
-  /**
-   * A batcher that groups publishes and flushes them through `publishMany`. It is flushed
-   * and closed when the connection closes.
-   *
-   * @experimental May change or be removed before 1.0 (see Stability in the README).
-   */
-  batcher(opts: { maxSize?: number; maxWait?: number; window?: number } = {}): Batcher {
-    let off: (() => void) | undefined;
-    const batcher = new Batcher(
-      (items, o) => this.#publishMany(items, o ?? {}),
-      {
-        maxSize: opts.maxSize ?? DEFAULT_BATCHER_MAX_SIZE,
-        maxWait: opts.maxWait ?? DEFAULT_BATCHER_MAX_WAIT,
-        window: opts.window,
-      },
-      () => off?.(),
-    );
-    off = this.entry.onClose(() => batcher.close());
-    return batcher;
   }
 }

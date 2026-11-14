@@ -5,7 +5,6 @@ import type {
   AtomicMessage,
   AtomicPublishAck,
   AtomicPublishOptions,
-  Batcher,
   BatchOptions,
   ClaimResult,
   CloudEventInit,
@@ -198,10 +197,6 @@ it('exports the reliability types', () => {
   expectTypeOf<AtomicMessage>().toHaveProperty('subject');
   expectTypeOf<AtomicPublishOptions>().toHaveProperty('timeout');
   expectTypeOf<AtomicPublishAck>().toHaveProperty('count');
-  // A type only: instances come from JetStreamClient.batcher().
-  expectTypeOf<Batcher>().toHaveProperty('add');
-  expectTypeOf<Batcher>().toHaveProperty('flush');
-  expectTypeOf<Batcher>().toHaveProperty('close');
   expectTypeOf<CloudEventRouterOptions>().toHaveProperty('unmatched');
   expectTypeOf<ConsumePushOptions>().toHaveProperty('deliverGroup');
   expectTypeOf<ConsumePushOptions>().toHaveProperty('durable');
@@ -237,6 +232,14 @@ it('exports NatsHeadersInit, not a HeadersInit shadowing the global one', () => 
   expectTypeOf<NatsHeadersInit>().toEqualTypeOf<Record<string, string | string[]>>();
   // @ts-expect-error renamed to NatsHeadersInit before 0.1.0
   type _Old = import('../../../src/index.js').HeadersInit;
+});
+
+it('no longer has JetStreamClient.batcher() nor its Batcher type (removed in 0.3.0)', () => {
+  expect(
+    (api.JetStreamClient.prototype as unknown as Record<string, unknown>).batcher,
+  ).toBeUndefined();
+  // @ts-expect-error removed with JetStreamClient.batcher()
+  type _Batcher = import('../../../src/index.js').Batcher;
 });
 
 it('no longer exports RemovedFieldsMode (removed in 0.3.0)', () => {

@@ -47,7 +47,7 @@ class AnalyticsHandlers {
 
 ## Batch publishing
 
-> **Experimental:** `publishMany()` and `batcher()` may change or be removed before 1.0. See [Stability](../README.md#stability).
+> **Experimental:** `publishMany()` may change or be removed before 1.0. See [Stability](../README.md#stability).
 
 `JetStreamClient` can publish many messages while keeping several in flight, which is much faster than awaiting each `publish()` in turn.
 
@@ -76,35 +76,3 @@ class OrderImporter {
 ```
 
 Each item is `{ subject, data?, opts? }`, where `opts` is the same as for `publish()`. The result array has one entry per item, in the same order: `{ ok: true, ack }` or `{ ok: false, error }`. A failed item never makes `publishMany()` reject. `window` is the number of publishes waiting for their PubAck at the same time (default `256`). Every item goes through `publish()`, so outbound plugins apply.
-
-### `batcher()`
-
-A batcher collects single publishes and sends them together through `publishMany()`.
-
-```ts
-import { type Batcher, JetStreamClient } from '@loipv/nestjs-nats';
-
-class EventPublisher {
-  private readonly batcher: Batcher;
-
-  constructor(js: JetStreamClient) {
-    this.batcher = js.batcher({ maxSize: 200, maxWait: 20 });
-  }
-
-  async track(events: Array<{ id: string }>) {
-    // Add concurrently: each `add` resolves when its own message is acknowledged.
-    const acks = await Promise.all(
-      events.map((event) => this.batcher.add('events.tracked', event, { msgId: event.id })),
-    );
-    return acks.length;
-  }
-}
-```
-
-| Option | Default | Description |
-|---|---|---|
-| `maxSize` | `100` | Flush when this many messages are collected (an integer `>= 1`) |
-| `maxWait` | `50` | Flush this many ms after the first message of a batch |
-| `window` | `256` | In-flight publishes per flush, as for `publishMany()` |
-
-`add(subject, data?, opts?)` returns a promise of the message's `PubAck`, rejected with that message's own error if it fails. `flush()` sends what is collected and waits for every result. `close()` flushes and then refuses further `add()` calls. `pending` is the number of messages not yet acknowledged or failed. A batcher is flushed and closed when its connection closes, before the connection drains.

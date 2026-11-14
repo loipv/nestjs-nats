@@ -1,5 +1,3 @@
-import { jetstreamManager } from '@nats-io/jetstream';
-import { connect } from '@nats-io/transport-node';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { ConnectionRegistry } from '../../src/connection/connection-registry.js';
 import { NatsConfigError } from '../../src/errors/errors.js';
@@ -11,7 +9,7 @@ import type { NatsPlugin } from '../../src/pipeline/types.js';
 import { createTestApp } from './support/app.js';
 import { type NatsTestServer, startNats } from './support/nats-server.js';
 
-describe('publishMany / Batcher', () => {
+describe('publishMany', () => {
   let srv: NatsTestServer;
 
   beforeAll(async () => {
@@ -42,7 +40,7 @@ describe('publishMany / Batcher', () => {
     };
   }
 
-  async function streamMessages(sm: NatsStreamManager): Promise<number> {
+  async function _streamMessages(sm: NatsStreamManager): Promise<number> {
     const jsm = await sm.jsm();
     return (await jsm.streams.info('PB')).state.messages;
   }
@@ -72,7 +70,6 @@ describe('publishMany / Batcher', () => {
       await expect(js.publishMany([{ subject: 'pb.a' }], { window: 0 })).rejects.toBeInstanceOf(
         NatsConfigError,
       );
-      expect(() => js.batcher({ window: 0 })).toThrow(NatsConfigError);
     } finally {
       await app.close();
     }
@@ -103,36 +100,6 @@ describe('publishMany / Batcher', () => {
       expect(max).toBeLessThanOrEqual(4);
     } finally {
       await app.close();
-    }
-  });
-
-  it('batcher publishes and resolves acks', async () => {
-    const { app, js, sm } = await setup();
-    try {
-      const b = js.batcher({ maxSize: 100, maxWait: 20 });
-      const acks = await Promise.all(Array.from({ length: 250 }, (_, i) => b.add('pb.b', i)));
-      expect(acks).toHaveLength(250);
-      expect(new Set(acks.map((a) => a.seq)).size).toBe(250);
-      await b.close();
-      expect(await streamMessages(sm)).toBe(250);
-    } finally {
-      await app.close();
-    }
-  });
-
-  it('flushes batchers on app.close()', async () => {
-    const { app, js } = await setup();
-    const b = js.batcher({ maxSize: 100, maxWait: 60_000 });
-    const pending = [b.add('pb.c', 1), b.add('pb.c', 2), b.add('pb.c', 3)];
-    await app.close();
-    expect(await Promise.all(pending)).toHaveLength(3);
-    // The app's connection is closed: count through a fresh one.
-    const nc = await connect({ servers: srv.url });
-    try {
-      const jsm = await jetstreamManager(nc);
-      expect((await jsm.streams.info('PB')).state.messages).toBe(3);
-    } finally {
-      await nc.close();
     }
   });
 });

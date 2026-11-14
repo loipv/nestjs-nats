@@ -54,7 +54,10 @@ export class TestingConnectionRegistry extends ConnectionRegistry implements OnA
     );
   }
 
-  /** Runs the close hooks (e.g. flushes batchers) and closes the stores the library created. */
+  /**
+   * Runs the close hooks (e.g. sends `NatsClient.publish()` messages still in the outbound
+   * plugins) and closes the stores the library created.
+   */
   async onApplicationShutdown(): Promise<void> {
     await this.closeAll();
     for (const { store, owned } of this.idempotencyStores()) {

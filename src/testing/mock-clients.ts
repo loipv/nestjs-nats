@@ -108,7 +108,7 @@ function mockEntry(options: MockClientOptions): ConnectionEntry {
       store ??= new InMemoryIdempotencyStore();
       return store;
     },
-    // A standalone mock is never closed: close hooks (batchers) never run.
+    // A standalone mock is never closed: its close hooks never run.
     onClose: () => () => {},
   };
 }

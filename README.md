@@ -16,7 +16,7 @@ Decorator-driven [NATS](https://nats.io) integration for [NestJS](https://nestjs
 - Declarative streams and consumers, synced at startup with four modes from create-or-update to read-only verification. See [Streams and consumers](./docs/streams.md).
 - Retry with exponential backoff and an optional dead-letter queue (DLQ), idempotency with a pluggable store (in memory, or shared through a JetStream KV bucket with `@loipv/nestjs-nats/kv`), and batch processing for `@Consume` and `@ConsumePush`. See [Retry and dead-letter queue](./docs/retry-and-dlq.md), [Idempotency](./docs/idempotency.md) and [Batch processing](./docs/batching.md#batch-processing).
 - Handler timeouts (`timeout`, `handlerTimeout`): a handler that runs too long fails like any error, frees its slot and sees `ctx.signal` aborted. See [Handler timeout](./docs/handlers.md#handler-timeout).
-- Batched JetStream publishing with `publishMany()` and an auto-flushing `batcher()`. See [Batch publishing](./docs/batching.md#batch-publishing).
+- Batched JetStream publishing with `publishMany()`. See [Batch publishing](./docs/batching.md#batch-publishing).
 - All-or-nothing publishing with `publishAtomic()`: several messages stored as one atomic batch. See [Atomic batches](./docs/publishing.md#atomic-batches).
 - Several named connections in one application, each passing its options straight to the NATS client, so every NATS auth method and TLS/mTLS works unchanged. See [Connections](./docs/connections.md).
 - [CloudEvents](./docs/cloudevents.md) 1.0 in binary and structured mode: publish with a `cloudEvent` option, route incoming events to methods by `type` with `@CloudEventRouter()` and `@OnCloudEvent()`, and read an event's attributes in any handler with `@CloudEvent()`.
@@ -111,7 +111,7 @@ Handlers can live in any provider or controller, in any module. The library find
 | [Streams and consumers](./docs/streams.md) | Declarative streams and consumers, sync modes |
 | [Retry and dead-letter queue](./docs/retry-and-dlq.md) | Retry options, failure handling, DLQ |
 | [Idempotency](./docs/idempotency.md) | Keys and stores |
-| [Batching](./docs/batching.md) | Batch processing, `publishMany()` and `batcher()` |
+| [Batching](./docs/batching.md) | Batch processing and `publishMany()` |
 | [CloudEvents](./docs/cloudevents.md) | Publishing and receiving CloudEvents |
 | [Plugins](./docs/plugins.md) | Inbound and outbound plugins, observing outcomes |
 | [Tracing (OpenTelemetry)](./docs/tracing.md) | Spans, attributes, events and errors |
@@ -127,7 +127,7 @@ Until 1.0, any API may change in a minor release, as the warning above says. The
 
 | Feature | Alternative |
 |---|---|
-| [`publishMany()` and `batcher()`](./docs/batching.md#batch-publishing) | `publish()` in a loop, or `Promise.all` over a bounded set |
+| [`publishMany()`](./docs/batching.md#batch-publishing) | `publish()` in a loop, or `Promise.all` over a bounded set |
 | [`@ConsumePush`](./docs/consumers.md#push-consumepush) | `@Consume` (pull), which NATS recommends |
 | [Idempotency on `@ConsumeOrdered`](./docs/idempotency.md), with the KV store's `instanceId` | Idempotency on `@Consume` |
 | [CloudEvents structured mode](./docs/cloudevents.md#publishing-cloudevents) and [wildcard type patterns](./docs/cloudevents.md#receiving-cloudevents) (`*`, `>`) | Binary mode, and exact types in `@OnCloudEvent` |

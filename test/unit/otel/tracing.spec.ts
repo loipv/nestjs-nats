@@ -3,7 +3,6 @@ import {
   context,
   propagation,
   ROOT_CONTEXT,
-  type Span,
   type SpanContext,
   SpanKind,
   SpanStatusCode,
@@ -13,8 +12,6 @@ import { W3CTraceContextPropagator } from '@opentelemetry/core';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { afterAll, afterEach, beforeAll, describe, expect, expectTypeOf, it } from 'vitest';
 import { jsonCodec } from '../../../src/codec/codec.js';
-import type { ConnectionEntry } from '../../../src/connection/connection-registry.js';
-import { JetStreamClient } from '../../../src/jetstream/jetstream-client.js';
 import * as otelApi from '../../../src/otel/index.js';
 import { type TracingOptions, tracing } from '../../../src/otel/index.js';
 import type {
@@ -31,7 +28,6 @@ import {
   delivery,
   endpointHandler,
   jsPart,
-  logger,
   orderedPart,
   subscribeHandler,
 } from '../../support/deliveries.js';
@@ -469,99 +465,6 @@ describe('tracing()', () => {
     });
     await inbound(delivery(subscribeHandler, [part]));
     expect(only().spanContext().traceId).toBe(other);
-  });
-
-  describe('JetStream batcher', () => {
-    function jsEntry() {
-      const published: MsgHdrs[] = [];
-      const entry = {
-        name: 'default',
-        options: { connection: {}, plugins: [plugin] },
-        logger,
-        js: () => ({
-          publish: async (_subject: string, _data: Uint8Array, opts: { headers: MsgHdrs }) => {
-            published.push(opts.headers);
-            return { stream: 'S', seq: published.length, duplicate: false };
-          },
-        }),
-        onClose: () => () => {},
-      } as unknown as ConnectionEntry;
-      return { entry, published };
-    }
-
-    /** Runs `add` under a new root span `name`. */
-    function addUnder(
-      name: string,
-      add: () => Promise<unknown>,
-    ): { parent: Span; done: Promise<unknown> } {
-      const parent = trace.getTracer('test').startSpan(name);
-      const done = context.with(trace.setSpan(ROOT_CONTEXT, parent), add);
-      return { parent, done };
-    }
-
-    function expectPublishedUnder(
-      parents: Array<{ spanContext(): SpanContext }>,
-      published: MsgHdrs[],
-    ) {
-      const publishes = spans().filter((s) => s.name === 'publish o.c');
-      expect(publishes).toHaveLength(parents.length);
-      parents.forEach((parent, i) => {
-        const { traceId, spanId } = parent.spanContext();
-        const span = publishes.find((s) => s.attributes['messaging.message.id'] === `m-${i}`);
-        expect(span?.parentSpanContext?.spanId).toBe(spanId);
-        expect(span?.spanContext().traceId).toBe(traceId);
-        const tp = published.find((h) => h.get('Nats-Msg-Id') === `m-${i}`)?.get('traceparent');
-        expect(tp).toBe(`00-${traceId}-${span?.spanContext().spanId}-01`);
-      });
-    }
-
-    it('publishes each message in the context it was added in (size flush)', async () => {
-      const { entry, published } = jsEntry();
-      const batcher = new JetStreamClient(entry).batcher({ maxSize: 2, maxWait: 10_000 });
-      const a = addUnder('A', () => batcher.add('o.c', 1, { msgId: 'm-0' }));
-      const b = addUnder('B', () => batcher.add('o.c', 2, { msgId: 'm-1' }));
-      await Promise.all([a.done, b.done]);
-      a.parent.end();
-      b.parent.end();
-      expectPublishedUnder([a.parent, b.parent], published);
-    });
-
-    it('publishes each message in the context it was added in (timer flush)', async () => {
-      const { entry, published } = jsEntry();
-      const batcher = new JetStreamClient(entry).batcher({ maxSize: 10, maxWait: 5 });
-      const a = addUnder('A', () => batcher.add('o.c', 1, { msgId: 'm-0' }));
-      const b = addUnder('B', () => batcher.add('o.c', 2, { msgId: 'm-1' }));
-      await Promise.all([a.done, b.done]);
-      a.parent.end();
-      b.parent.end();
-      expectPublishedUnder([a.parent, b.parent], published);
-    });
-
-    it('publishes each message in the context it was added in (explicit flush)', async () => {
-      const { entry, published } = jsEntry();
-      const batcher = new JetStreamClient(entry).batcher({ maxSize: 10, maxWait: 10_000 });
-      const a = addUnder('A', () => batcher.add('o.c', 1, { msgId: 'm-0' }));
-      const b = addUnder('B', () => batcher.add('o.c', 2, { msgId: 'm-1' }));
-      const c = trace.getTracer('test').startSpan('C');
-      await context.with(trace.setSpan(ROOT_CONTEXT, c), () => batcher.flush());
-      await Promise.all([a.done, b.done]);
-      for (const s of [a.parent, b.parent, c]) s.end();
-      expectPublishedUnder([a.parent, b.parent], published);
-    });
-
-    it('runs publishMany items in the caller context', async () => {
-      const { entry, published } = jsEntry();
-      const js = new JetStreamClient(entry);
-      const parent = trace.getTracer('test').startSpan('P');
-      await context.with(trace.setSpan(ROOT_CONTEXT, parent), () =>
-        js.publishMany([
-          { subject: 'o.c', data: 1, opts: { msgId: 'm-0' } },
-          { subject: 'o.c', data: 2, opts: { msgId: 'm-1' } },
-        ]),
-      );
-      parent.end();
-      expectPublishedUnder([parent, parent], published);
-    });
   });
 
   it('is a no-op without an SDK', async () => {

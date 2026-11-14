@@ -1,4 +1,3 @@
-export type { Batcher } from './batch/batcher.js';
 export type { BatchOptions } from './batch/collector.js';
 export { NatsClient } from './client/nats-client.js';
 export type { CloudEventInit, CloudEventMeta } from './cloudevents/types.js';

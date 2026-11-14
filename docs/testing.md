@@ -43,7 +43,7 @@ assert.equal(js.published.length, 2);
 | `whenRequest(subject).reply(value)` | Answers requests to `subject` (a NATS subject pattern) with `value`. The latest matching stub wins |
 | `whenRequest(subject).fail({ code, description })` | Answers with a service error |
 
-Options: `codec`, `plugins` and `cloudEvents` (`{ source? }`). The JetStream mock acks with `{ stream: 'mock', seq, duplicate }`, where `duplicate` is `true` for a repeated `Nats-Msg-Id`. `publishAtomic()` of the JetStream mock runs the same checks and outbound plugins as the real one and records the messages of a batch of more than one message when it commits, each with `atomic: { batch, index, count }`. Its ack has `count` and a fake `batch` id (unset for a single message, which is published as usual). It does not check that a stream has `allow_atomic`. A standalone mock is never closed, so a `batcher()` of a mock is not flushed for you: call its `flush()` yourself.
+Options: `codec`, `plugins` and `cloudEvents` (`{ source? }`). The JetStream mock acks with `{ stream: 'mock', seq, duplicate }`, where `duplicate` is `true` for a repeated `Nats-Msg-Id`. `publishAtomic()` of the JetStream mock runs the same checks and outbound plugins as the real one and records the messages of a batch of more than one message when it commits, each with `atomic: { batch, index, count }`. Its ack has `count` and a fake `batch` id (unset for a single message, which is published as usual). It does not check that a stream has `allow_atomic`.
 
 ## `NatsTestingModule` and `NatsTestHarness`
 
