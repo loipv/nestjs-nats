@@ -5,8 +5,9 @@ import type {
 } from '@nats-io/jetstream';
 import type { ConnectionEntry } from '../connection/connection-registry.js';
 import { NatsModuleError } from '../errors/errors.js';
-import { encodeOutgoing, sendOutbound, timerDelay } from '../pipeline/outbound.js';
+import { encodeOutgoing, sendOutbound } from '../pipeline/outbound.js';
 import type { OutgoingMessage } from '../pipeline/types.js';
+import { timerDelay } from '../util/timer.js';
 
 /** JetStream's de-duplication header. */
 export const MSG_ID_HEADER = 'Nats-Msg-Id';

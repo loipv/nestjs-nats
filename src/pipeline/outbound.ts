@@ -1,4 +1,3 @@
-import { MAX_TIMER_DELAY } from '../batch/collector.js';
 import { resolveCloudEvent, writeCloudEvent } from '../cloudevents/codec.js';
 import type { CloudEventInit } from '../cloudevents/types.js';
 import { type Codec, encodePayload, jsonCodec } from '../codec/codec.js';
@@ -6,6 +5,7 @@ import { type NatsHeadersInit, toMsgHdrs } from '../codec/headers.js';
 import type { ConnectionEntry } from '../connection/connection-registry.js';
 import { NatsModuleError } from '../errors/errors.js';
 import { errorTrace } from '../util/errors.js';
+import { timerDelay } from '../util/timer.js';
 import { compose } from './compose.js';
 import type { Next, OutgoingMessage } from './types.js';
 
@@ -70,11 +70,6 @@ export function encodeOutgoing(m: OutgoingMessage): Uint8Array {
     return writeCloudEvent(m.cloudEvent.meta, m.data, m.codec, m.cloudEvent.mode, m.headers);
   }
   return encodePayload(m.codec, m.data);
-}
-
-/** `ms` as a timer delay: at least 1 ms, at most the largest delay `setTimeout` honours. */
-export function timerDelay(ms: number): number {
-  return Math.min(Math.max(ms, 1), MAX_TIMER_DELAY);
 }
 
 /**

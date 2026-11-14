@@ -1,6 +1,5 @@
 import type { BatchAck, PubAck, StreamExpectations } from '@nats-io/jetstream';
 import type { MsgHdrs } from '@nats-io/transport-node';
-import { MAX_TIMER_DELAY } from '../batch/collector.js';
 import type { CloudEventInit } from '../cloudevents/types.js';
 import type { Codec } from '../codec/codec.js';
 import type { NatsHeadersInit } from '../codec/headers.js';
@@ -15,6 +14,7 @@ import {
   outboundMiddlewares,
 } from '../pipeline/outbound.js';
 import { errorMessage } from '../util/errors.js';
+import { MAX_TIMER_DELAY } from '../util/timer.js';
 import { jetStreamTimeout, MSG_ID_HEADER, publishOutgoing } from './publish.js';
 
 /** The most messages the server accepts in one atomic batch. */

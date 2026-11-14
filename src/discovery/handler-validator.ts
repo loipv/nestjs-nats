@@ -1,4 +1,3 @@
-import { MAX_TIMER_DELAY } from '../batch/collector.js';
 import type { ConnectionRegistry } from '../connection/connection-registry.js';
 import type { ConsumePushOptions } from '../decorators/handler.decorators.js';
 import { NatsConfigError } from '../errors/errors.js';
@@ -6,6 +5,7 @@ import { DEFAULT_IDEMPOTENCY_TTL } from '../idempotency/idempotency.js';
 import { assertTimeout } from '../pipeline/handler-timeout.js';
 import type { DlqOptions } from '../settlement/dlq.js';
 import { resolveRetryPolicy } from '../settlement/retry.js';
+import { MAX_TIMER_DELAY } from '../util/timer.js';
 import type { HandlerDefinition } from './handler-explorer.js';
 
 const label = (def: HandlerDefinition) => `${def.className}.${def.methodName}`;

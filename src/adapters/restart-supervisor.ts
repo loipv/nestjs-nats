@@ -2,10 +2,8 @@ import type { LoggerService } from '@nestjs/common';
 import type { RestartPolicy } from '../settlement/restart.js';
 import { backoffDelay } from '../settlement/retry.js';
 import { errorMessage } from '../util/errors.js';
+import { MAX_TIMER_DELAY } from '../util/timer.js';
 import type { HandlerState } from './adapter.js';
-
-/** The longest delay `setTimeout` honours: Node fires a longer one after 1 ms. */
-const MAX_TIMER_DELAY = 2 ** 31 - 1;
 
 export interface RestartSupervisorDeps {
   policy: RestartPolicy | false;

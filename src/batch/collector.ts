@@ -16,9 +16,6 @@ export const DEFAULT_BATCH: Readonly<ResolvedBatchOptions> = Object.freeze({
   maxWait: 1000,
 });
 
-/** Largest delay `setTimeout` honours; longer ones fire immediately. */
-export const MAX_TIMER_DELAY = 2 ** 31 - 1;
-
 /** The batch settings of a handler, or `undefined` when it does not batch. */
 export function resolveBatchOptions(
   opts: BatchOptions | undefined,

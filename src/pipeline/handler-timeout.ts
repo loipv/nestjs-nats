@@ -1,7 +1,7 @@
 import type { LoggerService } from '@nestjs/common';
-import { MAX_TIMER_DELAY } from '../batch/collector.js';
 import { NatsConfigError, NatsHandlerTimeoutError } from '../errors/errors.js';
 import { errorMessage, errorTrace } from '../util/errors.js';
+import { MAX_TIMER_DELAY } from '../util/timer.js';
 
 /**
  * The timeout of a handler: its own `timeout`, else the module's `handlerTimeout`; `false`

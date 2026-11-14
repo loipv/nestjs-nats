@@ -1,4 +1,5 @@
 import { NatsConfigError } from '../errors/errors.js';
+import { MAX_TIMER_DELAY } from '../util/timer.js';
 
 export interface RestartOptions {
   /** Delay before the first restart attempt (ms, default 1000). */
@@ -28,9 +29,6 @@ export const DEFAULT_RESTART: Readonly<RestartPolicy> = Object.freeze({
   jitter: 0.2,
   maxAttempts: Number.POSITIVE_INFINITY,
 });
-
-/** The largest delay a timer accepts (2^31-1 ms). */
-const MAX_TIMER_DELAY = 2 ** 31 - 1;
 
 /** `opts` without the keys set to `undefined`, so they keep their default. */
 function defined(opts: RestartOptions): RestartOptions {
