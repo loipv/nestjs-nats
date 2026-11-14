@@ -34,6 +34,7 @@ jobs:
       # vitest.config.ts. The test job below runs them again on every Node/Nest combination.
       - run: npm run test:cov
       - run: npm run build
+      - run: npm run typecheck:bench
       - run: npm run check:pkg
       - run: npm run check:pack
       # The build above is reused: docs:check:only skips docs:check's own build.

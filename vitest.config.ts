@@ -20,6 +20,13 @@ export default defineConfig({
         test: {
           name: 'unit',
           include: ['test/unit/**/*.spec.ts'],
+          // `npm run bench` (`vitest bench`) runs these as the "unit (bench)" project; they
+          // are never part of `npm test`.
+          benchmark: { include: ['bench/**/*.bench.ts'] },
+          // Benchmarks measure the built package (`npm run bench` builds it first), loaded by
+          // Node itself: through Vitest's module runner every export is a getter, which skews
+          // the numbers.
+          server: { deps: { external: [/\/dist\//] } },
           setupFiles: ['test/setup/reflect.ts'],
         },
       },
@@ -27,6 +34,7 @@ export default defineConfig({
         test: {
           name: 'integration',
           include: ['test/integration/**/*.int.spec.ts'],
+          benchmark: { include: [] },
           setupFiles: ['test/setup/reflect.ts'],
           testTimeout: 60_000,
           hookTimeout: 120_000,

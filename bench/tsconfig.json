@@ -1,0 +1,5 @@
+{
+  // The benchmarks import the built package (dist): typecheck them after \`npm run build\`.
+  "extends": "../tsconfig.json",
+  "include": ["."]
+}
