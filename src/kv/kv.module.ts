@@ -38,12 +38,14 @@ const COMPARED: ReadonlyArray<{
   field: keyof KvLimits;
   stream: string;
   fromStream?: (value: number) => number;
+  /** The server stores 0 (and below) as -1, unlimited. */
+  unlimitedBelowOne?: boolean;
 }> = [
-  { field: 'history', stream: 'max_msgs_per_subject' },
+  { field: 'history', stream: 'max_msgs_per_subject', unlimitedBelowOne: true },
   // `ttl` is in ms; the stream's `max_age` in ns.
   { field: 'ttl', stream: 'max_age', fromStream: (ns) => ns / 1e6 },
-  { field: 'max_bytes', stream: 'max_bytes' },
-  { field: 'maxValueSize', stream: 'max_msg_size' },
+  { field: 'max_bytes', stream: 'max_bytes', unlimitedBelowOne: true },
+  { field: 'maxValueSize', stream: 'max_msg_size', unlimitedBelowOne: true },
   { field: 'replicas', stream: 'num_replicas' },
   { field: 'storage', stream: 'storage' },
 ];
@@ -79,7 +81,9 @@ export class NatsKvModule {
         abortOnFailure(registry, () =>
           openKvBucket(registry.get(connection), declaration, connection),
         ),
-      inject: [getConnectionToken(connection), ConnectionRegistry],
+      // Optional: an unknown connection then fails in the factory, which closes the others,
+      // instead of in Nest's injector, which would leave them open.
+      inject: [{ token: getConnectionToken(connection), optional: true }, ConnectionRegistry],
     }));
     return {
       module: NatsKvModule,
@@ -98,7 +102,11 @@ export async function openKvBucket(
   declaration: KvBucketDeclaration,
   connection: string,
 ): Promise<KV> {
-  const { bucket, ...declared } = declaration;
+  const { bucket, ...limits } = declaration;
+  // An own key set to undefined would override the nats.js default (e.g. unlimited history).
+  const declared = Object.fromEntries(
+    Object.entries(limits).filter(([, v]) => v !== undefined),
+  ) as Partial<KvLimits>;
   const label = `KV bucket "${bucket}" on connection "${connection}"`;
   const kvm = new Kvm(entry.js());
   const sync = entry.options.jetstream?.sync ?? 'create-or-update';
@@ -152,11 +160,13 @@ function driftOf(
   declared: Partial<KvLimits>,
 ): Array<{ field: string; current: unknown; declared: unknown }> {
   const drift: Array<{ field: string; current: unknown; declared: unknown }> = [];
-  for (const { field, stream: key, fromStream } of COMPARED) {
-    if (declared[field] === undefined) continue;
+  for (const { field, stream: key, fromStream, unlimitedBelowOne } of COMPARED) {
+    const value = declared[field];
+    if (value === undefined) continue;
     const raw = stream[key];
     const current = fromStream && typeof raw === 'number' ? fromStream(raw) : raw;
-    if (current !== declared[field]) drift.push({ field, current, declared: declared[field] });
+    const expected = unlimitedBelowOne && typeof value === 'number' && value < 1 ? -1 : value;
+    if (current !== expected) drift.push({ field, current, declared: value });
   }
   return drift;
 }

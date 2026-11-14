@@ -176,6 +176,9 @@ export async function abortOnFailure<T>(
   try {
     return await factory();
   } catch (err) {
+    // A provider failing because an earlier one aborted startup (its connection is draining)
+    // never settles: settling would race the original error, which then gets lost.
+    if (manager.isStartupAborted()) return new Promise<never>(() => {});
     await manager.abortStartup();
     throw err;
   }

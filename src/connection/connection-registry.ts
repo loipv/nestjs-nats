@@ -174,6 +174,11 @@ export class ConnectionRegistry {
    * nats.js retries until the server answers, so that could take forever. `connect()`
    * closes each of them once it opens. Never rejects.
    */
+  /** Whether `abortStartup()` was called: startup has failed already. */
+  isStartupAborted(): boolean {
+    return this.startupAborted;
+  }
+
   async abortStartup(): Promise<void> {
     this.startupAborted = true;
     await this.closeAll({ timeoutMs: ABORT_CLOSE_TIMEOUT });

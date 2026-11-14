@@ -40,7 +40,7 @@ What happens to each bucket follows the connection's [`jetstream.sync`](./stream
 | `verify` | Startup fails: `KV bucket "<bucket>" on connection "<name>" does not exist` | Startup fails when a declared limit differs, listing each one |
 | `none` | Not created: the first access fails | Opened, nothing compared |
 
-The limits compared are `history`, `ttl`, `max_bytes`, `maxValueSize`, `replicas` and `storage`, and only those the declaration sets. A startup failure closes the connections already open, as any other failure of the module does.
+The limits compared are `history`, `ttl`, `max_bytes`, `maxValueSize`, `replicas` and `storage`, and only those the declaration sets. A `history`, `max_bytes` or `maxValueSize` of `0` means unlimited, as the server stores it (`-1`), and a limit set to `undefined` is left out, so it keeps the nats.js default. A startup failure closes the connections already open, as any other failure of the module does.
 
 ## Testing
 

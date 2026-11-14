@@ -90,14 +90,76 @@ describe('NatsKvModule.forFeature', () => {
     const providers = module.providers as FactoryProvider[];
     expect(providers.map((p) => p.provide)).toEqual(['nats:kv:other:a', 'nats:kv:other:b']);
     for (const p of providers) {
-      expect(p.inject).toEqual([getConnectionToken('other'), ConnectionRegistry]);
+      // Optional: an unknown connection fails inside the factory, which closes the others.
+      expect(p.inject).toEqual([
+        { token: getConnectionToken('other'), optional: true },
+        ConnectionRegistry,
+      ]);
     }
     expect(module.exports).toEqual(['nats:kv:other:a', 'nats:kv:other:b']);
   });
 
+  it('closes the connections on an unknown connection name', async () => {
+    const registry = {
+      get: (name: string) => {
+        throw new NatsConfigError(`Unknown NATS connection "${name}"`);
+      },
+      isStartupAborted: () => false,
+      abortStartup: vi.fn(async () => {}),
+    };
+    const [provider] = NatsKvModule.forFeature({ connection: 'othr', buckets: [{ bucket: 's' }] })
+      .providers as FactoryProvider[];
+    await expect(provider?.useFactory(undefined, registry)).rejects.toThrow(
+      'Unknown NATS connection "othr"',
+    );
+    expect(registry.abortStartup).toHaveBeenCalledOnce();
+  });
+
+  it('lets the first failing bucket report, not the siblings failing on the closing connection', async () => {
+    let aborted = false;
+    let finishAbort!: () => void;
+    const registry = {
+      get: () => entryWith('create-only').entry,
+      isStartupAborted: () => aborted,
+      abortStartup: vi.fn(() => {
+        aborted = true;
+        return new Promise<void>((resolve) => {
+          finishAbort = resolve;
+        });
+      }),
+    };
+    const root = new Error('replicas > 1 not supported in non-clustered mode');
+    kvm.create.mockRejectedValueOnce(root);
+    const [first, second] = NatsKvModule.forFeature({ buckets: [{ bucket: 'a' }, { bucket: 'b' }] })
+      .providers as [FactoryProvider, FactoryProvider];
+    const firstRun = first.useFactory({}, registry) as Promise<unknown>;
+    const firstOutcome = firstRun.catch((e: unknown) => e);
+    await vi.waitFor(() => expect(registry.abortStartup).toHaveBeenCalledOnce());
+    // The sibling fails on the connection being closed while the abort drains.
+    kvm.create.mockRejectedValueOnce(new Error('connection closed'));
+    let secondSettled = false;
+    void (second.useFactory({}, registry) as Promise<unknown>).then(
+      () => {
+        secondSettled = true;
+      },
+      () => {
+        secondSettled = true;
+      },
+    );
+    finishAbort();
+    expect(await firstOutcome).toBe(root);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(secondSettled).toBe(false);
+    expect(registry.abortStartup).toHaveBeenCalledOnce();
+  });
+
   it('closes the connections when a bucket cannot be opened', async () => {
     const { entry } = entryWith('verify', notFound());
-    const registry = { get: () => entry, abortStartup: vi.fn(async () => {}) };
+    const registry = {
+      get: () => entry,
+      isStartupAborted: () => false,
+      abortStartup: vi.fn(async () => {}),
+    };
     const [provider] = NatsKvModule.forFeature({ buckets: [{ bucket: 's' }] })
       .providers as FactoryProvider[];
     await expect(provider?.useFactory({}, registry)).rejects.toThrow(NatsConfigError);
@@ -114,6 +176,26 @@ describe('openKvBucket', () => {
     expect(kvm.create).not.toHaveBeenCalled();
     expect(info).not.toHaveBeenCalled();
   });
+
+  it('leaves out limits set to undefined, so they keep the nats.js default', async () => {
+    const { entry } = entryWith('create-only');
+    await openKvBucket(entry, { bucket: 's', history: undefined, ttl: 1000 }, 'default');
+    // An own `history: undefined` would override the nats.js default of 1 (unlimited history).
+    expect(Object.keys(kvm.create.mock.calls[0]?.[1] as object)).toEqual(['ttl']);
+  });
+
+  it.each(['history', 'max_bytes', 'maxValueSize'] as const)(
+    'reads %s 0 as unlimited, as the server stores it (-1)',
+    async (field) => {
+      const stream = { max_msgs_per_subject: -1, max_bytes: -1, max_msg_size: -1 };
+      const { entry, logger } = entryWith('create-or-update', stream);
+      await openKvBucket(entry, { bucket: 's', [field]: 0 }, 'default');
+      expect(logger.warn).not.toHaveBeenCalled();
+      await expect(
+        openKvBucket(entryWith('verify', stream).entry, { bucket: 's', [field]: 0 }, 'default'),
+      ).resolves.toBe(KV);
+    },
+  );
 
   it('creates the bucket with create-only, comparing nothing', async () => {
     const { entry, info } = entryWith('create-only');

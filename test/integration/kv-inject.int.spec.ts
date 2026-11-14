@@ -97,6 +97,38 @@ describe('NatsKvModule', () => {
     );
   });
 
+  it('reports the bucket that failed, not its siblings failing on the closed connection', async () => {
+    // The server refuses replicas: 3 on a single node; the other buckets are opening meanwhile.
+    for (let run = 0; run < 3; run++) {
+      await expect(
+        boot([
+          { bucket: `kvi-ok-a${run}` },
+          { bucket: `kvi-ok-b${run}` },
+          { bucket: `kvi-bad${run}`, replicas: 3 },
+          { bucket: `kvi-ok-c${run}` },
+          { bucket: `kvi-ok-d${run}` },
+        ]),
+      ).rejects.toThrow(/replicas > 1 not supported in non-clustered mode/);
+    }
+  });
+
+  it('fails bootstrap on an unknown connection name, closing the open ones', async () => {
+    const abort = vi.spyOn(ConnectionRegistry.prototype, 'abortStartup');
+    try {
+      await expect(
+        createTestApp({
+          imports: [
+            NatsModule.forRoot({ connection: { servers: srv.url }, logger: false }),
+            NatsKvModule.forFeature({ connection: 'othr', buckets: [{ bucket: 'kvi-typo' }] }),
+          ],
+        }),
+      ).rejects.toThrow('Unknown NATS connection "othr"');
+      expect(abort).toHaveBeenCalled();
+    } finally {
+      abort.mockRestore();
+    }
+  });
+
   it('opens an existing bucket under none', async () => {
     const raw = await new Kvm(rawNc).create('kvi-none');
     await raw.put('k', 'v');
