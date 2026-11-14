@@ -578,6 +578,19 @@ describe('NatsLifecycle idempotency store binding', () => {
     );
   }
 
+  it("rejects removedFields 'reset' before binding any store (a KV store would create its bucket)", async () => {
+    const bind = vi.fn(async () => {});
+    const store: IdempotencyStore = { ...fakeStore(), bind };
+    const { manager } = fakeManager({
+      default: { idempotency: { store } },
+      other: { jetstream: { removedFields: 'reset' } as never },
+    });
+    await expect(lifecycleFor(manager).onModuleInit()).rejects.toThrow(
+      /sets jetstream\.removedFields to "reset"/,
+    );
+    expect(bind).not.toHaveBeenCalled();
+  });
+
   it('binds the idempotency store of each connection before syncing streams', async () => {
     const ensureStream = vi
       .spyOn(NatsStreamManager.prototype, 'ensureStream')

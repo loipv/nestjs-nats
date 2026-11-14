@@ -197,7 +197,7 @@ describe('NatsStreamManager: a field removed from a declaration', () => {
    * A fake `jsm` that keeps the configs it is given. `add` and `update` merge the sent config
    * like nats.js and the server do (an `undefined` field is dropped) and echo the result back.
    */
-  function manager(init: { stream?: Config; consumer?: Config } = {}, version?: string) {
+  function manager(init: { stream?: Config; consumer?: Config } = {}) {
     const state: { stream?: Config; consumer?: Config } = { ...init };
     const notFound = (err_code: number) =>
       Promise.reject(new JetStreamApiError({ code: 404, err_code, description: 'not found' }));
@@ -235,7 +235,7 @@ describe('NatsStreamManager: a field removed from a declaration', () => {
     const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const entry = {
       name: 'main',
-      nc: { info: version === undefined ? undefined : { version } },
+      nc: { info: undefined },
       options: {},
       logger,
       jsm: () => Promise.resolve({ streams, consumers }),
@@ -246,7 +246,7 @@ describe('NatsStreamManager: a field removed from a declaration', () => {
   /** The metadata `removedFields: 'reset'` (removed in 0.3.0) left on the server. */
   const snap = (fields: string) => ({ 'nestjs-nats.declared': fields });
 
-  it('writes no snapshot when it creates', async () => {
+  it('creates with the declaration as written', async () => {
     const { sm, streams, consumers } = manager({});
     await sm.ensureStream({ name: 'S', subjects: ['a'], metadata: { team: 'x' } });
     expect(streams.add).toHaveBeenCalledExactlyOnceWith({
@@ -280,12 +280,6 @@ describe('NatsStreamManager: a field removed from a declaration', () => {
     expect(consumers.update).not.toHaveBeenCalled();
     expect(logger.warn).not.toHaveBeenCalled();
     expect(logger.log).not.toHaveBeenCalled();
-  });
-
-  it('does not warn about a server older than 2.10', async () => {
-    const { sm, logger } = manager({}, '2.9.0');
-    await sm.ensureStream({ name: 'S', subjects: ['a'] });
-    expect(logger.warn).not.toHaveBeenCalled();
   });
 
   it('accepts any declared metadata key, as before', async () => {

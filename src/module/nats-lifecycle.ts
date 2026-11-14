@@ -70,13 +70,15 @@ export class NatsLifecycle
 
   async onModuleInit(): Promise<void> {
     try {
+      // Before anything is written (binding a KV store may create its bucket): a failed boot
+      // must leave the server as it was.
       for (const name of this.manager.names()) {
-        const { handlerTimeout } = this.manager.get(name).options;
-        assertTimeout(handlerTimeout, `NATS connection "${name}"`, 'handlerTimeout');
+        const { options } = this.manager.get(name);
+        assertTimeout(options.handlerTimeout, `NATS connection "${name}"`, 'handlerTimeout');
+        rejectRemovedFieldsReset(name, options);
       }
       // Once per (store, connection) pair, before anything else uses the stores.
       await this.bindIdempotencyStores();
-      // Before anything is written: a failed boot must leave the server as it was.
       const declarations = this.collectDeclarations();
       for (const [name, { streams, consumers }] of declarations) {
         const sm = new NatsStreamManager(this.manager.get(name));
@@ -331,9 +333,7 @@ export class NatsLifecycle
   private collectDeclarations(): Map<string, Declarations> {
     const result = new Map<string, Declarations>();
     for (const name of this.manager.names()) {
-      const { options } = this.manager.get(name);
-      rejectRemovedFieldsReset(name, options);
-      const { streams = [], consumers = [] } = options;
+      const { streams = [], consumers = [] } = this.manager.get(name).options;
       result.set(name, { streams: [...streams], consumers: [...consumers] });
     }
     for (const wrapper of this.discovery.getProviders()) {

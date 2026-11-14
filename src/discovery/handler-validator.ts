@@ -44,7 +44,6 @@ export function validateHandlers(defs: HandlerDefinition[], mgr: ConnectionRegis
       rejectSubscribeBatch(def);
     }
     if (def.kind === 'subscribe' || def.kind === 'consume') {
-      validateBatch(def);
       const { concurrency } = def.options;
       if (concurrency !== undefined && (!Number.isInteger(concurrency) || concurrency < 1)) {
         throw new NatsConfigError(
@@ -53,6 +52,7 @@ export function validateHandlers(defs: HandlerDefinition[], mgr: ConnectionRegis
       }
     }
     if (def.kind === 'consume') {
+      validateBatch(def);
       validateDeliverGroup(def);
       const { stream, durable } = def.options;
       const key = JSON.stringify([def.connection, stream, durable]);
@@ -67,7 +67,10 @@ export function validateHandlers(defs: HandlerDefinition[], mgr: ConnectionRegis
   }
 }
 
-/** `batch` on `@Subscribe` was removed in 0.3.0; a JavaScript caller can still pass it. */
+/**
+ * `batch` on `@Subscribe` was removed in 0.3.0. It still reaches here from JavaScript, and from
+ * an options function, whose returned object TypeScript does not check for extra properties.
+ */
 function rejectSubscribeBatch(def: HandlerDefinition & { kind: 'subscribe' }): void {
   if ((def.options as { batch?: unknown }).batch === undefined) return;
   throw new NatsConfigError(
@@ -234,8 +237,7 @@ function validateIdempotency(def: HandlerDefinition, mgr: ConnectionRegistry): v
 }
 
 /** Validates the batch options of a consumer; a batch cannot be acked manually. */
-function validateBatch(def: HandlerDefinition): void {
-  if (def.kind !== 'consume') return;
+function validateBatch(def: HandlerDefinition & { kind: 'consume' }): void {
   const { batch } = def.options;
   if (batch === undefined) return;
   if (def.options.ack === 'manual') {

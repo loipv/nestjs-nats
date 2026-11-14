@@ -14,19 +14,13 @@ function setup(publishImpl?: (subject: string) => Promise<unknown>) {
     (subject: string, _payload?: Uint8Array, _opts?: unknown): Promise<unknown> =>
       publishImpl ? publishImpl(subject) : Promise.resolve(ack(++seq)),
   );
-  const hooks: Array<() => Promise<void>> = [];
-  const off = vi.fn();
   const entry = {
     name: 'default',
     options: { connection: {}, cloudEvents: { source: 'tests' } },
     logger: mockLogger(),
     js: () => ({ publish }),
-    onClose: vi.fn((hook: () => Promise<void>) => {
-      hooks.push(hook);
-      return off;
-    }),
   } as unknown as ConnectionEntry;
-  return { client: new JetStreamClient(entry), publish, hooks, off };
+  return { client: new JetStreamClient(entry), publish };
 }
 
 /** The headers of the `n`th publish, `undefined` when it had none. */

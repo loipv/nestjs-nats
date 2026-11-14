@@ -3,6 +3,7 @@ import { Injectable, Module, type Provider, Scope, type Type } from '@nestjs/com
 import { DiscoveryModule } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import { describe, expect, it, vi } from 'vitest';
+import type { ConnectionRegistry } from '../../../src/connection/connection-registry.js';
 import { CloudEventRouter, OnCloudEvent } from '../../../src/decorators/cloudevent.decorators.js';
 import {
   Consume,
@@ -17,6 +18,7 @@ import {
   type HandlerDefinition,
   HandlerExplorer,
 } from '../../../src/discovery/handler-explorer.js';
+import { validateHandlers } from '../../../src/discovery/handler-validator.js';
 import { NatsConfigError } from '../../../src/errors/errors.js';
 
 interface Config {
@@ -143,6 +145,19 @@ describe('HandlerExplorer startup values of method decorators', () => {
     const [def] = await explore(H);
     expect(def).toMatchObject({ subject: 'a' });
     expect(def?.options).toStrictEqual({});
+  });
+
+  it('hands validation a batch the options function of @Subscribe returns, which it rejects', async () => {
+    @Injectable()
+    class H {
+      @Subscribe('a', () => ({ queue: 'q', batch: { maxSize: 2 } }))
+      on() {}
+    }
+    const defs = await explore(H);
+    const mgr = { has: () => true, get: () => ({ options: {} }) } as unknown as ConnectionRegistry;
+    expect(() => validateHandlers(defs, mgr)).toThrow(
+      'NATS handler H.on sets batch on @Subscribe, which was removed in 0.3.0; use @Consume with batch, or handle messages one at a time',
+    );
   });
 
   it('calls a function once per application, however often explore() runs', async () => {

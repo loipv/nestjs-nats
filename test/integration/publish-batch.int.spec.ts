@@ -36,13 +36,7 @@ describe('publishMany', () => {
     return {
       app,
       js: app.get<JetStreamClient>(getJetStreamClientToken()),
-      sm: app.get<NatsStreamManager>(getStreamManagerToken()),
     };
-  }
-
-  async function _streamMessages(sm: NatsStreamManager): Promise<number> {
-    const jsm = await sm.jsm();
-    return (await jsm.streams.info('PB')).state.messages;
   }
 
   it('publishMany keeps input order and reports per-item results', async () => {

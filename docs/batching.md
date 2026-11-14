@@ -35,7 +35,7 @@ class AnalyticsHandlers {
 }
 ```
 
-- **Parameters.** `@Payload()` is the array of decoded payloads. `@Ctx()` is a `NatsBatchContext` whose `messages[i]` is the context of `items[i]`, a `NatsJetStreamContext` for `@Consume`. `@Headers()`, `@Subject()` and `@Msg()` are arrays too, aligned with the payloads, and `@Payload('id')` maps the property over the items.
+- **Parameters.** `@Payload()` is the array of decoded payloads. `@Ctx()` is a `NatsBatchContext` whose `messages[i]` is the context of `items[i]`, a `NatsJetStreamContext`. `@Headers()`, `@Subject()` and `@Msg()` are arrays too, aligned with the payloads, and `@Payload('id')` maps the property over the items.
 - **Partial failure.** `ctx.fail(target, error)` marks one message as failed, where `target` is its index in `items` or its raw message. It throws if `target` is not part of the batch. You can also return `{ failed: [{ msg, error }] }`, where `msg` is an index or a raw message. An invalid entry there is logged as an error and ignored. A failed message goes through the usual retry and DLQ rules on its own, and the others are acknowledged. If the handler throws, every message of the batch fails.
 - **Undecodable messages.** A message that cannot be decoded is left out of `items`. It is not retried. If a DLQ is configured, it is dead-lettered; if that publish fails, the message is `nak`'d with the backoff delay so the DLQ is tried again. Without a DLQ, it is terminated. The rest of the batch is still handled.
 - **Idempotency and retries** apply to each message of a batch separately, with one exception: if the idempotency store fails to claim the key of any message, the whole batch is retried (see [Idempotency](./idempotency.md)).

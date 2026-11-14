@@ -1,4 +1,4 @@
-/** Batch options of `@Subscribe` / `@Consume`. */
+/** Batch options of `@Consume` and `@ConsumePush`. */
 export interface BatchOptions {
   /** Flush once this many messages are collected (an integer >= 1; default 100). */
   maxSize?: number;

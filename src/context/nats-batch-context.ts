@@ -11,14 +11,14 @@ export interface NatsBatchContextInit {
 }
 
 /**
- * Context of a batch handler (`batch` option of `@Subscribe` / `@Consume`). In the
+ * Context of a batch handler (`batch` option of `@Consume` and `@ConsumePush`). In the
  * handler, `messages[i]` is the context of the message whose payload is at index `i`
  * of the payload array.
  */
 export class NatsBatchContext {
   readonly kind = 'batch' as const;
   readonly connection: string;
-  /** The context of each message (a `NatsJetStreamContext` for `@Consume`). */
+  /** The context of each message, a `NatsJetStreamContext`. */
   readonly messages: ReadonlyArray<NatsContext>;
   readonly #onFail: NatsBatchContextInit['onFail'];
   /** Created on first use: most handlers never read `signal`. */
