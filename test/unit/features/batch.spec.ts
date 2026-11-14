@@ -374,6 +374,109 @@ describe('batch idempotency', () => {
     }
   });
 
+  /** A store whose claims stay pending until `settle(i, result)`; `inFlight` counts the open ones. */
+  function deferredStore() {
+    const pending: Array<{ resolve(r: ClaimResult): void; reject(e: unknown): void }> = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const s = {
+      claim: vi.fn(
+        () =>
+          new Promise<ClaimResult>((resolve, reject) => {
+            inFlight++;
+            maxInFlight = Math.max(maxInFlight, inFlight);
+            const done = () => inFlight--;
+            pending.push({
+              resolve: (r) => {
+                done();
+                resolve(r);
+              },
+              reject: (e) => {
+                done();
+                reject(e);
+              },
+            });
+          }),
+      ),
+      complete: vi.fn(() => Promise.resolve()),
+      release: vi.fn(() => Promise.resolve()),
+    } satisfies IdempotencyStore;
+    return { s, pending, maxInFlight: () => maxInFlight };
+  }
+
+  const ids = (n: number) => Array.from({ length: n }, (_, i) => `k${i}`);
+  const bodies = (n: number) => Array.from({ length: n }, (_, i) => String(i));
+
+  it('claims the keys of a batch together, not one after another', async () => {
+    const { s, pending } = deferredStore();
+    const { d, invoke } = jsBatch(bodies(3), async () => {}, [], ids(3));
+    const idem = createIdempotency({ store: s, ttl: 1000, inProgressNakMs: 50 });
+    const run = pipeline(toMw(settlement()), toMw(idem))(d);
+    await vi.waitFor(() => expect(s.claim).toHaveBeenCalledTimes(3));
+    expect(invoke).not.toHaveBeenCalled();
+    // Settled out of order: the outcome of each message is still its own.
+    pending[2]?.resolve('duplicate');
+    pending[0]?.resolve('claimed');
+    pending[1]?.resolve('claimed');
+    await run;
+    expect(invoke.mock.calls[0]?.[0]).toEqual([0, 1]);
+    expect(s.complete.mock.calls).toEqual([
+      ['consume:ORD/d|k0', 1000],
+      ['consume:ORD/d|k1', 1000],
+    ]);
+  });
+
+  it('keeps at most 16 claims in flight', async () => {
+    const { s, pending, maxInFlight } = deferredStore();
+    const { d } = jsBatch(bodies(40), async () => {}, [], ids(40));
+    const idem = createIdempotency({ store: s, ttl: 1000, inProgressNakMs: 50 });
+    const run = pipeline(toMw(settlement()), toMw(idem))(d);
+    await vi.waitFor(() => expect(s.claim).toHaveBeenCalledTimes(16));
+    for (let i = 0; i < 40; i++) {
+      await vi.waitFor(() => expect(pending.length).toBeGreaterThan(i));
+      pending[i]?.resolve('claimed');
+    }
+    await run;
+    expect(s.claim).toHaveBeenCalledTimes(40);
+    expect(maxInFlight()).toBe(16);
+  });
+
+  it('claims a key repeated in the batch once and treats the repeat as in progress', async () => {
+    const s = store([]);
+    const { d, raws, invoke } = jsBatch(['1', '2', '3'], async () => {}, [], ['a', 'b', 'a']);
+    const idem = createIdempotency({ store: s, ttl: 1000, inProgressNakMs: 50 });
+    await pipeline(toMw(settlement()), toMw(idem))(d);
+    expect(s.claim.mock.calls).toEqual([
+      ['consume:ORD/d|a', 1000],
+      ['consume:ORD/d|b', 1000],
+    ]);
+    expect(invoke.mock.calls[0]?.[0]).toEqual([1, 2]);
+    expect(raws[2]?.nak).toHaveBeenCalledExactlyOnceWith(50);
+    expect(d.outcomes.get(d.messages[2] as never)).toEqual({
+      action: 'skipped',
+      reason: 'in-progress',
+    });
+  });
+
+  it('releases the keys it claimed when another claim fails, and handles nothing', async () => {
+    const { s, pending } = deferredStore();
+    const { d, raws, invoke } = jsBatch(bodies(3), async () => {}, [], ids(3));
+    const idem = createIdempotency({ store: s, ttl: 1000, inProgressNakMs: 50 });
+    const run = pipeline(toMw(settlement()), toMw(idem))(d);
+    await vi.waitFor(() => expect(s.claim).toHaveBeenCalledTimes(3));
+    pending[0]?.resolve('claimed');
+    pending[1]?.reject(new Error('kv down'));
+    pending[2]?.resolve('duplicate');
+    await run;
+    expect(invoke).not.toHaveBeenCalled();
+    expect(s.release.mock.calls).toEqual([['consume:ORD/d|k0']]);
+    // Nothing was acked as a duplicate: the whole batch is retried, and k2 is found again.
+    for (const raw of raws) {
+      expect(raw.ack).not.toHaveBeenCalled();
+      expect(raw.nak).toHaveBeenCalledOnce();
+    }
+  });
+
   it('releases every claim when the handler throws', async () => {
     const s = store([]);
     const { d } = jsBatch(['1', '2'], () => Promise.reject(new Error('x')), [], ['a', 'b']);

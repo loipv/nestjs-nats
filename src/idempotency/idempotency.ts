@@ -18,7 +18,10 @@ import {
 import type { InboundMiddleware, Next } from '../pipeline/types.js';
 import type { RetryPolicy } from '../settlement/retry.js';
 import { errorMessage, errorTrace } from '../util/errors.js';
-import type { IdempotencyStore } from './store.js';
+import type { ClaimResult, IdempotencyStore } from './store.js';
+
+/** Claims of one delivery sent to the store at once: a batch is not one round-trip per message. */
+const MAX_CONCURRENT_CLAIMS = 16;
 
 export interface IdempotencyOptions {
   /** How long a processed message is remembered, in ms (default: the module's, else 300_000). */
@@ -171,32 +174,71 @@ export function createIdempotency(cfg: IdempotencyConfig): InboundMiddleware {
     await Promise.all([complete(d, succeeded), release(d, failed)]);
   }
 
+  /**
+   * Claims the key of every message of `d`, at most `MAX_CONCURRENT_CLAIMS` at once, and
+   * returns each message's key and claim result (`undefined` for a message without a key). A
+   * key repeated in the delivery is claimed once; its repeats are `'in-progress'`, as a second
+   * claim of a key being processed would be. When a claim fails, the keys claimed are freed
+   * and the failure is thrown as an `IdempotencyStoreError`; a failing key extractor is thrown
+   * as it is, before anything is claimed.
+   */
+  async function claimAll(
+    d: Delivery,
+    scope: string,
+  ): Promise<Array<{ key: string; result: ClaimResult } | undefined>> {
+    const contexts = messageContexts(d);
+    const keys = d.messages.map((msg, i) => {
+      const key = idempotencyKey(msg, keyExtractor, contexts[i]);
+      if (key === undefined) {
+        d.logger.debug?.(`No idempotency key for message on "${msg.subject}"; processing it`);
+        return undefined;
+      }
+      return `${scope}|${key}`;
+    });
+    const distinct = [...new Set(keys.filter((k): k is string => k !== undefined))];
+    const claims = new Map<string, ClaimResult>();
+    let failure: { error: unknown } | undefined;
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < distinct.length && !failure) {
+        const key = distinct[next++] as string;
+        try {
+          claims.set(key, await store.claim(key, ttl));
+        } catch (err) {
+          failure ??= { error: err };
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(MAX_CONCURRENT_CLAIMS, distinct.length) }, worker),
+    );
+    if (failure) {
+      // Not processed: free what this delivery claimed and let settlement retry it.
+      await release(
+        d,
+        [...claims].filter(([, r]) => r === 'claimed').map(([key]) => key),
+      );
+      throw new IdempotencyStoreError(failure.error);
+    }
+    const seen = new Set<string>();
+    return keys.map((key) => {
+      if (key === undefined) return undefined;
+      const first = !seen.has(key);
+      seen.add(key);
+      return { key, result: first ? (claims.get(key) as ClaimResult) : 'in-progress' };
+    });
+  }
+
   return {
     async handle(d: Delivery, next: Next): Promise<void> {
       const skipped = (d as InternalDelivery)[SKIPPED];
       const scope = scopeOf(d.handler);
       const claimed: Array<{ key: string; msg: InboundMessage }> = [];
-      const contexts = messageContexts(d);
+      const results = await claimAll(d, scope);
       for (const [i, msg] of d.messages.entries()) {
-        let result: Awaited<ReturnType<IdempotencyStore['claim']>>;
-        let key: string | undefined;
-        try {
-          key = idempotencyKey(msg, keyExtractor, contexts[i]);
-          if (key === undefined) {
-            d.logger.debug?.(`No idempotency key for message on "${msg.subject}"; processing it`);
-            continue;
-          }
-          key = `${scope}|${key}`;
-          try {
-            result = await store.claim(key, ttl);
-          } catch (err) {
-            throw new IdempotencyStoreError(err);
-          }
-        } catch (err) {
-          // Not processed: free what this delivery claimed and let settlement retry it.
-          await release(d, keysOf(claimed));
-          throw err;
-        }
+        const entry = results[i];
+        if (!entry) continue;
+        const { key, result } = entry;
         switch (result) {
           case 'claimed':
             claimed.push({ key, msg });
