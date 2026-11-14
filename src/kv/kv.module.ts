@@ -108,7 +108,14 @@ export async function openKvBucket(
     Object.entries(limits).filter(([, v]) => v !== undefined),
   ) as Partial<KvLimits>;
   const label = `KV bucket "${bucket}" on connection "${connection}"`;
-  const kvm = new Kvm(entry.js());
+  const js = entry.js();
+  // NatsTestingModule's fake connection has no JetStream KV: nats.js would fail obscurely.
+  if (typeof (js as { jetstreamManager?: unknown }).jetstreamManager !== 'function') {
+    throw new NatsConfigError(
+      `${label} cannot be opened: the connection has no JetStream KV, as in NatsTestingModule; override getKvToken('${bucket}'${connection === DEFAULT_CONNECTION ? '' : `, '${connection}'`}) in tests`,
+    );
+  }
+  const kvm = new Kvm(js);
   const sync = entry.options.jetstream?.sync ?? 'create-or-update';
   if (sync === 'none') return kvm.open(bucket);
   if (sync === 'create-only') return kvm.create(bucket, declared);
@@ -130,7 +137,8 @@ export async function openKvBucket(
           .join(', ')}`,
       );
     }
-    return kvm.open(bucket);
+    // A bind-only open knows nothing of the stream: give it the stream's direct get.
+    return kvm.open(bucket, { allow_direct: stream.allow_direct === true });
   }
   const kv = await kvm.create(bucket, declared);
   // `create` uses an existing bucket as it is: report what differs, as it cannot be updated.

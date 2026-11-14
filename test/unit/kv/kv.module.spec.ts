@@ -1,10 +1,12 @@
 import 'reflect-metadata';
 import type { DynamicModule, FactoryProvider } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConnectionRegistry } from '../../../src/connection/connection-registry.js';
 import { NatsConfigError } from '../../../src/errors/errors.js';
 import { getKvToken, NatsKvModule, openKvBucket } from '../../../src/kv/kv.module.js';
 import { getConnectionToken } from '../../../src/module/tokens.js';
+import { NatsTestingModule } from '../../../src/testing/index.js';
 
 const kvm = vi.hoisted(() => ({
   create: vi.fn(),
@@ -33,7 +35,7 @@ function entryWith(sync: string | undefined, streamConfig: Record<string, unknow
     return { config: streamConfig };
   });
   const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const js = { name: 'js' };
+  const js = { name: 'js', jetstreamManager: () => undefined };
   const entry = {
     name: 'default',
     options: { connection: {}, ...(sync ? { jetstream: { sync } } : {}) },
@@ -153,6 +155,19 @@ describe('NatsKvModule.forFeature', () => {
     expect(registry.abortStartup).toHaveBeenCalledOnce();
   });
 
+  it('opens the bucket on the connection it is declared on', async () => {
+    const { entry } = entryWith('create-only');
+    const registry = {
+      get: vi.fn(() => entry),
+      isStartupAborted: () => false,
+      abortStartup: vi.fn(async () => {}),
+    };
+    const [provider] = NatsKvModule.forFeature({ connection: 'other', buckets: [{ bucket: 's' }] })
+      .providers as [FactoryProvider];
+    await provider.useFactory({}, registry);
+    expect(registry.get).toHaveBeenCalledExactlyOnceWith('other');
+  });
+
   it('closes the connections when a bucket cannot be opened', async () => {
     const { entry } = entryWith('verify', notFound());
     const registry = {
@@ -236,7 +251,7 @@ describe('openKvBucket', () => {
           max_bytes: 1024,
           maxValueSize: 256,
           replicas: 1,
-          storage: 'file' as never,
+          storage: 'file',
         },
         'default',
       );
@@ -285,6 +300,16 @@ describe('openKvBucket', () => {
       expect(kvm.create).not.toHaveBeenCalled();
     });
 
+    it.each([
+      [true, true],
+      [false, false],
+      [undefined, false],
+    ])("opens with direct get as the bucket's stream allows it (%s)", async (allow, expected) => {
+      const { entry } = entryWith('verify', { allow_direct: allow });
+      await openKvBucket(entry, { bucket: 's' }, 'default');
+      expect(kvm.open).toHaveBeenCalledExactlyOnceWith('s', { allow_direct: expected });
+    });
+
     it('checks that a bucket declared without limits exists', async () => {
       const { entry, info } = entryWith('verify', { max_msgs_per_subject: 1 });
       await openKvBucket(entry, { bucket: 's' }, 'default');
@@ -296,5 +321,37 @@ describe('openKvBucket', () => {
       const { entry } = entryWith('verify', boom);
       await expect(openKvBucket(entry, { bucket: 's' }, 'default')).rejects.toBe(boom);
     });
+  });
+});
+
+describe('openKvBucket on a connection without JetStream KV', () => {
+  it('says to override the bucket, as NatsTestingModule has no KV', async () => {
+    const { entry } = entryWith('create-or-update');
+    (entry as { js: () => unknown }).js = () => ({ publish: () => undefined });
+    const err = await errorOf(openKvBucket(entry, { bucket: 's' }, 'default'));
+    expect(err).toBeInstanceOf(NatsConfigError);
+    expect(err.message).toBe(
+      'KV bucket "s" on connection "default" cannot be opened: the connection has no JetStream KV, as in NatsTestingModule; override getKvToken(\'s\') in tests',
+    );
+    expect(kvm.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('NatsKvModule with NatsTestingModule', () => {
+  it('fails with how to override the bucket, unless it is overridden', async () => {
+    const imports = [
+      NatsTestingModule.forRoot(),
+      NatsKvModule.forFeature({ buckets: [{ bucket: 'sessions' }] }),
+    ];
+    await expect(Test.createTestingModule({ imports }).compile()).rejects.toThrow(
+      "override getKvToken('sessions') in tests",
+    );
+    const fake = { bucket: 'fake' };
+    const moduleRef = await Test.createTestingModule({ imports })
+      .overrideProvider(getKvToken('sessions'))
+      .useValue(fake)
+      .compile();
+    expect(moduleRef.get(getKvToken('sessions'))).toBe(fake);
+    await moduleRef.close();
   });
 });

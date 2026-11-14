@@ -25,7 +25,7 @@ class Sessions {
 class SessionsModule {}
 ```
 
-`forFeature({ connection?, buckets })` takes the connection name (default `'default'`) and the buckets, each `{ bucket, ...limits }` with the limits of nats.js's `KvLimits` (`history`, `ttl` in ms, `max_bytes`, `maxValueSize`, `replicas`, `storage`, ...). The injected value is nats.js's own `KV`: `get`, `put`, `create`, `update`, `delete`, `watch`, `keys`, `history` and the rest. Values are bytes or strings, as in nats.js. Import `NatsKvModule.forFeature` in each module that injects a bucket; inject a bucket of another connection with `@InjectKv(bucket, connection)`.
+`forFeature({ connection?, buckets })` takes the connection name (default `'default'`) and the buckets, each `{ bucket, ...limits }` with the limits of nats.js's `KvLimits` (`history`, `ttl` in ms, `max_bytes`, `maxValueSize`, `replicas`, `storage`, ...). The injected value is nats.js's own `KV`: `get`, `put`, `create`, `update`, `delete`, `watch`, `keys`, `history` and the rest. Values are bytes or strings, as in nats.js. Declare each bucket once: every `forFeature` call opens its buckets again, and logs its own drift warnings. Put the call in one module that exports it, and import that module where the bucket is injected; inject a bucket of another connection with `@InjectKv(bucket, connection)`.
 
 `forFeature` throws a `NatsConfigError` at once when it has no bucket, a bucket name other than letters, digits, `-` and `_`, or the same bucket twice.
 
@@ -38,13 +38,13 @@ What happens to each bucket follows the connection's [`jetstream.sync`](./stream
 | `create-or-update` (default) | Created with the declared limits | Used as it is. Each declared limit it holds differently is logged as a warning: the library does not update KV buckets, change it with `nats kv` or recreate it |
 | `create-only` | Created | Used as it is, nothing compared |
 | `verify` | Startup fails: `KV bucket "<bucket>" on connection "<name>" does not exist` | Startup fails when a declared limit differs, listing each one |
-| `none` | Not created: the first access fails | Opened, nothing compared |
+| `none` | Not created: the first access fails (nats.js reports a `put` as `jetstream is not enabled`, a `get` as a missing stream) | Opened, nothing compared |
 
 The limits compared are `history`, `ttl`, `max_bytes`, `maxValueSize`, `replicas` and `storage`, and only those the declaration sets. A `history`, `max_bytes` or `maxValueSize` of `0` means unlimited, as the server stores it (`-1`), and a limit set to `undefined` is left out, so it keeps the nats.js default. A startup failure closes the connections already open, as any other failure of the module does.
 
 ## Testing
 
-`NatsTestingModule` has no KV. Replace a bucket with your own fake:
+`NatsTestingModule` has no KV: a bucket left as it is fails the test module with a `NatsConfigError` naming the token to override. Replace it with your own fake:
 
 ```ts
 import { getKvToken } from '@loipv/nestjs-nats/kv';

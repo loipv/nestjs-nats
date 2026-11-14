@@ -129,6 +129,30 @@ describe('NatsKvModule', () => {
     }
   });
 
+  it('creates a missing bucket under create-only', async () => {
+    const { app, kv } = await boot([{ bucket: 'kvi-only', history: 2 }], 'create-only');
+    try {
+      await kv.put('a', 'one');
+      expect((await kv.get('a'))?.string()).toBe('one');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('opens a matching bucket under verify, with direct get as the bucket allows it', async () => {
+    const raw = await new Kvm(rawNc).create('kvi-ok', { history: 3 });
+    await raw.put('k', 'v');
+    const { app, kv } = await boot([{ bucket: 'kvi-ok', history: 3 }], 'verify');
+    try {
+      expect((await kv.get('k'))?.string()).toBe('v');
+      expect((kv as unknown as { direct: boolean }).direct).toBe(
+        (raw as unknown as { direct: boolean }).direct,
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
   it('opens an existing bucket under none', async () => {
     const raw = await new Kvm(rawNc).create('kvi-none');
     await raw.put('k', 'v');
