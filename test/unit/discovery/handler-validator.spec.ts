@@ -451,3 +451,17 @@ describe('validateHandlers timeout', () => {
     });
   });
 });
+
+describe('validateHandlers slowConsumer', () => {
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, true, '10'])('rejects %s', (value) => {
+    const check = () => validateHandlers([def({ options: { slowConsumer: value } })], mgr);
+    expect(check).toThrow(NatsConfigError);
+    expect(check).toThrow(
+      `NATS handler H.on has invalid slowConsumer ${String(value)}; expected an integer >= 1 or false`,
+    );
+  });
+
+  it.each([1, 10_000, false, undefined])('accepts %s', (value) => {
+    expect(() => validateHandlers([def({ options: { slowConsumer: value } })], mgr)).not.toThrow();
+  });
+});

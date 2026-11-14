@@ -28,6 +28,8 @@ import { RestartSupervisor } from './restart-supervisor.js';
 type SubscribeDefinition = HandlerDefinition & { kind: 'subscribe' };
 
 const EMPTY = new Uint8Array(0);
+/** Default `slowConsumer`: pending messages past which the connection logs a warning. */
+const DEFAULT_SLOW_CONSUMER = 10_000;
 
 /** Runs a `@Subscribe` handler on a core NATS subscription (optionally in a queue group). */
 export class CoreSubscriptionAdapter implements HandlerAdapter {
@@ -102,8 +104,11 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
 
   private async open(): Promise<void> {
     if (this.stopping) return;
-    const { queue } = this.def.options;
-    const sub = this.entry.nc.subscribe(this.def.subject, queue ? { queue } : {});
+    const { queue, slowConsumer = DEFAULT_SLOW_CONSUMER } = this.def.options;
+    const sub = this.entry.nc.subscribe(this.def.subject, {
+      ...(queue ? { queue } : {}),
+      ...(slowConsumer === false ? {} : { slow: slowConsumer }),
+    });
     const previous = { sub: this.sub, loop: this.loop, running: this.loopRunning };
     this.sub = sub;
     this.loopRunning = true;

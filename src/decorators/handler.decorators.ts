@@ -25,6 +25,13 @@ export type HandlerDisabled = boolean | ((ctx: StartupContext) => boolean);
 export interface SubscribeOptions {
   connection?: string;
   queue?: string;
+  /**
+   * Messages waiting in the subscription past which the connection logs a slow-consumer
+   * warning, once each time the backlog crosses it. Only a warning: core NATS cannot hold
+   * messages back, so a backlog grows in memory until the handler catches up (use
+   * `@Consume` for flow control). `false` turns the warning off. Default `10_000`.
+   */
+  slowConsumer?: number | false;
   codec?: Codec;
   concurrency?: number;
   retry?: RetryOptions | false;

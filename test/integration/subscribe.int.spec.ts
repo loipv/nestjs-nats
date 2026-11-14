@@ -1,7 +1,7 @@
 import { connect, type NatsConnection } from '@nats-io/transport-node';
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { Test, type TestingModule } from '@nestjs/testing';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { NatsClient } from '../../src/client/nats-client.js';
 import { NatsConnectionManager } from '../../src/connection/connection-manager.js';
 import { Subscribe } from '../../src/decorators/handler.decorators.js';
@@ -97,6 +97,19 @@ class SlowHandlers {
     this.started = true;
     await sleep(300);
     this.done = true;
+  }
+}
+
+@Injectable()
+class BacklogHandlers {
+  release!: () => void;
+  private readonly gate = new Promise<void>((resolve) => {
+    this.release = resolve;
+  });
+
+  @Subscribe('backlog', { slowConsumer: 5 })
+  async onBacklog() {
+    await this.gate;
   }
 }
 
@@ -287,5 +300,35 @@ describe('@Subscribe', () => {
     expect(slow.done).toBe(false);
     expect(slowApp.get(NatsConnectionManager).status().state).toBe('closed');
     await eventually(() => expect(slow.done).toBe(true));
+  });
+
+  it('warns when a backlog crosses slowConsumer', async () => {
+    const warn = vi.fn();
+    const backlogApp = await createTestApp({
+      imports: [
+        NatsModule.forRoot({
+          connection: { servers: srv.url },
+          logger: { log() {}, error() {}, warn },
+        }),
+      ],
+      providers: [BacklogHandlers],
+    });
+    try {
+      for (let i = 0; i < 20; i++) rawNc.publish('backlog', enc.encode('{}'));
+      await rawNc.flush();
+      await eventually(() => expect(warn).toHaveBeenCalled());
+      await sleep(100);
+      // Once per crossing. The check runs as messages arrive, and the blocked handler lets the
+      // loop take at most 2 messages, so the backlog can fall back to 5 and cross again once.
+      expect(warn.mock.calls.length).toBeLessThanOrEqual(2);
+      for (const [message] of warn.mock.calls) {
+        expect(message).toMatch(
+          /^NATS connection "default" subscription "backlog" is a slow consumer: ([6-9]|1\d|20) messages pending$/,
+        );
+      }
+    } finally {
+      backlogApp.get(BacklogHandlers).release();
+      await backlogApp.close();
+    }
   });
 });

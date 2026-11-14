@@ -16,7 +16,7 @@ import { DEFAULT_CONNECTION } from '../module/tokens.js';
 import { errorMessage } from '../util/errors.js';
 import { settlesWithin } from '../util/timeout.js';
 import type { NatsConnectionState, NatsStatusEvent } from './connection-manager.js';
-import { redactError, redactServers, redactText, serverSecrets } from './redact.js';
+import { connectionSecrets, redactError, redactServers, redactText } from './redact.js';
 
 export interface ConnectionEntry {
   readonly name: string;
@@ -73,6 +73,7 @@ const LOGGED_EVENTS = new Set<Status['type']>([
   'ldm',
   'error',
   'staleConnection',
+  'slowConsumer',
 ]);
 
 /**
@@ -186,8 +187,7 @@ export class ConnectionRegistry {
     try {
       return await connect(options.connection);
     } catch (err) {
-      const { pass, token } = options.connection;
-      const secrets = [pass, token, ...serverSecrets(options.connection.servers)];
+      const secrets = connectionSecrets(options.connection);
       const servers = redactServers(options.connection.servers).map((s) => redactText(s, secrets));
       // The raw error may carry credentials outside its message (e.g. the `input` URL of
       // ERR_INVALID_URL), so only a sanitized copy is exposed as the cause.
@@ -306,7 +306,7 @@ export class ConnectionRegistry {
         await entry.nc.close();
       } catch (err) {
         entry.logger.error(
-          `NATS connection "${entry.name}" failed to close: ${redactText(errorMessage(err))}`,
+          `NATS connection "${entry.name}" failed to close: ${this.redact(entry, errorMessage(err))}`,
         );
       }
     })();
@@ -335,7 +335,7 @@ export class ConnectionRegistry {
       // A drain abandoned for a forced close may fail afterwards: that is expected.
       if (forced()) return;
       entry.logger.error(
-        `NATS connection "${entry.name}" failed to close cleanly: ${redactText(errorMessage(err))}`,
+        `NATS connection "${entry.name}" failed to close cleanly: ${this.redact(entry, errorMessage(err))}`,
       );
     }
   }
@@ -347,7 +347,7 @@ export class ConnectionRegistry {
       if (result.status === 'rejected') {
         const { entry } = runs[i] as (typeof runs)[number];
         entry.logger.error(
-          `NATS connection "${entry.name}" close hook failed: ${redactText(errorMessage(result.reason))}`,
+          `NATS connection "${entry.name}" close hook failed: ${this.redact(entry, errorMessage(result.reason))}`,
         );
       }
     });
@@ -376,9 +376,14 @@ export class ConnectionRegistry {
       }
     } catch (err) {
       entry.logger.error(
-        `NATS connection "${entry.name}" status stream failed: ${err instanceof Error ? err.message : String(err)}`,
+        `NATS connection "${entry.name}" status stream failed: ${this.redact(entry, errorMessage(err))}`,
       );
     }
+  }
+
+  /** `text` with the credentials of `entry`'s connection masked. */
+  private redact(entry: ConnectionEntry, text: string): string {
+    return redactText(text, connectionSecrets(entry.options.connection));
   }
 
   private logStatus(entry: ConnectionEntry, s: Status): void {
@@ -396,7 +401,12 @@ export class ConnectionRegistry {
         );
         break;
       case 'error':
-        entry.logger.error(`${prefix} server error: ${s.error.message}`);
+        entry.logger.error(`${prefix} server error: ${this.redact(entry, s.error.message)}`);
+        break;
+      case 'slowConsumer':
+        entry.logger.warn(
+          `${prefix} subscription "${s.sub.getSubject()}" is a slow consumer: ${s.pending} messages pending`,
+        );
         break;
       case 'staleConnection':
         entry.logger.warn(`${prefix} connection is stale`);

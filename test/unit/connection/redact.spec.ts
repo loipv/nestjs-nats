@@ -25,6 +25,10 @@ describe('redactText', () => {
       'failed nats://***@h:1 with pw ***',
     );
   });
+
+  it('masks a secret whole when a shorter secret is part of it', () => {
+    expect(redactText('pw is pw-tok-s3cret', ['tok-s3cret', 'pw-tok-s3cret'])).toBe('pw is ***');
+  });
 });
 
 describe('serverSecrets', () => {

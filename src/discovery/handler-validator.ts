@@ -39,6 +39,7 @@ export function validateHandlers(defs: HandlerDefinition[], mgr: ConnectionRegis
       validateDlq(def, mgr);
       validateIdempotency(def, mgr);
     }
+    if (def.kind === 'subscribe') validateSlowConsumer(def);
     if (def.kind === 'subscribe' || def.kind === 'consume') {
       validateBatch(def);
       const { concurrency } = def.options;
@@ -60,6 +61,17 @@ export function validateHandlers(defs: HandlerDefinition[], mgr: ConnectionRegis
       }
       durables.set(key, def);
     }
+  }
+}
+
+/** `slowConsumer` is a number of messages, or `false`. */
+function validateSlowConsumer(def: HandlerDefinition & { kind: 'subscribe' }): void {
+  const { slowConsumer } = def.options;
+  if (slowConsumer === undefined || slowConsumer === false) return;
+  if (!Number.isInteger(slowConsumer) || slowConsumer < 1) {
+    throw new NatsConfigError(
+      `NATS handler ${label(def)} has invalid slowConsumer ${String(slowConsumer)}; expected an integer >= 1 or false`,
+    );
   }
 }
 

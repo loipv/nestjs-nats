@@ -72,6 +72,79 @@ describe('ConnectionRegistry connect errors', () => {
   });
 });
 
+/** A connection whose status stream yields `events`, then fails with `failure` if given. */
+function statusConnection(events: unknown[], failure?: Error) {
+  return {
+    status: () => ({
+      async *[Symbol.asyncIterator]() {
+        yield* events;
+        if (failure) throw failure;
+      },
+    }),
+    isClosed: () => true,
+    isDraining: () => false,
+    closed: () => Promise.resolve(),
+  };
+}
+
+describe('ConnectionRegistry status logging', () => {
+  const SECRET = 'tok-s3cret';
+
+  async function logged(events: unknown[], failure?: Error) {
+    const logger = { log: vi.fn(), error: vi.fn(), warn: vi.fn() };
+    const mgr = new FakeConnectionManager(statusConnection(events, failure));
+    await mgr.connect('orders', {
+      connection: { servers: `nats://user:pw-${SECRET}@h:4222`, token: SECRET },
+      logger,
+    });
+    // Let the status loop run to its end.
+    await new Promise((r) => setImmediate(r));
+    return logger;
+  }
+
+  it('masks credentials in a server error', async () => {
+    const logger = await logged([
+      {
+        type: 'error',
+        error: new Error(`'Authorization Violation' for ${SECRET} at nats://u:p@h`),
+      },
+    ]);
+    expect(logger.error).toHaveBeenCalledExactlyOnceWith(
+      `NATS connection "orders" server error: 'Authorization Violation' for *** at nats://***@h`,
+    );
+  });
+
+  it('masks credentials when the status stream fails', async () => {
+    const logger = await logged([], new Error(`stream broke: pw-${SECRET}`));
+    expect(logger.error).toHaveBeenCalledExactlyOnceWith(
+      'NATS connection "orders" status stream failed: stream broke: ***',
+    );
+  });
+
+  it('masks credentials when the connection fails to close', async () => {
+    const logger = { log: vi.fn(), error: vi.fn(), warn: vi.fn() };
+    const mgr = new FakeConnectionManager({
+      ...statusConnection([]),
+      isClosed: () => false,
+      drain: () => Promise.reject(new Error(`drain failed for ${SECRET}`)),
+    });
+    await mgr.connect('orders', { connection: { token: SECRET }, logger });
+    await mgr.closeAll();
+    expect(logger.error).toHaveBeenCalledExactlyOnceWith(
+      'NATS connection "orders" failed to close cleanly: drain failed for ***',
+    );
+  });
+
+  it('warns about a slow consumer, naming its subject and pending messages', async () => {
+    const logger = await logged([
+      { type: 'slowConsumer', sub: { getSubject: () => 'orders.*' }, pending: 10_001 },
+    ]);
+    expect(logger.warn).toHaveBeenCalledExactlyOnceWith(
+      'NATS connection "orders" subscription "orders.*" is a slow consumer: 10001 messages pending',
+    );
+  });
+});
+
 /** A connection that never finishes draining nor closing (e.g. a dead socket). */
 function stuckConnection() {
   return {

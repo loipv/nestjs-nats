@@ -41,6 +41,40 @@ describe('InMemoryIdempotencyStore', () => {
     expect(await s.claim('k', 1000)).toBe('duplicate');
   });
 
+  describe('a key longer than 256 characters', () => {
+    const long = (end: string) => `scope|${'x'.repeat(1_000_000)}${end}`;
+    const held = () => [...(s as unknown as { entries: Map<string, unknown> }).entries.keys()];
+
+    it('is held by a short digest, not as it is', async () => {
+      await s.claim(long('a'), 1000);
+      expect(held()).toHaveLength(1);
+      expect(held()[0]?.length).toBeLessThan(100);
+    });
+
+    it('is claimed, completed and released like any key', async () => {
+      expect(await s.claim(long('a'), 1000)).toBe('claimed');
+      expect(await s.claim(long('a'), 1000)).toBe('in-progress');
+      expect(await s.claim(long('b'), 1000)).toBe('claimed');
+      await s.complete(long('a'), 1000);
+      expect(await s.claim(long('a'), 1000)).toBe('duplicate');
+      await s.release(long('b'));
+      expect(await s.claim(long('b'), 1000)).toBe('claimed');
+    });
+
+    it('never collides with a short key equal to its stored form', async () => {
+      await s.claim(long('a'), 1000);
+      const stored = held()[0] as string;
+      expect(await s.claim(stored, 1000)).toBe('claimed');
+      expect(await s.claim(stored.slice(2), 1000)).toBe('claimed');
+    });
+
+    it('keeps a key of exactly 256 characters as it is', async () => {
+      const key = 'k'.repeat(256);
+      await s.claim(key, 1000);
+      expect(held()[0]).toContain(key);
+    });
+  });
+
   it('release frees the key', async () => {
     await s.claim('k', 1000);
     await s.release('k');

@@ -18,6 +18,7 @@ onOrderEvent(@Payload() event: OrderEvent, @Subject() subject: string) {
 | `connection` | `'default'` | Connection name |
 | `queue` | none | Queue group, which load-balances messages across instances |
 | `concurrency` | `1` | Maximum number of messages processed at once. `1` keeps the arrival order |
+| `slowConsumer` | `10000` | Messages waiting for the handler past which the connection logs a warning, or `false`. See [Slow consumers](#slow-consumers) |
 | `codec` | module codec | Codec for this handler |
 | `retry` | module's, else on | Retry policy, or `false`. See [Retry and dead-letter queue](./retry-and-dlq.md) |
 | `dlq` | module's, else off | Dead-letter queue: `true`, or `{ subject?, mode? }` |
@@ -28,6 +29,16 @@ onOrderEvent(@Payload() event: OrderEvent, @Subject() subject: string) {
 **Request/reply.** If the incoming message has a reply subject and the handler returns something other than `undefined`, the return value is encoded and sent back. If the handler throws, the requester gets an error reply and the message is not retried. See [Errors](./errors.md).
 
 **Keep request subjects out of streams.** If a JetStream stream's subjects capture a request subject (a stream on `orders.>` captures `orders.get`), the stream stores the request and answers it with a PubAck. The stream and your handler both reply, and the first reply to arrive wins: usually the PubAck (`{ stream, seq }`), not the handler's reply. Use request subjects that no stream captures, as the [orders example](../examples/orders) does with `query.orders.get` next to its `orders.>` stream. See [Streams and consumers](./streams.md).
+
+### Slow consumers
+
+Core NATS pushes messages as fast as they are published. While every `concurrency` slot is busy, the ones that arrive wait in the subscription, in memory, and core NATS has no way to hold them back. When more than `slowConsumer` messages are waiting, the connection's [logger](./connections.md#logging) warns:
+
+```
+NATS connection "default" subscription "orders.*" is a slow consumer: 10001 messages pending
+```
+
+It warns once each time the backlog crosses the threshold, not for every message. The warning is all it does: no message is dropped. For a subject that can receive more than the handler keeps up with, such as one that untrusted clients publish to, use [`@Consume`](#consumeoptions-jetstream-pull-consumer): a JetStream consumer pulls only what its handler can take.
 
 ## `@Consume(options)`: JetStream pull consumer
 

@@ -44,7 +44,7 @@ class InvoiceHandlers {
 
 ## Stores
 
-The default store is an `InMemoryIdempotencyStore`: one per connection, shared by the handlers of that connection. It lives in the memory of one process, so it does not de-duplicate across instances and forgets everything on restart. It keeps up to `maxKeys` keys (default `100000`) and evicts the least recently used one. To share state across instances, use the [JetStream KV store](#jetstream-kv-store), or implement `IdempotencyStore` over a shared database and pass it as `idempotency.store`:
+The default store is an `InMemoryIdempotencyStore`: one per connection, shared by the handlers of that connection. It lives in the memory of one process, so it does not de-duplicate across instances and forgets everything on restart. It keeps up to `maxKeys` keys (default `100000`) and evicts the least recently used one. A key longer than 256 characters is kept as its SHA-256 hash, so a publisher sending huge `Nats-Msg-Id` headers cannot make the store hold more than about 256 characters per key. To share state across instances, use the [JetStream KV store](#jetstream-kv-store), or implement `IdempotencyStore` over a shared database and pass it as `idempotency.store`:
 
 ```ts
 import {

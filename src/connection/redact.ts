@@ -35,10 +35,19 @@ export function serverSecrets(servers: string | string[] | undefined): string[] 
  */
 export function redactText(text: string, secrets: Array<string | undefined> = []): string {
   let out = text.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/?#]*@/gi, '$1***@');
-  for (const secret of secrets) {
-    if (secret) out = out.split(secret).join('***');
-  }
+  // Longest first: masking a secret contained in a longer one would leave the rest visible.
+  const known = secrets.filter((s): s is string => !!s).sort((a, b) => b.length - a.length);
+  for (const secret of known) out = out.split(secret).join('***');
   return out;
+}
+
+/** The secrets of a connection's options: its `pass`, its `token`, and those of its server URLs. */
+export function connectionSecrets(connection: {
+  pass?: string;
+  token?: string;
+  servers?: string | string[];
+}): Array<string | undefined> {
+  return [connection.pass, connection.token, ...serverSecrets(connection.servers)];
 }
 
 const MAX_CAUSE_DEPTH = 5;

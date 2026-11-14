@@ -86,8 +86,32 @@ function setup(
     options: handlerOptions,
     invoke,
   } as unknown as HandlerDefinition & { kind: 'subscribe' };
-  return { adapter: new CoreSubscriptionAdapter(def, entry), fake, logger };
+  return { adapter: new CoreSubscriptionAdapter(def, entry), fake, logger, entry };
 }
+
+describe('CoreSubscriptionAdapter slow consumer', () => {
+  const subscribeOptions = async (handlerOptions: Record<string, unknown>) => {
+    const { adapter, entry } = setup(async () => undefined, [], {}, handlerOptions);
+    await adapter.start();
+    await adapter.stop();
+    return vi.mocked(entry.nc.subscribe).mock.calls[0]?.[1];
+  };
+
+  it('reports a slow consumer past 10_000 pending messages by default', async () => {
+    expect(await subscribeOptions({})).toEqual({ slow: 10_000 });
+  });
+
+  it('passes slowConsumer and the queue group to the subscription', async () => {
+    expect(await subscribeOptions({ slowConsumer: 50, queue: 'q' })).toEqual({
+      queue: 'q',
+      slow: 50,
+    });
+  });
+
+  it('reports nothing with slowConsumer: false', async () => {
+    expect(await subscribeOptions({ slowConsumer: false })).toEqual({});
+  });
+});
 
 describe('CoreSubscriptionAdapter', () => {
   it('delivers messages with attempt 1', async () => {

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { JetStreamClient } from '@nats-io/jetstream';
 import type { NatsConnection } from '@nats-io/transport-node';
 import { NatsConfigError } from '../errors/errors.js';
@@ -53,6 +54,11 @@ interface Entry {
 }
 
 const DEFAULT_MAX_KEYS = 100_000;
+/**
+ * The longest key held as it is; a longer one is held by its sha256. Keys come from message
+ * headers the publisher controls, so without a bound `maxKeys` would not bound memory.
+ */
+const MAX_HELD_KEY = 256;
 const SWEEP_INTERVAL_MS = 60_000;
 
 /**
@@ -82,7 +88,8 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
     this.sweeper.unref();
   }
 
-  claim(key: string, ttlMs: number): Promise<ClaimResult> {
+  claim(rawKey: string, ttlMs: number): Promise<ClaimResult> {
+    const key = held(rawKey);
     const now = this.now();
     const existing = this.entries.get(key);
     if (existing && existing.expiresAt > now) {
@@ -94,12 +101,12 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
   }
 
   complete(key: string, ttlMs: number): Promise<void> {
-    this.put(key, { state: 'done', expiresAt: this.now() + ttlMs });
+    this.put(held(key), { state: 'done', expiresAt: this.now() + ttlMs });
     return Promise.resolve();
   }
 
   release(key: string): Promise<void> {
-    this.entries.delete(key);
+    this.entries.delete(held(key));
     return Promise.resolve();
   }
 
@@ -136,4 +143,13 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
       if (entry.expiresAt <= now) this.entries.delete(key);
     }
   }
+}
+
+/**
+ * The map key of a store key: `k:` and the key itself, or past 256 characters `h:` and the
+ * base64url of its sha256. The prefixes keep the two forms from ever colliding.
+ */
+function held(key: string): string {
+  if (key.length <= MAX_HELD_KEY) return `k:${key}`;
+  return `h:${createHash('sha256').update(key, 'utf8').digest('base64url')}`;
 }
