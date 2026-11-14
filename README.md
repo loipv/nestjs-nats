@@ -127,7 +127,6 @@ Until 1.0, any API may change in a minor release, as the warning above says. The
 
 | Feature | Alternative |
 |---|---|
-| [`jetstream.removedFields: 'reset'`](./docs/streams.md#removed-fields) | The default `'ignore'`, and changing removed fields by hand |
 | [`publishMany()` and `batcher()`](./docs/batching.md#batch-publishing) | `publish()` in a loop, or `Promise.all` over a bounded set |
 | [`@ConsumePush`](./docs/consumers.md#push-consumepush) | `@Consume` (pull), which NATS recommends |
 | [`batch` on `@Subscribe`](./docs/batching.md#batch-processing) | `batch` on `@Consume` (stable) |
@@ -147,7 +146,7 @@ These are tracked for upcoming releases:
 - **Ordered consumers can drop a message at shutdown.** An ordered consumer acknowledges nothing, so a message it has not finished when the application stops is not redelivered, unless the next start replays it through `deliverPolicy`. See [Consumers](./docs/consumers.md#ordered-consumeordered).
 - **Push without `deliverGroup` binds one instance.** A `@ConsumePush` without a `deliverGroup` can be bound by only one instance at a time. Give every instance the same group to share the messages. See [Consumers](./docs/consumers.md#push-consumepush).
 - **Publish order.** If an outbound plugin awaits something, consecutive `publish()` calls are not guaranteed to leave in call order.
-- **Removed fields and fields declared as `0`.** By default, a field you remove from a stream or consumer declaration keeps its value on the server; `jetstream.removedFields: 'reset'` resets it, in an application that is the only one declaring its streams and consumers. Declaring a field as `0` that the server stores differently (`duplicate_window: 0`, `max_deliver: 0`) is detected as drift on every boot: omit it instead. See [Streams](./docs/streams.md#removed-fields).
+- **Removed fields and fields declared as `0`.** A field you remove from a stream or consumer declaration keeps its value on the server: change it by hand. Declaring a field as `0` that the server stores differently (`duplicate_window: 0`, `max_deliver: 0`) is detected as drift on every boot: omit it instead. See [Streams](./docs/streams.md#removed-fields).
 - **Store errors fail a whole batch.** If the idempotency store cannot claim one key of a batch, every message of the batch is retried. See [Batching](./docs/batching.md).
 - **Request subjects inside a stream.** A core request to a subject a stream captures usually gets the stream's PubAck, not the handler's reply. Keep request subjects outside every stream. See [Streams](./docs/streams.md).
 - **Test harness.** `dispatch()` ignores options that do not apply to the handler kind, the default subject can be a wildcard, and concurrent `dispatch()` calls can see each other's dead letters. See [Testing](./docs/testing.md).

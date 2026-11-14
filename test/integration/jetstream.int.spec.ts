@@ -1,10 +1,9 @@
 import { AckPolicy, jetstreamManager, StorageType } from '@nats-io/jetstream';
 import { connect } from '@nats-io/transport-node';
-import { Controller, type LoggerService, type ModuleMetadata } from '@nestjs/common';
+import { type LoggerService } from '@nestjs/common';
 import type { TestingModule } from '@nestjs/testing';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { NatsConnectionManager } from '../../src/connection/connection-manager.js';
-import { Consume } from '../../src/decorators/handler.decorators.js';
 import { NatsConfigError } from '../../src/errors/errors.js';
 import type { JetStreamClient } from '../../src/jetstream/jetstream-client.js';
 import type { NatsStreamManager } from '../../src/jetstream/stream-manager.js';
@@ -494,8 +493,6 @@ describe('JetStream', () => {
   });
 });
 
-type ModuleImports = NonNullable<ModuleMetadata['imports']>;
-
 describe('JetStream removed fields', () => {
   let srv: NatsTestServer;
   let url: string;
@@ -509,18 +506,9 @@ describe('JetStream removed fields', () => {
     await srv?.stop();
   });
 
-  /** Boots an app that resets removed fields, unless `extra.jetstream` says otherwise. */
-  async function boot(extra: Record<string, unknown>, imports: ModuleImports = []) {
+  async function boot(extra: Record<string, unknown>) {
     return createTestApp({
-      imports: [
-        NatsModule.forRoot({
-          connection: { servers: url },
-          logger: false,
-          jetstream: { removedFields: 'reset' },
-          ...extra,
-        }),
-        ...imports,
-      ],
+      imports: [NatsModule.forRoot({ connection: { servers: url }, logger: false, ...extra })],
     });
   }
 
@@ -529,122 +517,38 @@ describe('JetStream removed fields', () => {
     return (await jsm.streams.info(name)).config;
   }
 
-  it('resets a stream field removed from the declaration', async () => {
-    const first = await boot({
-      streams: [{ name: 'RM', subjects: ['rm.>'], max_age: 60_000_000_000 }],
-    });
-    await first.close();
-    const app = await boot({ streams: [{ name: 'RM', subjects: ['rm.>'] }] });
+  it('keeps a field removed from the declaration', async () => {
+    await (
+      await boot({ streams: [{ name: 'RI', subjects: ['ri.>'], max_age: 60_000_000_000 }] })
+    ).close();
+    const app = await boot({ streams: [{ name: 'RI', subjects: ['ri.>'] }] });
     try {
-      const config = await streamConfig(app, 'RM');
-      expect(config.max_age).toBe(0);
-      expect(config.metadata?.['nestjs-nats.declared']).toBe('subjects');
+      const config = await streamConfig(app, 'RI');
+      expect(config.max_age).toBe(60_000_000_000);
+      expect(config.metadata?.['nestjs-nats.declared']).toBeUndefined();
     } finally {
       await app.close();
     }
   });
 
-  it('resets a consumer field removed from the declaration', async () => {
-    const streams = [{ name: 'RC', subjects: ['rc.>'] }];
-    const first = await boot({
-      streams,
-      consumers: [{ stream: 'RC', config: { durable_name: 'c', max_ack_pending: 5 } }],
-    });
-    await first.close();
-    const app = await boot({
-      streams,
-      consumers: [{ stream: 'RC', config: { durable_name: 'c' } }],
-    });
+  it("syncs a stream carrying the metadata 0.2's removedFields 'reset' left, without drift", async () => {
+    const nc = await connect({ servers: url });
     try {
-      const jsm = await app.get<NatsStreamManager>(getStreamManagerToken()).jsm();
-      // The server default.
-      expect((await jsm.consumers.info('RC', 'c')).config.max_ack_pending).toBe(1000);
+      const jsm = await jetstreamManager(nc);
+      await jsm.streams.add({
+        name: 'RL',
+        subjects: ['rl.>'],
+        max_age: 60_000_000_000,
+        metadata: { 'nestjs-nats.declared': 'max_age,subjects' },
+      });
     } finally {
-      await app.close();
+      await nc.close();
     }
-  });
-
-  it('fails verify for a removed field', async () => {
-    const first = await boot({
-      streams: [{ name: 'RV', subjects: ['rv.>'], max_age: 60_000_000_000 }],
-    });
-    await first.close();
-    await expect(
-      boot({
-        jetstream: { sync: 'verify', removedFields: 'reset' },
-        streams: [{ name: 'RV', subjects: ['rv.>'] }],
-      }),
-    ).rejects.toThrow(/max_age \(removed from the declaration/);
-  });
-
-  it('keeps and warns about removed fields the server cannot reset', async () => {
-    const stream = { name: 'RK', subjects: ['rk.>'] };
-    const consumer = { durable_name: 'k', deliver_subject: 'rk-push.k' };
-    const first = await boot({
-      streams: [{ ...stream, deny_delete: true }],
-      consumers: [{ stream: 'RK', config: { ...consumer, idle_heartbeat: 5_000_000_000 } }],
-    });
-    await first.close();
-    const logger: LoggerService = { log: vi.fn(), error: vi.fn(), warn: vi.fn() };
-    const app = await boot({
-      logger,
-      streams: [stream],
-      consumers: [{ stream: 'RK', config: consumer }],
-    });
+    const declared = { streams: [{ name: 'RL', subjects: ['rl.>'] }] };
+    await (await boot({ ...declared, jetstream: { sync: 'verify' } })).close();
+    const app = await boot(declared);
     try {
-      const jsm = await app.get<NatsStreamManager>(getStreamManagerToken()).jsm();
-      expect((await jsm.streams.info('RK')).config.deny_delete).toBe(true);
-      expect((await jsm.consumers.info('RK', 'k')).config.idle_heartbeat).toBe(5_000_000_000);
-      expect(logger.warn).toHaveBeenCalledWith(
-        'JetStream stream "RK" keeps deny_delete true: it cannot be changed (removed from the declaration)',
-      );
-      expect(logger.warn).toHaveBeenCalledWith(
-        'JetStream consumer "RK/k" keeps idle_heartbeat 5000000000: it cannot be changed (removed from the declaration)',
-      );
-    } finally {
-      await app.close();
-    }
-  });
-
-  it('sends no update when booted again with the same declaration', async () => {
-    const spy = await connect({ servers: url });
-    const seen: string[] = [];
-    const sub = spy.subscribe('$JS.API.>', {
-      callback: (_, msg) => {
-        if (
-          /^\$JS\.API\.(STREAM\.(CREATE|UPDATE)|CONSUMER\.(DURABLE\.)?CREATE)\./.test(msg.subject)
-        ) {
-          seen.push(msg.subject);
-        }
-      },
-    });
-    await spy.flush();
-    const declaration = {
-      streams: [{ name: 'RN', subjects: ['rn.>'], max_age: 60_000_000_000 }],
-      consumers: [{ stream: 'RN', config: { durable_name: 'n', max_ack_pending: 5 } }],
-    };
-    try {
-      await (await boot(declaration)).close();
-      await spy.flush();
-      expect(seen).toEqual(['$JS.API.STREAM.CREATE.RN', expect.stringMatching(/CREATE\.RN\.n/)]);
-      seen.length = 0;
-      await (await boot(declaration)).close();
-      await spy.flush();
-      expect(seen).toEqual([]);
-    } finally {
-      sub.unsubscribe();
-      await spy.close();
-    }
-  });
-
-  it('merges the forRoot and forFeature declarations of a stream', async () => {
-    const root = { streams: [{ name: 'RF', subjects: ['rf.>'] }] };
-    const feature = NatsModule.forFeature({ streams: [{ name: 'RF', max_age: 60_000_000_000 }] });
-    await (await boot(root, [feature])).close();
-    const app = await boot(root, [feature]);
-    try {
-      const config = await streamConfig(app, 'RF');
-      expect(config.subjects).toEqual(['rf.>']);
+      const config = await streamConfig(app, 'RL');
       expect(config.max_age).toBe(60_000_000_000);
       expect(config.metadata?.['nestjs-nats.declared']).toBe('max_age,subjects');
     } finally {
@@ -652,52 +556,19 @@ describe('JetStream removed fields', () => {
     }
   });
 
-  it('rejects a durable declared in the module options and by a controller before writing anything', async () => {
-    @Controller()
-    class DuplicateConsumer {
-      @Consume({ stream: 'RD', durable: 'd', config: { max_deliver: 3 } })
-      handle() {}
-    }
+  it("fails boot with removedFields 'reset', before creating anything", async () => {
     await expect(
-      createTestApp({
-        imports: [
-          NatsModule.forRoot({
-            connection: { servers: url },
-            logger: false,
-            jetstream: { removedFields: 'reset' },
-            streams: [{ name: 'RD', subjects: ['rd.>'] }],
-            consumers: [{ stream: 'RD', config: { durable_name: 'd' } }],
-          }),
-        ],
-        controllers: [DuplicateConsumer],
+      boot({
+        jetstream: { removedFields: 'reset' } as never,
+        streams: [{ name: 'RX', subjects: ['rx.>'] }],
       }),
-    ).rejects.toThrow(
-      'JetStream consumer "RD/d" is declared both in the module options and by DuplicateConsumer.handle; declare it in one place',
-    );
+    ).rejects.toThrow(/sets jetstream\.removedFields to "reset", which was removed in 0\.3\.0/);
     const nc = await connect({ servers: url });
     try {
       const jsm = await jetstreamManager(nc);
-      await expect(jsm.streams.info('RD')).rejects.toThrow(/stream not found/);
+      await expect(jsm.streams.info('RX')).rejects.toThrow(/stream not found/);
     } finally {
       await nc.close();
-    }
-  });
-
-  it("neither writes a snapshot nor resets with removedFields 'ignore' (the default)", async () => {
-    const plain = { jetstream: undefined };
-    await (
-      await boot({
-        ...plain,
-        streams: [{ name: 'RI', subjects: ['ri.>'], max_age: 60_000_000_000 }],
-      })
-    ).close();
-    const app = await boot({ ...plain, streams: [{ name: 'RI', subjects: ['ri.>'] }] });
-    try {
-      const config = await streamConfig(app, 'RI');
-      expect(config.max_age).toBe(60_000_000_000);
-      expect(config.metadata?.['nestjs-nats.declared']).toBeUndefined();
-    } finally {
-      await app.close();
     }
   });
 });

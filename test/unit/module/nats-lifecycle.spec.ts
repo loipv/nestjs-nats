@@ -451,18 +451,16 @@ describe('NatsLifecycle declarations', () => {
     );
   }
 
-  it('rejects an invalid jetstream.removedFields before syncing anything', async () => {
+  it("rejects removedFields 'reset' before syncing anything", async () => {
     const ensureStream = vi.spyOn(NatsStreamManager.prototype, 'ensureStream');
     const { manager } = fakeManager({
       default: {
-        jetstream: { removedFields: 'drop' as never },
+        jetstream: { removedFields: 'reset' } as never,
         streams: [{ name: 'S', subjects: ['s.>'] }],
       },
     });
     await expect(lifecycleWith(manager).onModuleInit()).rejects.toThrow(
-      new NatsConfigError(
-        `NATS connection "default" jetstream.removedFields must be 'reset' or 'ignore', got "drop"`,
-      ),
+      /sets jetstream\.removedFields to "reset", which was removed in 0\.3\.0/,
     );
     expect(ensureStream).not.toHaveBeenCalled();
     expect(manager.closeAll).toHaveBeenCalled();
@@ -493,118 +491,7 @@ describe('NatsLifecycle declarations', () => {
     };
   }
 
-  const reset = { jetstream: { removedFields: 'reset' as const } };
-
-  it("merges declarations of one stream with removedFields 'reset'", async () => {
-    const { ensureStream } = syncSpies();
-    const { manager } = fakeManager({
-      default: { ...reset, streams: [{ name: 'S', subjects: ['s.>'], metadata: { a: '1' } }] },
-    });
-    await lifecycleWith(manager, [
-      { streams: [{ name: 'S', subjects: ['s.>'], max_age: 5, metadata: { b: '2' } }] },
-      { streams: [{ name: 'T' }, { name: 'S', max_msgs: null as never }] },
-    ]).onModuleInit();
-    expect(ensureStream.mock.calls).toEqual([
-      [{ name: 'S', subjects: ['s.>'], max_age: 5, metadata: { a: '1', b: '2' } }],
-      [{ name: 'T' }],
-    ]);
-  });
-
-  it('merges module consumers of one durable, and keeps streams of other connections apart', async () => {
-    const { ensureStream, ensureConsumer } = syncSpies();
-    const { manager } = fakeManager({
-      default: {
-        ...reset,
-        streams: [{ name: 'S' }],
-        consumers: [{ stream: 'S', config: { durable_name: 'D', max_ack_pending: 5 } }],
-      },
-      other: { ...reset, streams: [{ name: 'S', max_age: 1 }] },
-    });
-    await lifecycleWith(manager, [
-      { consumers: [{ stream: 'S', config: { durable_name: 'D', filter_subject: 's.a' } }] },
-      { consumers: [{ stream: 'S', config: { durable_name: 'E' } }] },
-    ]).onModuleInit();
-    expect(ensureStream.mock.calls).toEqual([[{ name: 'S' }], [{ name: 'S', max_age: 1 }]]);
-    expect(ensureConsumer.mock.calls).toEqual([
-      ['S', { durable_name: 'D', max_ack_pending: 5, filter_subject: 's.a' }],
-      ['S', { durable_name: 'E' }],
-    ]);
-  });
-
-  it.each([
-    [
-      'a field',
-      { streams: [{ name: 'S', subjects: ['a'] }] },
-      { streams: [{ name: 'S', subjects: ['b'] }] },
-      'JetStream stream "S" is declared more than once with different subjects',
-    ],
-    [
-      'a metadata key',
-      { streams: [{ name: 'S', metadata: { a: '1' } }] },
-      { streams: [{ name: 'S', metadata: { a: '2' } }] },
-      'JetStream stream "S" is declared more than once with different metadata key "a"',
-    ],
-    [
-      'a consumer field',
-      { consumers: [{ stream: 'S', config: { durable_name: 'D', max_deliver: 3 } }] },
-      { consumers: [{ stream: 'S', config: { durable_name: 'D', max_deliver: 4 } }] },
-      'JetStream consumer "S/D" is declared more than once with different max_deliver',
-    ],
-  ])('rejects declarations that disagree on %s', async (_, root, feature, message) => {
-    const { ensureStream } = syncSpies();
-    const { manager } = fakeManager({ default: { ...reset, ...root } });
-    await expect(lifecycleWith(manager, [feature]).onModuleInit()).rejects.toThrow(
-      new NatsConfigError(message),
-    );
-    expect(ensureStream).not.toHaveBeenCalled();
-  });
-
-  it('merges inherited and __proto__ metadata keys without conflict', async () => {
-    const { ensureStream } = syncSpies();
-    const proto = JSON.parse('{"__proto__":"p"}') as Record<string, string>;
-    const { manager } = fakeManager({
-      default: { ...reset, streams: [{ name: 'S', metadata: { constructor: 'x' } }] },
-    });
-    await lifecycleWith(manager, [
-      { streams: [{ name: 'S', metadata: { team: 'a' } }] },
-      { streams: [{ name: 'S', metadata: proto }] },
-    ]).onModuleInit();
-    const stream = ensureStream.mock.calls[0]?.[0] as { metadata: Record<string, string> };
-    expect(Object.keys(stream.metadata)).toEqual(['constructor', 'team', '__proto__']);
-    expect(stream.metadata.constructor).toBe('x');
-    expect(Object.getOwnPropertyDescriptor(stream.metadata, '__proto__')?.value).toBe('p');
-  });
-
-  it("rejects a reserved metadata key in a module declaration, before any sync, with removedFields 'reset'", async () => {
-    const { ensureStream } = syncSpies();
-    const { manager } = fakeManager({
-      default: { ...reset, streams: [{ name: 'S' }, { name: 'T', metadata: { '_nats.x': '1' } }] },
-    });
-    await expect(lifecycleWith(manager, []).onModuleInit()).rejects.toThrow(
-      'JetStream stream "T" declares metadata key "_nats.x"',
-    );
-    expect(ensureStream).not.toHaveBeenCalled();
-  });
-
-  it("rejects a reserved metadata key in a module consumer, before any sync, with removedFields 'reset'", async () => {
-    const { ensureStream, ensureConsumer } = syncSpies();
-    const { manager } = fakeManager({
-      default: {
-        ...reset,
-        streams: [{ name: 'S' }],
-        consumers: [
-          { stream: 'S', config: { durable_name: 'D', metadata: { 'nestjs-nats.declared': 'x' } } },
-        ],
-      },
-    });
-    await expect(lifecycleWith(manager, []).onModuleInit()).rejects.toThrow(
-      'JetStream consumer "S/D" declares metadata key "nestjs-nats.declared"',
-    );
-    expect(ensureStream).not.toHaveBeenCalled();
-    expect(ensureConsumer).not.toHaveBeenCalled();
-  });
-
-  it("syncs every declaration as given with removedFields 'ignore' (the default)", async () => {
+  it('syncs every declaration as given, without merging those of one stream', async () => {
     const { ensureStream } = syncSpies();
     const { manager } = fakeManager({ default: { streams: [{ name: 'S', subjects: ['a'] }] } });
     await lifecycleWith(manager, [{ streams: [{ name: 'S', subjects: ['b'] }] }]).onModuleInit();
@@ -665,41 +552,7 @@ describe('NatsLifecycle declarations', () => {
       return { lifecycle, writes: echo, start, explorer };
     }
 
-    it("rejects a durable also declared in the module options, before any sync, with removedFields 'reset'", async () => {
-      const { lifecycle, writes } = setup(reset, consumeDef('D', { max_deliver: 3 }));
-      await expect(lifecycle.onModuleInit()).rejects.toThrow(
-        new NatsConfigError(
-          'JetStream consumer "S/D" is declared both in the module options and by Svc.handle; declare it in one place',
-        ),
-      );
-      expect(writes).not.toHaveBeenCalled();
-    });
-
-    it("rejects a reserved metadata key in a handler's config, before any sync, with removedFields 'reset'", async () => {
-      const { lifecycle, writes } = setup(reset, consumeDef('E', { metadata: { '_nats.x': '1' } }));
-      await expect(lifecycle.onModuleInit()).rejects.toThrow(
-        new NatsConfigError(
-          'JetStream consumer "S/E" declares metadata key "_nats.x", which the library or the server sets: declare no "_nats." key nor "nestjs-nats.declared"',
-        ),
-      );
-      expect(writes).not.toHaveBeenCalled();
-    });
-
-    it('accepts a durable also declared in the module options when the handler declares no config', async () => {
-      const { lifecycle, start } = setup(reset, consumeDef('D'));
-      await lifecycle.onModuleInit();
-      await lifecycle.onApplicationBootstrap();
-      expect(start).toHaveBeenCalledOnce();
-    });
-
-    it('treats a handler config of null as no config', async () => {
-      const { lifecycle, start } = setup(reset, consumeDef('D', null));
-      await lifecycle.onModuleInit();
-      await lifecycle.onApplicationBootstrap();
-      expect(start).toHaveBeenCalledOnce();
-    });
-
-    it("checks nothing up front with removedFields 'ignore'", async () => {
+    it('discovers handlers at bootstrap only, checking nothing up front', async () => {
       const { lifecycle, start, explorer } = setup(
         {},
         consumeDef('D', { max_deliver: 3, metadata: { '_nats.x': '1' } }),

@@ -1,5 +1,4 @@
 import { AckPolicy, type ConsumerConfig } from '@nats-io/jetstream';
-import { NatsConfigError } from '../errors/errors.js';
 
 export const STREAM_IMMUTABLE_FIELDS = ['storage', 'retention'] as const;
 
@@ -9,36 +8,6 @@ export const CONSUMER_IMMUTABLE_FIELDS = [
   'opt_start_seq',
   'opt_start_time',
   'replay_policy',
-] as const;
-
-/**
- * Stream fields kept, with a warning, when removed from a declaration: the immutable ones,
- * the ones the server refuses to turn off (`deny_delete`, `deny_purge`, `allow_msg_ttl`,
- * `sealed`, `allow_msg_counter`, `allow_msg_schedules`), and `mirror`, whose removal would
- * promote the mirror for good.
- */
-export const STREAM_KEPT_FIELDS = [
-  ...STREAM_IMMUTABLE_FIELDS,
-  'deny_delete',
-  'deny_purge',
-  'allow_msg_ttl',
-  'sealed',
-  'mirror',
-  'allow_msg_counter',
-  'allow_msg_schedules',
-] as const;
-
-/**
- * Consumer fields kept, with a warning, when removed from a declaration: the immutable ones
- * and the ones the server refuses to update (`deliver_subject`, `flow_control`,
- * `idle_heartbeat`, `max_waiting`).
- */
-export const CONSUMER_KEPT_FIELDS = [
-  ...CONSUMER_IMMUTABLE_FIELDS,
-  'deliver_subject',
-  'flow_control',
-  'idle_heartbeat',
-  'max_waiting',
 ] as const;
 
 export interface ConfigDiff {
@@ -87,27 +56,12 @@ function matches(current: unknown, declared: unknown): boolean {
 /** Metadata keys the server adds to every stream/consumer (`_nats.level`, `_nats.ver`, ...). */
 const SERVER_METADATA_PREFIX = '_nats.';
 
-/** Metadata key that remembers the declared top-level fields, so removed ones can be reset. */
-export const SNAPSHOT_KEY = 'nestjs-nats.declared';
-
-/**
- * Drops the server's own `_nats.` keys from metadata, and with `exact` also `SNAPSHOT_KEY`:
- * exactly compared metadata must not count the library's key as an extra one.
- */
-function withoutServerMetadata(field: string, value: unknown, exact: boolean): unknown {
+/** Drops the server's own `_nats.` keys from metadata: a declaration never has them. */
+function withoutServerMetadata(field: string, value: unknown): unknown {
   if (field !== 'metadata' || !isPlainObject(value)) return value;
   return Object.fromEntries(
-    Object.entries(value).filter(
-      ([k]) => !k.startsWith(SERVER_METADATA_PREFIX) && !(exact && k === SNAPSHOT_KEY),
-    ),
+    Object.entries(value).filter(([k]) => !k.startsWith(SERVER_METADATA_PREFIX)),
   );
-}
-
-/** Whether declared `metadata` equals the server's: same keys, same values, nothing extra. */
-function metadataEquals(current: unknown, declared: Record<string, unknown>): boolean {
-  const cur = isPlainObject(current) ? current : {};
-  const keys = Object.keys(declared);
-  return Object.keys(cur).length === keys.length && keys.every((k) => cur[k] === declared[k]);
 }
 
 /**
@@ -119,105 +73,20 @@ export function withoutNulls<T extends object>(declared: T): T {
 }
 
 /**
- * The sorted top-level field names of a declaration, without `undefined` or `null` values,
- * `metadata` and the `exclude`d identity fields (`name`, `durable_name`).
- */
-export function declaredFields(cfg: object, exclude: readonly string[]): string[] {
-  return Object.entries(cfg)
-    .filter(([k, v]) => v !== undefined && v !== null && k !== 'metadata' && !exclude.includes(k))
-    .map(([k]) => k)
-    .sort();
-}
-
-/** The `SNAPSHOT_KEY` value for a list of declared fields. */
-export function snapshotOf(fields: readonly string[]): string {
-  return fields.join(',');
-}
-
-/** The fields a previous sync recorded, or `undefined` when it recorded none. */
-export function parseSnapshot(metadata: Record<string, string> | undefined): string[] | undefined {
-  const raw = metadata?.[SNAPSHOT_KEY];
-  if (raw === undefined) return undefined;
-  return raw === '' ? [] : raw.split(',');
-}
-
-/**
- * Fields declared by the previous sync but not by this one, and still set on the server.
- * `reset` ones can go back to a default; `kept` ones cannot be changed.
- */
-export function removedFields(
-  current: object,
-  previous: readonly string[] | undefined,
-  declared: readonly string[],
-  kept: readonly string[],
-): { reset: string[]; kept: string[] } {
-  const cur = current as Record<string, unknown>;
-  const removed = (previous ?? []).filter(
-    (f) => f !== 'metadata' && !declared.includes(f) && cur[f] !== undefined,
-  );
-  return {
-    reset: removed.filter((f) => !kept.includes(f)),
-    kept: removed.filter((f) => kept.includes(f)),
-  };
-}
-
-/**
- * Throws for a declared metadata key the library or the server owns (`_nats.*`,
- * `SNAPSHOT_KEY`): the server would never report the declared value back, so every boot
- * would update. `label` is `stream "<name>"` or `consumer "<stream>/<durable>"`.
- */
-export function rejectReservedMetadata(
-  label: string,
-  metadata: Record<string, string> | undefined,
-): void {
-  const key = Object.keys(metadata ?? {}).find(
-    (k) => k.startsWith(SERVER_METADATA_PREFIX) || k === SNAPSHOT_KEY,
-  );
-  if (key === undefined) return;
-  throw new NatsConfigError(
-    `JetStream ${label} declares metadata key "${key}", which the library or the server sets: declare no "${SERVER_METADATA_PREFIX}" key nor "${SNAPSHOT_KEY}"`,
-  );
-}
-
-/**
- * The `metadata` to send: the declared one, or else what the server has (without its own
- * `_nats.` keys), plus the snapshot.
- */
-export function syncMetadata(
-  declared: Record<string, string> | undefined,
-  current: Record<string, string> | undefined,
-  snapshot: string,
-): Record<string, string> {
-  const base =
-    declared ??
-    Object.fromEntries(
-      Object.entries(current ?? {}).filter(([k]) => !k.startsWith(SERVER_METADATA_PREFIX)),
-    );
-  return { ...base, [SNAPSHOT_KEY]: snapshot };
-}
-
-/**
  * Compares only the keys present in `declared` (see `matches` for the rules), ignoring
- * the server's own `_nats.` metadata keys. With `exactMetadata` (removed fields are reset),
- * declared `metadata` is compared exactly, also ignoring `SNAPSHOT_KEY`: a key the server has
- * and the declaration lacks is a diff. Otherwise it only needs the declared keys.
+ * the server's own `_nats.` metadata keys: declared `metadata` only needs its own keys.
  */
 export function diffConfig(
   current: object,
   declared: object,
   immutable: readonly string[],
-  exactMetadata = false,
 ): ConfigDiff[] {
   const cur = current as Record<string, unknown>;
   const diffs: ConfigDiff[] = [];
   for (const [field, value] of Object.entries(declared)) {
     if (value === undefined) continue;
-    const currentValue = withoutServerMetadata(field, cur[field], exactMetadata);
-    const equal =
-      exactMetadata && field === 'metadata' && isPlainObject(value)
-        ? metadataEquals(currentValue, value)
-        : matches(currentValue, value);
-    if (!equal) {
+    const currentValue = withoutServerMetadata(field, cur[field]);
+    if (!matches(currentValue, value)) {
       diffs.push({
         field,
         current: currentValue,

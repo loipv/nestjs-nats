@@ -239,6 +239,11 @@ it('exports NatsHeadersInit, not a HeadersInit shadowing the global one', () => 
   type _Old = import('../../../src/index.js').HeadersInit;
 });
 
+it('no longer exports RemovedFieldsMode (removed in 0.3.0)', () => {
+  // @ts-expect-error removed with jetstream.removedFields 'reset'
+  type _RemovedFieldsMode = import('../../../src/index.js').RemovedFieldsMode;
+});
+
 it('exports the CloudEvents types', () => {
   expectTypeOf<CloudEventMeta>().toEqualTypeOf<{
     id: string;
