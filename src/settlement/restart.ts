@@ -1,4 +1,5 @@
 import { NatsConfigError } from '../errors/errors.js';
+import { withoutUndefined } from '../util/objects.js';
 import { MAX_TIMER_DELAY } from '../util/timer.js';
 
 export interface RestartOptions {
@@ -30,13 +31,6 @@ export const DEFAULT_RESTART: Readonly<RestartPolicy> = Object.freeze({
   maxAttempts: Number.POSITIVE_INFINITY,
 });
 
-/** `opts` without the keys set to `undefined`, so they keep their default. */
-function defined(opts: RestartOptions): RestartOptions {
-  return Object.fromEntries(
-    Object.entries(opts).filter(([, value]) => value !== undefined),
-  ) as RestartOptions;
-}
-
 /**
  * Merges the restart options over the defaults and validates them. `false` disables
  * restarts. Keys set to `undefined` are ignored.
@@ -46,7 +40,7 @@ export function resolveRestartPolicy(
   connection: string,
 ): RestartPolicy | false {
   if (opts === false) return false;
-  const policy = { ...DEFAULT_RESTART, ...defined(opts ?? {}) };
+  const policy = { ...DEFAULT_RESTART, ...withoutUndefined(opts ?? {}) };
   const invalid = (field: keyof RestartPolicy, rule: string): never => {
     throw new NatsConfigError(
       `NATS connection "${connection}" restart.${field} must be ${rule}, got ${policy[field]}`,

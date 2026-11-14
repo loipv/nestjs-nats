@@ -33,6 +33,7 @@ import {
 import { NatsConfigError, NatsModuleError } from '../errors/errors.js';
 import { DEFAULT_CONNECTION } from '../module/tokens.js';
 import { errorMessage } from '../util/errors.js';
+import { withoutUndefined } from '../util/objects.js';
 import { NatsArgumentsHost } from './nats-arguments-host.js';
 import { NatsParamsFactory } from './nats-params-factory.js';
 
@@ -264,7 +265,15 @@ export class HandlerExplorer {
     if (set[0] === 'consumeOrdered' && concurrency !== undefined) {
       throw new NatsConfigError(`${label} with consumeOrdered does not support concurrency`);
     }
-    const common = defined({ connection, concurrency, codec, retry, dlq, idempotency, timeout });
+    const common = withoutUndefined({
+      connection,
+      concurrency,
+      codec,
+      retry,
+      dlq,
+      idempotency,
+      timeout,
+    });
     let spec: HandlerSpec;
     if (set[0] === 'subscribe') {
       const { subscribe, queue } = options as Extract<
@@ -274,7 +283,7 @@ export class HandlerExplorer {
       spec = {
         kind: 'subscribe',
         subject: subscribe,
-        options: { ...common, ...defined({ queue }) },
+        options: { ...common, ...withoutUndefined({ queue }) },
       };
     } else if (set[0] === 'consume') {
       const { consume } = options as Extract<CloudEventRouterOptions, { consume: unknown }>;
@@ -285,7 +294,7 @@ export class HandlerExplorer {
           ...common,
           stream: consume.stream,
           durable: consume.durable,
-          ...defined({ config: consume.config }),
+          ...withoutUndefined({ config: consume.config }),
         },
       };
     } else if (set[0] === 'consumePush') {
@@ -297,7 +306,10 @@ export class HandlerExplorer {
           ...common,
           stream: consumePush.stream,
           durable: consumePush.durable,
-          ...defined({ config: consumePush.config, deliverGroup: consumePush.deliverGroup }),
+          ...withoutUndefined({
+            config: consumePush.config,
+            deliverGroup: consumePush.deliverGroup,
+          }),
         },
       };
     } else {
@@ -319,7 +331,7 @@ export class HandlerExplorer {
         options: {
           ...common,
           stream: consumeOrdered.stream,
-          ...defined({
+          ...withoutUndefined({
             filterSubjects: consumeOrdered.filterSubjects,
             deliverPolicy: consumeOrdered.deliverPolicy,
             headersOnly: consumeOrdered.headersOnly,
@@ -687,9 +699,4 @@ function describeResolved(value: unknown): string {
 
 function describeValue(value: unknown): string {
   return typeof value === 'function' ? 'function' : (JSON.stringify(value) ?? String(value));
-}
-
-/** `obj` without the keys whose value is `undefined`. */
-function defined<T extends object>(obj: T): Partial<T> {
-  return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined)) as Partial<T>;
 }
