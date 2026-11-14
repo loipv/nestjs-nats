@@ -10,7 +10,6 @@ import {
   buildDlqHeaders,
   DLQ_HEADERS,
   type DlqPolicy,
-  isNoResponders,
   publishToDlq,
   resolveDlqPolicy,
 } from '../../../src/settlement/dlq.js';
@@ -206,29 +205,6 @@ describe('buildDlqHeaders', () => {
     const h = buildDlqHeaders({ ...m, headers: hs }, new Error('x'), 1, new Date());
     expect(h.has('Nats-Msg-Id')).toBe(false);
     expect(h.get(DLQ_HEADERS.msgId)).toBe('c1');
-  });
-});
-
-describe('isNoResponders', () => {
-  const named = () => Object.assign(new Error('no responders'), { name: 'NoRespondersError' });
-
-  it('recognizes a NoRespondersError by class', async () => {
-    const { NoRespondersError } = await import('@nats-io/transport-node');
-    expect(isNoResponders(new NoRespondersError('x'))).toBe(true);
-  });
-
-  it('recognizes a NoRespondersError by name (another copy of the library)', () =>
-    expect(isNoResponders(named())).toBe(true));
-
-  it('looks through the cause chain', () =>
-    expect(
-      isNoResponders(new Error('outer', { cause: new Error('mid', { cause: named() }) })),
-    ).toBe(true));
-
-  it('is false for other errors and non-errors', () => {
-    expect(isNoResponders(new Error('timeout'))).toBe(false);
-    expect(isNoResponders('NoRespondersError')).toBe(false);
-    expect(isNoResponders(undefined)).toBe(false);
   });
 });
 

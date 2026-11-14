@@ -1,4 +1,5 @@
 import type { NatsConnection } from '@nats-io/transport-node';
+import { NoRespondersError } from '@nats-io/transport-node';
 import { describe, expect, it, vi } from 'vitest';
 import { NatsClient } from '../../../src/client/nats-client.js';
 import { jsonCodec } from '../../../src/codec/codec.js';
@@ -86,5 +87,35 @@ describe('NatsClient.publish without outbound plugins', () => {
     const { client, nc } = setup(() => {});
     expect(() => client.publish('o', 1, { cloudEvent: { type: 't' } })).toThrow(/source/);
     expect(nc.publish).not.toHaveBeenCalled();
+  });
+});
+
+describe('NatsClient.request no responders', () => {
+  function clientRejecting(err: unknown) {
+    const entry = {
+      name: 'default',
+      options: { connection: {} },
+      nc: { request: vi.fn(() => Promise.reject(err)) },
+      logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      onClose: () => () => {},
+    } as unknown as ConnectionEntry;
+    return new NatsClient(entry);
+  }
+
+  it('recognises a NoRespondersError deeper in the cause chain', async () => {
+    const err = new Error('request failed', {
+      cause: new Error('503', { cause: new NoRespondersError('svc') }),
+    });
+    await expect(clientRejecting(err).request('svc')).rejects.toMatchObject({
+      code: 'no_responders',
+      subject: 'svc',
+    });
+  });
+
+  it('recognises one from another copy of the NATS library by its name', async () => {
+    const foreign = Object.assign(new Error('no responders'), { name: 'NoRespondersError' });
+    await expect(
+      clientRejecting(new Error('request failed', { cause: foreign })).request('svc'),
+    ).rejects.toMatchObject({ code: 'no_responders' });
   });
 });

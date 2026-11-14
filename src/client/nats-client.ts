@@ -1,9 +1,4 @@
-import {
-  type Msg,
-  NoRespondersError,
-  type PublishOptions,
-  TimeoutError,
-} from '@nats-io/transport-node';
+import { type Msg, type PublishOptions, TimeoutError } from '@nats-io/transport-node';
 import type { CloudEventInit } from '../cloudevents/types.js';
 import { type Codec, decodePayload } from '../codec/codec.js';
 import type { NatsHeadersInit } from '../codec/headers.js';
@@ -17,17 +12,12 @@ import {
   sendOutbound,
 } from '../pipeline/outbound.js';
 import type { OutgoingMessage } from '../pipeline/types.js';
+import { isNoResponders } from '../util/errors.js';
 
 /** The default timeout (ms) of a request, and how long the outbound plugins have to pass a publish on. */
 export const DEFAULT_REQUEST_TIMEOUT = 5000;
 const SERVICE_ERROR_CODE_HEADER = 'Nats-Service-Error-Code';
 const SERVICE_ERROR_HEADER = 'Nats-Service-Error';
-
-function isNoResponders(err: unknown): boolean {
-  if (err instanceof NoRespondersError) return true;
-  const cause = err instanceof Error ? err.cause : undefined;
-  return cause instanceof NoRespondersError;
-}
 
 export class NatsClient {
   private readonly inflight = new Set<Promise<void>>();

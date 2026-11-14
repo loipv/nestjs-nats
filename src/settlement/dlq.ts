@@ -1,5 +1,5 @@
 import type { JsMsg } from '@nats-io/jetstream';
-import { headers, type MsgHdrs, NoRespondersError } from '@nats-io/transport-node';
+import { headers, type MsgHdrs } from '@nats-io/transport-node';
 import { DEFAULT_REQUEST_TIMEOUT } from '../client/nats-client.js';
 import { jsonCodec } from '../codec/codec.js';
 import type { ConnectionEntry } from '../connection/connection-registry.js';
@@ -8,6 +8,7 @@ import { publishOutgoing } from '../jetstream/publish.js';
 import type { HandlerInfo, InboundMessage } from '../pipeline/delivery.js';
 import { encodeOutgoing, sendOutbound } from '../pipeline/outbound.js';
 import type { OutgoingMessage } from '../pipeline/types.js';
+import { isNoResponders } from '../util/errors.js';
 
 export interface DlqOptions {
   /** Static subject, or a function of the handler and the failed message. */
@@ -132,17 +133,6 @@ export function buildDlqHeaders(
   out.set(DLQ_HEADERS.error, text.replace(/[\r\n]+/g, ' ').slice(0, MAX_ERROR_LENGTH));
   out.set(DLQ_HEADERS.timestamp, now.toISOString());
   return out;
-}
-
-/**
- * Whether `err` (or one of its causes) says nobody answered the request. Also matches by
- * name, for errors thrown by another copy of the NATS library.
- */
-export function isNoResponders(err: unknown): boolean {
-  for (let e = err, depth = 0; e instanceof Error && depth < 5; e = e.cause, depth++) {
-    if (e instanceof NoRespondersError || e.name === 'NoRespondersError') return true;
-  }
-  return false;
 }
 
 /**
