@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { Injectable, Module, type Provider, Scope, type Type } from '@nestjs/common';
+import { Injectable, type Provider, type Type } from '@nestjs/common';
 import { DiscoveryModule } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import { describe, expect, it, vi } from 'vitest';
@@ -120,20 +120,6 @@ describe('HandlerExplorer startup values of method decorators', () => {
     });
   });
 
-  it('gets a provider declared in another module', async () => {
-    @Module({ providers: [{ provide: 'OTHER', useValue: 'other.subject' }] })
-    class OtherModule {}
-    @Injectable()
-    class H {
-      @Subscribe(({ get }) => get<string>('OTHER'))
-      on() {}
-    }
-    const moduleRef = await app([H], [OtherModule]);
-    const [def] = moduleRef.get(HandlerExplorer).explore();
-    await moduleRef.close();
-    expect(def).toMatchObject({ subject: 'other.subject' });
-  });
-
   it('accepts undefined from the options function of @Subscribe as no options', async () => {
     @Injectable()
     class H {
@@ -197,24 +183,6 @@ describe('HandlerExplorer startup values of method decorators', () => {
     expect(shared).toHaveBeenCalledOnce();
   });
 
-  it('gets a provider by an abstract class token', async () => {
-    abstract class Settings {
-      abstract readonly subject: string;
-    }
-    @Injectable()
-    class H {
-      @Subscribe(({ get }) => get(Settings).subject)
-      on() {}
-    }
-    const moduleRef = await app([
-      H,
-      { provide: Settings, useValue: { subject: 'abstract.subject' } },
-    ]);
-    const [def] = moduleRef.get(HandlerExplorer).explore();
-    await moduleRef.close();
-    expect(def).toMatchObject({ subject: 'abstract.subject' });
-  });
-
   it('calls a function shared by @Subscribe options and by two @NatsService classes once', async () => {
     const options = vi.fn(() => ({ queue: 'workers' }));
     const service = vi.fn(() => ({ name: 'svc', version: '1.0.0' }));
@@ -244,32 +212,6 @@ describe('HandlerExplorer startup values of method decorators', () => {
   });
 
   describe('fails startup', () => {
-    it.each([
-      ['a request-scoped provider', 'SCOPED'],
-      ['a missing provider', 'MISSING'],
-    ])('when a function gets %s', async (_, token) => {
-      @Injectable({ scope: Scope.REQUEST })
-      class Scoped {}
-      @Injectable()
-      class H {
-        @Consume(({ get }) => ({ stream: get<string>(token), durable: 'd' }))
-        on() {}
-      }
-      const moduleRef = await app([H, { provide: 'SCOPED', useClass: Scoped }]);
-      let err: unknown;
-      try {
-        moduleRef.get(HandlerExplorer).explore();
-      } catch (e) {
-        err = e;
-      }
-      await moduleRef.close();
-      expect(err).toBeInstanceOf(NatsConfigError);
-      expect((err as Error).message).toMatch(
-        /^NATS handler H\.on failed to resolve its @Consume options: /,
-      );
-      expect((err as Error).cause).toBeDefined();
-    });
-
     it('with the same error each time, without calling a failed function again', async () => {
       const failing = vi.fn((): string => {
         throw new Error('no config');
@@ -288,21 +230,6 @@ describe('HandlerExplorer startup values of method decorators', () => {
       await moduleRef.close();
     });
 
-    it.each([
-      [42, '42'],
-      ['', '""'],
-      [undefined, 'undefined'],
-    ])('when the subject function returns %j', async (value, shown) => {
-      @Injectable()
-      class H {
-        @Subscribe(() => value as string)
-        on() {}
-      }
-      expect((await exploreError(H)).message).toBe(
-        `NATS handler H.on: @Subscribe subject resolved to ${shown}; expected a non-empty string`,
-      );
-    });
-
     it('when the endpoint name function returns no string', async () => {
       @Injectable()
       @NatsService({ name: 'svc', version: '1.0.0' })
@@ -312,22 +239,6 @@ describe('HandlerExplorer startup values of method decorators', () => {
       }
       expect((await exploreError(H)).message).toBe(
         'NATS handler H.get: @ServiceEndpoint name resolved to null; expected a non-empty string',
-      );
-    });
-
-    it.each([
-      [null, 'null'],
-      [undefined, 'undefined'],
-      ['S', '"S"'],
-      [['S'], 'an array'],
-    ])('when the @Consume options function returns %j', async (value, shown) => {
-      @Injectable()
-      class H {
-        @Consume(() => value as never)
-        on() {}
-      }
-      expect((await exploreError(H)).message).toBe(
-        `NATS handler H.on: @Consume options resolved to ${shown}; expected an object`,
       );
     });
 
@@ -394,17 +305,6 @@ describe('HandlerExplorer startup values of class decorators', () => {
     }
     expect((await exploreError(Events)).message).toBe(
       `@CloudEventRouter Events has invalid unmatched "drop"; expected 'ack', 'term' or 'dlq'`,
-    );
-  });
-
-  it('rejects @NatsService options resolved to no object', async () => {
-    @Injectable()
-    @NatsService(() => null as never)
-    class Billing {
-      @ServiceEndpoint('a') a() {}
-    }
-    expect((await exploreError(Billing)).message).toBe(
-      '@NatsService Billing: @NatsService options resolved to null; expected an object',
     );
   });
 
@@ -497,33 +397,5 @@ describe('HandlerExplorer startup values of disabled handlers', () => {
       { kind: 'service-endpoint', className: 'H', methodName: 'a', connection: 'svc' },
       { kind: 'service-endpoint', className: 'H', methodName: 'b', connection: 'svc' },
     ]);
-  });
-});
-
-describe('HandlerExplorer startup value errors', () => {
-  it.each([
-    ['a whole object, without its contents', { prefix: 'p', natsPassword: 'hunter2' }, 'an object'],
-    [
-      'a circular object',
-      (() => {
-        const o: Record<string, unknown> = {};
-        o.self = o;
-        return o;
-      })(),
-      'an object',
-    ],
-    ['a BigInt', 10n, '10n'],
-    ['a function', () => 'x', 'a function'],
-  ])('describes %s', async (_, value, shown) => {
-    @Injectable()
-    class H {
-      @Subscribe(() => value as unknown as string)
-      on() {}
-    }
-    const err = await exploreError(H);
-    expect(err.message).toBe(
-      `NATS handler H.on: @Subscribe subject resolved to ${shown}; expected a non-empty string`,
-    );
-    expect(err.message).not.toContain('hunter2');
   });
 });

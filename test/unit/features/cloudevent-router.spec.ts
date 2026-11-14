@@ -20,7 +20,7 @@ import { CloudEvent, Payload } from '../../../src/decorators/param.decorators.js
 import type { HandlerDefinition } from '../../../src/discovery/handler-definition.js';
 import { HandlerExplorer } from '../../../src/discovery/handler-explorer.js';
 import { validateHandlers } from '../../../src/discovery/handler-validator.js';
-import { NatsConfigError, NatsDecodeError } from '../../../src/errors/errors.js';
+import { NatsDecodeError } from '../../../src/errors/errors.js';
 import { compose } from '../../../src/pipeline/compose.js';
 import {
   createDelivery,
@@ -74,53 +74,8 @@ class EmptyRouter {
 
 @CloudEventRouter({ subscribe: 'x' })
 @Injectable()
-class DupRouter {
-  @OnCloudEvent('a.b')
-  one() {}
-
-  @OnCloudEvent('a.b')
-  two() {}
-}
-
-@CloudEventRouter({ subscribe: 'x' })
-@Injectable()
-class BadPatternRouter {
-  @OnCloudEvent('a.>.b')
-  on() {}
-}
-
-@CloudEventRouter({ subscribe: 'x' })
-@Injectable()
 class MixedRouter {
   @Subscribe('y')
-  @OnCloudEvent('a.b')
-  on() {}
-}
-
-@CloudEventRouter({ subscribe: 'x', consume: { stream: 'S', durable: 'd' } } as never)
-@Injectable()
-class BothRouter {
-  @OnCloudEvent('a.b')
-  on() {}
-}
-
-@CloudEventRouter({ subscribe: 'x', unmatched: 'nack' } as never)
-@Injectable()
-class BadPolicyRouter {
-  @OnCloudEvent('a.b')
-  on() {}
-}
-
-@CloudEventRouter({ subscribe: 'x', batch: { maxSize: 10 } } as never)
-@Injectable()
-class BatchRouter {
-  @OnCloudEvent('a.b')
-  on() {}
-}
-
-@CloudEventRouter({ consume: { stream: 'S', durable: 'd' }, ack: 'manual' } as never)
-@Injectable()
-class ManualAckRouter {
   @OnCloudEvent('a.b')
   on() {}
 }
@@ -268,109 +223,6 @@ describe('@CloudEventRouter discovery', () => {
     });
   });
 
-  it('maps consume routers to consume definitions', async () => {
-    const def = await routerDef({
-      consume: { stream: 'S', durable: 'd', config: { ack_wait: 1 } },
-      connection: 'c',
-      concurrency: 2,
-      unmatched: 'term',
-    });
-    expect(def).toMatchObject({
-      kind: 'consume',
-      delivery: 'pull',
-      connection: 'c',
-      methodName: '@CloudEventRouter',
-      options: { stream: 'S', durable: 'd', config: { ack_wait: 1 }, concurrency: 2 },
-    });
-    expect(def.router?.unmatched).toBe('term');
-  });
-
-  it('passes its timeout on to the definition', async () => {
-    const def = await routerDef({ subscribe: 'events', timeout: 100 });
-    expect(def.options.timeout).toBe(100);
-  });
-
-  it('builds a push consumer definition from consumePush', async () => {
-    const def = await routerDef({
-      consumePush: { stream: 'S', durable: 'd', deliverGroup: 'g', config: { ack_wait: 1 } },
-    });
-    expect(def).toMatchObject({
-      kind: 'consume',
-      delivery: 'push',
-      methodName: '@CloudEventRouter',
-      options: { stream: 'S', durable: 'd', deliverGroup: 'g', config: { ack_wait: 1 } },
-    });
-  });
-
-  it('builds an ordered consumer definition from consumeOrdered', async () => {
-    const def = await routerDef({
-      consumeOrdered: {
-        stream: 'S',
-        filterSubjects: 'a.>',
-        deliverPolicy: 'new',
-        headersOnly: true,
-      },
-    });
-    expect(def).toMatchObject({
-      kind: 'ordered',
-      methodName: '@CloudEventRouter',
-      options: { stream: 'S', filterSubjects: 'a.>', deliverPolicy: 'new', headersOnly: true },
-    });
-  });
-
-  it.each([
-    ['subscribe and consumePush', { subscribe: 'x', consumePush: { stream: 'S', durable: 'd' } }],
-    [
-      'consumePush and consumeOrdered',
-      { consumePush: { stream: 'S', durable: 'd' }, consumeOrdered: { stream: 'S' } },
-    ],
-    ['no source', {}],
-  ])('rejects a router with %s', async (_, options) => {
-    await expect(routerDef(options as never)).rejects.toThrow(
-      /^@CloudEventRouter R must set exactly one of subscribe, consume, consumePush or consumeOrdered$/,
-    );
-  });
-
-  it('counts a source set to undefined as unset', async () => {
-    const def = await routerDef({
-      consume: undefined,
-      consumePush: { stream: 'S', durable: 'd' },
-    } as never);
-    expect(def).toMatchObject({ kind: 'consume', delivery: 'push' });
-  });
-
-  it('rejects concurrency with consumeOrdered', async () => {
-    await expect(routerDef({ consumeOrdered: { stream: 'S' }, concurrency: 2 })).rejects.toThrow(
-      new NatsConfigError('@CloudEventRouter R with consumeOrdered does not support concurrency'),
-    );
-  });
-
-  it('rejects queue unless the source is subscribe', async () => {
-    await expect(
-      routerDef({ consume: { stream: 'S', durable: 'd' }, queue: 'q' } as never),
-    ).rejects.toThrow(
-      new NatsConfigError('@CloudEventRouter R sets queue, which only applies to subscribe'),
-    );
-    const def = await routerDef({ subscribe: 'a.>', queue: 'q' });
-    expect(def).toMatchObject({ kind: 'subscribe', options: { queue: 'q' } });
-  });
-
-  it.each(['durable', 'config', 'ack', 'batch'])(
-    'rejects %s inside consumeOrdered',
-    async (key) => {
-      await expect(
-        routerDef({ consumeOrdered: { stream: 'S', [key]: {} } } as never),
-      ).rejects.toThrow(
-        new NatsConfigError(`@CloudEventRouter R: consumeOrdered does not support ${key}`),
-      );
-    },
-  );
-
-  it('ignores an undefined unsupported key inside consumeOrdered', async () => {
-    const def = await routerDef({ consumeOrdered: { stream: 'S', durable: undefined } } as never);
-    expect(def).toMatchObject({ kind: 'ordered' });
-  });
-
   it('rejects a deliverGroup that conflicts with config.deliver_group', async () => {
     const def = await routerDef({
       consumePush: { stream: 'S', durable: 'd', deliverGroup: 'g', config: { deliver_group: 'h' } },
@@ -386,17 +238,11 @@ describe('@CloudEventRouter discovery', () => {
   });
 
   it.each([
-    ['orphan @OnCloudEvent', OrphanHandlers],
-    ['router without routes', EmptyRouter],
-    ['duplicate pattern', DupRouter],
-    ['invalid pattern', BadPatternRouter],
-    ['@OnCloudEvent combined with @Subscribe', MixedRouter],
-    ['both subscribe and consume', BothRouter],
-    ['an invalid unmatched policy', BadPolicyRouter],
-    ['batch', BatchRouter],
-    ['ack', ManualAckRouter],
-  ])('rejects %s', async (_, cls) => {
-    await expect(explore(cls)).rejects.toThrow(NatsConfigError);
+    ['an @OnCloudEvent outside a router', OrphanHandlers, /without @CloudEventRouter/],
+    ['an @OnCloudEvent that is also a @Subscribe', MixedRouter, /cannot also be a/],
+    ['a router whose definition is invalid', EmptyRouter, /has no @OnCloudEvent method/],
+  ])('fails discovery on %s', async (_, cls, message) => {
+    await expect(explore(cls)).rejects.toThrow(message);
   });
 });
 

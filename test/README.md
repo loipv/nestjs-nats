@@ -15,7 +15,7 @@
 `unit/` mirrors `src/`: the tests of `src/<dir>/<file>.ts` are in `unit/<dir>/<file>.spec.ts`.
 
 - **One module, one spec.** A spec tests the module it is named after. A test of another module goes in that module's spec.
-- **A large module can have several specs**, named `<file>.<aspect>.spec.ts`, such as `discovery/handler-explorer.enhancers.spec.ts`. Each one still tests only `<file>.ts`.
+- **A large module can have several specs**, named `<file>.<aspect>.spec.ts`, such as `discovery/nest-handler-wrapper.exception-filters.spec.ts`. Each one still tests only `<file>.ts`.
 - **`unit/features/`** holds the tests of behaviour that spans several modules and belongs to none of them: batching end to end, the CloudEvent router, disabled handlers, message outcomes, outbound timing, CloudEvents on publish, and the public API of the entry points.
 - **No spec** for files that hold only types, re-exports (`index.ts`), or an empty Nest `@Module` class.
 

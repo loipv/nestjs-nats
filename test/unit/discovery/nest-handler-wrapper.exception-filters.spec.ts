@@ -7,19 +7,12 @@ import {
   Logger,
   UseFilters,
 } from '@nestjs/common';
-import {
-  APP_FILTER,
-  DiscoveryModule,
-  DiscoveryService,
-  MetadataScanner,
-  ModuleRef,
-} from '@nestjs/core';
+import { APP_FILTER, ExternalContextCreator } from '@nestjs/core';
 import { Test, type TestingModule } from '@nestjs/testing';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { NatsContext } from '../../../src/context/nats-context.js';
-import { Subscribe } from '../../../src/decorators/handler.decorators.js';
-import type { HandlerDefinition } from '../../../src/discovery/handler-definition.js';
-import { HandlerExplorer } from '../../../src/discovery/handler-explorer.js';
+import type { Invoke } from '../../../src/discovery/handler-definition.js';
+import { wrapHandler } from '../../../src/discovery/nest-handler-wrapper.js';
 
 class MineError extends Error {}
 class GlobalError extends Error {}
@@ -55,30 +48,25 @@ class GlobalFilter implements ExceptionFilter {
 
 @Injectable()
 class Handlers {
-  @Subscribe('plain')
   plain(): never {
     throw new Error('boom');
   }
 
   @UseFilters(MineFilter)
-  @Subscribe('mine')
   mine(): never {
     throw new MineError('mine');
   }
 
   @UseFilters(MineFilter)
-  @Subscribe('other')
   other(): never {
     throw new Error('other');
   }
 
   @UseFilters(SilentFilter)
-  @Subscribe('silent')
   silent(): never {
     throw new Error('silent');
   }
 
-  @Subscribe('global')
   global(): never {
     throw new GlobalError('global');
   }
@@ -87,7 +75,6 @@ class Handlers {
 @UseFilters(ClassFilter)
 @Injectable()
 class ClassFiltered {
-  @Subscribe('class')
   fail(): never {
     throw new MineError('class');
   }
@@ -101,27 +88,19 @@ function natsCtx(): NatsContext {
   });
 }
 
-describe('HandlerExplorer exception filters', () => {
+describe('wrapHandler exception filters', () => {
   let moduleRef: TestingModule;
-  let defs: HandlerDefinition[];
   const errorLog = vi.spyOn(Logger.prototype, 'error');
-  const find = (method: string) => {
-    const d = defs.find((x) => x.methodName === method);
-    if (!d) throw new Error(`no handler ${method}`);
-    return d;
+  /** `Handlers.<method>`, or `ClassFiltered.fail` for `'fail'`, wrapped. */
+  const find = (method: string): { invoke: Invoke } => {
+    const instance = method === 'fail' ? moduleRef.get(ClassFiltered) : moduleRef.get(Handlers);
+    return { invoke: wrapHandler(moduleRef.get(ExternalContextCreator), instance, method) };
   };
 
   beforeAll(async () => {
     moduleRef = await Test.createTestingModule({
-      imports: [DiscoveryModule],
-      providers: [
-        HandlerExplorer,
-        Handlers,
-        ClassFiltered,
-        { provide: APP_FILTER, useClass: GlobalFilter },
-      ],
+      providers: [Handlers, ClassFiltered, { provide: APP_FILTER, useClass: GlobalFilter }],
     }).compile();
-    defs = moduleRef.get(HandlerExplorer).explore();
   });
 
   afterEach(() => {
@@ -173,23 +152,17 @@ describe('HandlerExplorer exception filters', () => {
   });
 });
 
-describe('HandlerExplorer without access to Nest exception filters', () => {
+describe('wrapHandler without access to Nest exception filters', () => {
   it("falls back to Nest's own exception handling", async () => {
-    const moduleRef = await Test.createTestingModule({
-      imports: [DiscoveryModule],
-      providers: [Handlers],
-    }).compile();
-    const ecc = { create: vi.fn(() => () => Promise.resolve()) };
-    new HandlerExplorer(
-      moduleRef.get(DiscoveryService),
-      moduleRef.get(MetadataScanner),
-      ecc as never,
-      moduleRef.get(ModuleRef),
-    ).explore();
-    expect(ecc.create).toHaveBeenCalled();
-    for (const call of ecc.create.mock.calls as unknown[][]) {
-      expect(call[7]).toEqual({ guards: true, interceptors: true, filters: true });
-    }
-    await moduleRef.close();
+    const target = () => Promise.resolve('done');
+    const ecc = { create: vi.fn(() => target) };
+    const invoke = wrapHandler(ecc as never, new Handlers(), 'plain');
+    expect(invoke).toBe(target);
+    expect(ecc.create).toHaveBeenCalledOnce();
+    expect((ecc.create.mock.calls[0] as unknown[])[7]).toEqual({
+      guards: true,
+      interceptors: true,
+      filters: true,
+    });
   });
 });
