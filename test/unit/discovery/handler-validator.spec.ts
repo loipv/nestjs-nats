@@ -481,3 +481,43 @@ describe('validateHandlers batch on @Subscribe', () => {
     ).not.toThrow();
   });
 });
+
+describe('validateHandlers pull', () => {
+  const pull = (value: unknown) => consumeDef('S', 'd', { options: { pull: value } });
+
+  it.each([
+    ['prefetch', -1, 'an integer >= 0'],
+    ['prefetch', 1.5, 'an integer >= 0'],
+    ['prefetch', '2', 'an integer >= 0'],
+    ['maxBytes', 0, 'an integer >= 1'],
+    ['maxBytes', 1.5, 'an integer >= 1'],
+    ['expires', 999, 'a number of ms in [1000, 2147483647]'],
+    ['expires', 2 ** 31, 'a number of ms in [1000, 2147483647]'],
+    ['expires', Number.NaN, 'a number of ms in [1000, 2147483647]'],
+  ])('rejects pull.%s %s', (field, value, expected) => {
+    const check = () => validateHandlers([pull({ [field]: value })], mgr);
+    expect(check).toThrow(NatsConfigError);
+    expect(check).toThrow(
+      `NATS handler H.on has invalid pull.${field} ${String(value)}; expected ${expected}`,
+    );
+  });
+
+  it.each([[{ prefetch: 0, maxBytes: 1, expires: 1000 }], [{ expires: 2147483647 }], [{}]])(
+    'accepts %j',
+    (value) => {
+      expect(() => validateHandlers([pull(value)], mgr)).not.toThrow();
+    },
+  );
+
+  it('rejects pull on @ConsumePush', () => {
+    expect(() => validateHandlers([pushDef('S', 'd', { options: { pull: {} } })], mgr)).toThrow(
+      'NATS handler H.on sets pull, which only applies to @Consume',
+    );
+  });
+
+  it('rejects pull on @ConsumeOrdered', () => {
+    expect(() => validateHandlers([orderedDef({ options: { pull: {} } })], mgr)).toThrow(
+      NatsConfigError,
+    );
+  });
+});

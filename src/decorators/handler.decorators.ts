@@ -67,6 +67,8 @@ export interface ConsumeOptions {
    * `@Ctx() ctx: NatsBatchContext`). Not allowed with `ack: 'manual'`.
    */
   batch?: BatchOptions;
+  /** Tunes the pull requests of the consumer (see "Pull tuning" in docs/consumers.md). */
+  pull?: PullOptions;
   /**
    * Longest run of the handler, in ms; past it the run counts as failed and `ctx.signal` is
    * aborted (see "Handler timeout" in docs/handlers.md). `false` turns off the module's
@@ -81,11 +83,24 @@ export interface ConsumeOptions {
   disabled?: HandlerDisabled;
 }
 
+/** The pull requests of a `@Consume` consumer. */
+export interface PullOptions {
+  /**
+   * Messages pulled beyond the handler's slots (default 0). They wait in the client, where
+   * they are not heartbeated: keep `ack_wait` above the time to work through them.
+   */
+  prefetch?: number;
+  /** Largest size of one pull request, in bytes (default: no limit). */
+  maxBytes?: number;
+  /** How long one pull request waits for messages, in ms, at least 1000 (default 30_000). */
+  expires?: number;
+}
+
 /**
  * Options of a durable push consumer: the same as a pull consumer's, plus a delivery
  * group, so several instances share one durable and split its messages.
  */
-export interface ConsumePushOptions extends ConsumeOptions {
+export interface ConsumePushOptions extends Omit<ConsumeOptions, 'pull'> {
   /**
    * The consumer's `deliver_group`: instances of one group share the durable's messages.
    * Must agree with `config.deliver_group` when both are set.

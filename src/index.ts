@@ -18,6 +18,7 @@ export type {
   HandlerDisabled,
   NatsServiceOptions,
   OrderedDeliverPolicy,
+  PullOptions,
   ServiceEndpointOptions,
   SubscribeOptions,
 } from './decorators/handler.decorators.js';

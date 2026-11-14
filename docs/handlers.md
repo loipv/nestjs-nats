@@ -61,6 +61,7 @@ async bill(@Payload() order: OrderDto, @Ctx() ctx: NatsJetStreamContext) {
 | `connection`, `codec`, `disabled` | | As for `@Subscribe` |
 | `retry`, `dlq`, `idempotency` | | As for `@Subscribe` |
 | `batch` | off | `{ maxSize?, maxWait? }`. Cannot be combined with `ack: 'manual'`. See [Batch processing](./batching.md#batch-processing) |
+| `pull` | none | `{ prefetch?, maxBytes?, expires? }`, the pull requests of the consumer. See [Pull tuning](./consumers.md#pull-tuning) |
 
 A consumer the library creates defaults to `ack_policy: 'explicit'` and `max_deliver: -1`, unless you set them. These defaults are never applied to a consumer that already exists.
 

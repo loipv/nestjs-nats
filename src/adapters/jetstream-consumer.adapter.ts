@@ -9,7 +9,7 @@ import { type ResolvedBatchOptions, resolveBatchOptions } from '../batch/collect
 import type { Codec } from '../codec/codec.js';
 import type { ConnectionEntry } from '../connection/connection-registry.js';
 import { NatsJetStreamContext } from '../context/nats-context.js';
-import type { ConsumePushOptions } from '../decorators/handler.decorators.js';
+import type { ConsumeOptions, ConsumePushOptions } from '../decorators/handler.decorators.js';
 import type { HandlerDefinition } from '../discovery/handler-definition.js';
 import { NatsConfigError } from '../errors/errors.js';
 import type { NatsStreamManager } from '../jetstream/stream-manager.js';
@@ -20,6 +20,7 @@ import {
   type InboundMessage,
   type InternalDelivery,
 } from '../pipeline/delivery.js';
+import { resolveHandlerTimeout } from '../pipeline/handler-timeout.js';
 import { backoffDelay, DEFAULT_RETRY, type RetryPolicy } from '../settlement/retry.js';
 import { errorTrace } from '../util/errors.js';
 import { isPowerOfTwo } from '../util/power-of-two.js';
@@ -155,6 +156,7 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     // `ack_wait` is in nanoseconds.
     const ackWaitMs = (actual.ack_wait ?? 0) / 1e6;
     if (first) this.checkBatchWait(ackWaitMs);
+    if (first && !this.push) this.checkPrefetchWait(ackWaitMs);
     const messages = await intake.consume();
     if (this.stopping) {
       // stop() ran while opening: nothing will handle these messages; hand back any
@@ -226,6 +228,7 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
 
   private async openPull(): Promise<Intake> {
     const { stream, durable, config } = this.def.options;
+    const pull = (this.def.options as ConsumeOptions).pull ?? {};
     if (config) await this.streams.ensureConsumer(stream, { ...config, durable_name: durable });
     const consumer = await this.lookup(
       () => this.entry.js().consumers.get(stream, durable),
@@ -238,9 +241,12 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
       // for a slot meanwhile. The heartbeat covers every message the client has handed
       // over; while every slot is busy, up to `max_messages - 1` more can still sit in the
       // client's own buffer, out of its reach.
+      // `pull.prefetch` more wait in the client's buffer too.
       consume: () =>
         consumer.consume({
-          max_messages: this.capacity,
+          max_messages: this.capacity + (pull.prefetch ?? 0),
+          ...(pull.maxBytes !== undefined ? { max_bytes: pull.maxBytes } : {}),
+          ...(pull.expires !== undefined ? { expires: pull.expires } : {}),
           ...(this.abortOnMissing ? { abort_on_missing_resource: true } : {}),
         }),
     };
@@ -375,6 +381,23 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
     const { stream, durable } = this.def.options;
     this.entry.logger.warn(
       `${this.def.className}.${this.def.methodName} on "${stream}/${durable}" has batch.maxWait ${this.batch.maxWait} ms >= the consumer's ack_wait ${ackWaitMs} ms; collected messages rely on heartbeats alone and may be redelivered and processed twice if one is late. Lower batch.maxWait or raise ack_wait`,
+    );
+  }
+
+  /**
+   * Prefetched messages wait in the client's buffer, out of the heartbeat's reach: with a
+   * handler timeout, warns when working through them can take longer than `ack_wait`.
+   */
+  private checkPrefetchWait(ackWaitMs: number): void {
+    const prefetch = (this.def.options as ConsumeOptions).pull?.prefetch ?? 0;
+    const timeout = resolveHandlerTimeout(
+      this.entry.options.handlerTimeout,
+      this.def.options.timeout,
+    );
+    if (prefetch <= 0 || timeout === false || ackWaitMs <= 0) return;
+    if ((prefetch / this.concurrency + 1) * timeout <= ackWaitMs) return;
+    this.entry.logger.warn(
+      `Consumer of ${this.label} prefetches ${prefetch} messages: with timeout ${timeout} ms, one can wait longer than ack_wait (${ackWaitMs} ms) and be redelivered; lower pull.prefetch or raise ack_wait`,
     );
   }
 

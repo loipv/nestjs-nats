@@ -30,6 +30,7 @@ import type {
   NatsServiceOptions,
   OrderedDeliverPolicy,
   PublishManyResult,
+  PullOptions,
   RetryOptions,
   StartupContext,
   StartupValue,
@@ -192,6 +193,7 @@ it('exports the reliability types', () => {
   expectTypeOf<ClaimResult>().not.toBeAny();
   expectTypeOf<InMemoryIdempotencyStoreOptions>().toHaveProperty('maxKeys');
   expectTypeOf<BatchOptions>().toHaveProperty('maxSize');
+  expectTypeOf<PullOptions>().toHaveProperty('prefetch');
   expectTypeOf<JetStreamPublishOptions>().not.toBeAny();
   expectTypeOf<PublishManyResult>().toHaveProperty('ok');
   expectTypeOf<AtomicMessage>().toHaveProperty('subject');

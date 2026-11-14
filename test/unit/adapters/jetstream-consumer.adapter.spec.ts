@@ -118,6 +118,8 @@ function setup(
     publish?: () => Promise<unknown>;
     restart?: RestartBinding;
     timeout?: number;
+    pull?: unknown;
+    handlerTimeout?: number;
   } = {},
 ) {
   const fake = fakeMessages();
@@ -135,7 +137,7 @@ function setup(
   const logger = { log: vi.fn(), error: vi.fn(), warn: vi.fn() };
   const entry = {
     name: 'default',
-    options: { plugins: opts.plugins },
+    options: { plugins: opts.plugins, handlerTimeout: opts.handlerTimeout },
     logger,
     nc: { isClosed: () => false },
     js: () => ({
@@ -163,6 +165,7 @@ function setup(
       deliverGroup: opts.deliverGroup,
       config: opts.config,
       timeout: opts.timeout,
+      pull: opts.pull,
     },
     invoke,
   } as unknown as HandlerDefinition & { kind: 'consume' };
@@ -175,6 +178,59 @@ function setup(
   const adapter = new JetStreamConsumerAdapter(def, entry, streams, opts.restart);
   return { adapter, fake, consume, info, logger, ensureConsumer };
 }
+
+describe('JetStreamConsumerAdapter pull options', () => {
+  async function consumeArgs(opts: Parameters<typeof setup>[1]) {
+    const { adapter, consume, logger } = setup(() => Promise.resolve(), opts);
+    await adapter.start();
+    await adapter.stop();
+    await adapter.idle();
+    return { args: (consume.mock.calls[0] as unknown[] | undefined)?.[0], logger };
+  }
+
+  it.each([
+    ['nothing', {}, { max_messages: 1 }],
+    ['prefetch', { concurrency: 4, pull: { prefetch: 6 } }, { max_messages: 10 }],
+    [
+      'prefetch with a batch',
+      { concurrency: 2, batch: { maxSize: 5 }, pull: { prefetch: 3 } },
+      { max_messages: 8 },
+    ],
+    ['maxBytes', { pull: { maxBytes: 1024 } }, { max_messages: 1, max_bytes: 1024 }],
+    ['expires', { pull: { expires: 5000 } }, { max_messages: 1, expires: 5000 }],
+  ])('pulls with %s', async (_, opts, expected) => {
+    expect((await consumeArgs(opts)).args).toEqual(expected);
+  });
+
+  const WARNING =
+    'Consumer of C.m on "ORD/d" prefetches 4 messages: with timeout 20000 ms, one can wait longer than ack_wait (30000 ms) and be redelivered; lower pull.prefetch or raise ack_wait';
+
+  it('warns when the prefetched messages can outwait ack_wait', async () => {
+    const { logger } = await consumeArgs({
+      concurrency: 2,
+      pull: { prefetch: 4 },
+      timeout: 20_000,
+    });
+    expect(logger.warn).toHaveBeenCalledExactlyOnceWith(WARNING);
+  });
+
+  it("counts the module's handlerTimeout", async () => {
+    const { logger } = await consumeArgs({
+      concurrency: 2,
+      pull: { prefetch: 4 },
+      handlerTimeout: 20_000,
+    });
+    expect(logger.warn).toHaveBeenCalledExactlyOnceWith(WARNING);
+  });
+
+  it.each([
+    ['the prefetched messages fit in ack_wait', { timeout: 5000 }],
+    ['the handler has no timeout', {}],
+  ])('does not warn when %s', async (_, extra) => {
+    const { logger } = await consumeArgs({ concurrency: 2, pull: { prefetch: 4 }, ...extra });
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+});
 
 describe('JetStreamConsumerAdapter', () => {
   it.each([

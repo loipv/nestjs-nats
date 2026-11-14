@@ -25,6 +25,32 @@ Declare the stream and, for pull and push, the durable consumer in [`forRoot` or
 
 A pull consumer asks the server for messages when it has room for them. It is the right default: simple to reason about, and the library never receives more than it can hold. See [`@Consume`](./handlers.md#consumeoptions-jetstream-pull-consumer).
 
+### Pull tuning
+
+By default each pull request asks for as many messages as the handler has slots (`concurrency`, or `max(batch.maxSize, concurrency)` with `batch`), and nats.js keeps a request open for 30 seconds. The `pull` option changes that:
+
+```ts
+import { Consume, Payload } from '@loipv/nestjs-nats';
+
+class Billing {
+  @Consume({
+    stream: 'ORDERS',
+    durable: 'billing',
+    concurrency: 4,
+    pull: { prefetch: 16, maxBytes: 1_048_576, expires: 10_000 },
+  })
+  charge(@Payload() order: unknown) {}
+}
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `prefetch` | `0` | Messages asked for beyond the slots, an integer `>= 0`. Fewer round trips to the server for small, fast messages |
+| `maxBytes` | none | Largest size of one pull request, in bytes, an integer `>= 1`. Bounds the memory a pull of large messages takes |
+| `expires` | `30000` | How long one pull request waits for messages, in ms, at least `1000` |
+
+**`prefetch` and redeliveries.** Prefetched messages wait in the NATS client until a slot is free, and the library cannot heartbeat them there (see [Heartbeats](./retry-and-dlq.md#what-happens-to-a-failed-message)). If working through them takes longer than the consumer's `ack_wait`, the server redelivers them, and they can be processed twice. When the handler has a [`timeout`](./handlers.md#handler-timeout), the library warns at startup when `(prefetch / concurrency + 1) × timeout` exceeds `ack_wait`. Keep `prefetch` small, or raise `ack_wait`.
+
 ## Push: `@ConsumePush`
 
 > **Experimental:** `@ConsumePush` may change or be removed before 1.0. See [Stability](../README.md#stability).

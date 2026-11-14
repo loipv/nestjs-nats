@@ -1,5 +1,5 @@
 import type { ConnectionRegistry } from '../connection/connection-registry.js';
-import type { ConsumePushOptions } from '../decorators/handler.decorators.js';
+import type { ConsumeOptions, ConsumePushOptions } from '../decorators/handler.decorators.js';
 import { NatsConfigError } from '../errors/errors.js';
 import { DEFAULT_IDEMPOTENCY_TTL } from '../idempotency/idempotency.js';
 import { assertTimeout } from '../pipeline/handler-timeout.js';
@@ -53,6 +53,7 @@ export function validateHandlers(defs: HandlerDefinition[], mgr: ConnectionRegis
     }
     if (def.kind === 'consume') {
       validateBatch(def);
+      validatePull(def);
       validateDeliverGroup(def);
       const { stream, durable } = def.options;
       const key = JSON.stringify([def.connection, stream, durable]);
@@ -76,6 +77,31 @@ function rejectSubscribeBatch(def: HandlerDefinition & { kind: 'subscribe' }): v
   throw new NatsConfigError(
     `NATS handler ${label(def)} sets batch on @Subscribe, which was removed in 0.3.0; use @Consume with batch, or handle messages one at a time`,
   );
+}
+
+/** `pull` belongs to `@Consume`, and each of its fields to its own range. */
+function validatePull(def: HandlerDefinition & { kind: 'consume' }): void {
+  const { pull } = def.options as ConsumeOptions;
+  if (pull === undefined) return;
+  if (def.delivery === 'push') {
+    throw new NatsConfigError(
+      `NATS handler ${label(def)} sets pull, which only applies to @Consume`,
+    );
+  }
+  const invalid = (field: string, value: unknown, expected: string) =>
+    new NatsConfigError(
+      `NATS handler ${label(def)} has invalid pull.${field} ${String(value)}; expected ${expected}`,
+    );
+  const { prefetch, maxBytes, expires } = pull;
+  if (prefetch !== undefined && !(Number.isInteger(prefetch) && prefetch >= 0)) {
+    throw invalid('prefetch', prefetch, 'an integer >= 0');
+  }
+  if (maxBytes !== undefined && !(Number.isInteger(maxBytes) && maxBytes >= 1)) {
+    throw invalid('maxBytes', maxBytes, 'an integer >= 1');
+  }
+  if (expires !== undefined && !(expires >= 1000 && expires <= MAX_TIMER_DELAY)) {
+    throw invalid('expires', expires, `a number of ms in [1000, ${MAX_TIMER_DELAY}]`);
+  }
 }
 
 /** `slowConsumer` is a number of messages, or `false`. */
@@ -102,7 +128,14 @@ function validateDeliverGroup(def: HandlerDefinition & { kind: 'consume' }): voi
 }
 
 const DELIVER_POLICIES: readonly string[] = ['all', 'last', 'new', 'last_per_subject'];
-const UNSUPPORTED_ORDERED_OPTIONS = ['concurrency', 'durable', 'batch', 'ack', 'config'] as const;
+const UNSUPPORTED_ORDERED_OPTIONS = [
+  'concurrency',
+  'durable',
+  'batch',
+  'ack',
+  'config',
+  'pull',
+] as const;
 
 /** `@ConsumeOrdered` has no durable, acks, batches or concurrency: reject what it would ignore. */
 function validateOrdered(def: HandlerDefinition & { kind: 'ordered' }): void {

@@ -27,6 +27,7 @@ class Handlers {
   readonly deliveries: Record<string, number[]> = {};
   readonly manual: Array<{ id: number; ctx: NatsJetStreamContext }> = [];
   readonly seq: number[] = [];
+  readonly prefetched: number[] = [];
   parallel = { active: 0, max: 0, done: 0 };
 
   @Consume({
@@ -61,6 +62,18 @@ class Handlers {
   async onSeq(@Payload() i: number) {
     await sleep(Math.floor(Math.random() * 11));
     this.seq.push(i);
+  }
+
+  @Consume({
+    stream: 'ORD',
+    durable: 'prefetch',
+    concurrency: 2,
+    pull: { prefetch: 8, expires: 2000 },
+    config: { filter_subject: 'ord.prefetch' },
+  })
+  async onPrefetch(@Payload() i: number) {
+    await sleep(5);
+    this.prefetched.push(i);
   }
 
   @Consume({
@@ -217,6 +230,15 @@ describe('@Consume', () => {
     expect(Date.now() - start).toBeLessThan(600);
     expect(handlers.parallel.max).toBeGreaterThan(1);
     expect(handlers.parallel.max).toBeLessThanOrEqual(4);
+  });
+
+  it('consumes every message once with pull.prefetch', async () => {
+    for (let i = 0; i < 30; i++) await js.publish('ord.prefetch', json(i));
+    await eventually(() => expect(handlers.prefetched).toHaveLength(30));
+    expect([...handlers.prefetched].sort((a, b) => a - b)).toEqual(
+      Array.from({ length: 30 }, (_, i) => i),
+    );
+    await eventually(async () => expect(await ackPending('prefetch')).toBe(0));
   });
 
   it('consumes a pre-created consumer without config', async () => {
