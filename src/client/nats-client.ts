@@ -10,7 +10,12 @@ import type { NatsHeadersInit } from '../codec/headers.js';
 import type { ConnectionEntry } from '../connection/connection-registry.js';
 import { redactText } from '../connection/redact.js';
 import { NatsModuleError, NatsRequestError } from '../errors/errors.js';
-import { createOutgoingMessage, encodeOutgoing, sendOutbound } from '../pipeline/outbound.js';
+import {
+  createOutgoingMessage,
+  encodeOutgoing,
+  hasOutboundPlugins,
+  sendOutbound,
+} from '../pipeline/outbound.js';
 import type { OutgoingMessage } from '../pipeline/types.js';
 
 /** The default timeout (ms) of a request, and how long the outbound plugins have to pass a publish on. */
@@ -49,36 +54,49 @@ export class NatsClient {
     } = {},
   ): void {
     const message = createOutgoingMessage(this.entry, 'publish', subject, data, opts);
+    const send = (m: OutgoingMessage): void => {
+      const payload = encodeOutgoing(m);
+      const publishOpts: PublishOptions = {};
+      if (m.headers.keys().length > 0) publishOpts.headers = m.headers;
+      if (opts.reply !== undefined) publishOpts.reply = opts.reply;
+      this.entry.nc.publish(m.subject, payload, publishOpts);
+    };
+    const failed = (err: unknown): void => {
+      const reason = redactText(err instanceof Error ? err.message : String(err));
+      this.entry.logger.error(`Failed to publish to "${subject}": ${reason}`);
+    };
+    // Without plugins nothing is pending: publish at once, with no promise to track.
+    if (!hasOutboundPlugins(this.entry)) {
+      try {
+        send(message);
+      } catch (err) {
+        failed(err);
+      }
+      return;
+    }
     let dropped: Error | undefined;
     // Settles once the message is published (not waiting for the plugins), so `flush()` and
     // shutdown are not held by a plugin that never settles.
-    const task = sendOutbound(
-      this.entry,
-      message,
-      (m) => {
-        const payload = encodeOutgoing(m);
-        const publishOpts: PublishOptions = {};
-        if (m.headers.keys().length > 0) publishOpts.headers = m.headers;
-        if (opts.reply !== undefined) publishOpts.reply = opts.reply;
-        this.entry.nc.publish(m.subject, payload, publishOpts);
+    const task = sendOutbound(this.entry, message, send, {
+      what: `Publish to "${subject}"`,
+      timeout: DEFAULT_REQUEST_TIMEOUT,
+      expired: (ms) => {
+        dropped = new NatsModuleError(
+          `Publish to "${subject}": the outbound plugins did not pass the message on within ${ms} ms; dropped`,
+        );
+        return dropped;
       },
-      {
-        what: `Publish to "${subject}"`,
-        timeout: DEFAULT_REQUEST_TIMEOUT,
-        expired: (ms) => {
-          dropped = new NatsModuleError(
-            `Publish to "${subject}": the outbound plugins did not pass the message on within ${ms} ms; dropped`,
-          );
-          return dropped;
-        },
+    }).then(
+      () => {
+        this.inflight.delete(task);
       },
-    ).catch((err: unknown) => {
-      if (dropped && err === dropped) return this.entry.logger.error(dropped.message);
-      const reason = redactText(err instanceof Error ? err.message : String(err));
-      this.entry.logger.error(`Failed to publish to "${subject}": ${reason}`);
-    });
+      (err: unknown) => {
+        this.inflight.delete(task);
+        if (dropped && err === dropped) this.entry.logger.error(dropped.message);
+        else failed(err);
+      },
+    );
     this.inflight.add(task);
-    void task.finally(() => this.inflight.delete(task));
   }
 
   async request<T = unknown>(

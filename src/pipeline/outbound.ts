@@ -11,6 +11,11 @@ import type { Next, OutgoingMessage } from './types.js';
 
 export type OutboundHandler = (m: OutgoingMessage, next: Next) => Promise<void>;
 
+/** Whether a connection has a plugin with an outbound middleware. */
+export function hasOutboundPlugins(entry: ConnectionEntry): boolean {
+  return entry.options.plugins?.some((p) => p.outbound !== undefined) ?? false;
+}
+
 /** The outbound middlewares of a connection's plugins, in registration order. */
 export function outboundMiddlewares(entry: ConnectionEntry): OutboundHandler[] {
   const out: OutboundHandler[] = [];
