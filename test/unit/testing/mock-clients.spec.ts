@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { NatsRequestError } from '../../../src/errors/errors.js';
 import type { NatsPlugin } from '../../../src/pipeline/types.js';
 import { createMockJetStreamClient, createMockNatsClient } from '../../../src/testing/index.js';
@@ -58,10 +58,33 @@ describe('createMockNatsClient', () => {
   it('answers requestMany with the reply of the stub, or none', async () => {
     const mock = createMockNatsClient();
     mock.whenRequest('svc').reply({ a: 1 });
-    await expect(mock.requestMany('svc')).resolves.toEqual([
-      { data: { a: 1 }, subject: expect.any(String), headers: {} },
-    ]);
+    await expect(mock.requestMany('svc')).resolves.toEqual([{ data: { a: 1 }, headers: {} }]);
     await expect(mock.requestMany('other')).resolves.toEqual([]);
+  });
+
+  it('hands publish failures to its onPublishError', async () => {
+    const onPublishError = vi.fn();
+    const failing: NatsPlugin = {
+      name: 'fail',
+      outbound: {
+        handle: async () => {
+          throw new Error('audit failed');
+        },
+      },
+    };
+    const mock = createMockNatsClient({ plugins: [failing], onPublishError });
+    mock.publish('o', 1);
+    await mock.flush();
+    expect(onPublishError).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ message: 'audit failed' }),
+      { subject: 'o', connection: 'default' },
+    );
+  });
+
+  it('rejects an onPublishError that is not a function', () => {
+    expect(() => createMockNatsClient({ onPublishError: 'x' as never })).toThrow(
+      'NATS connection "default" has invalid onPublishError; expected a function',
+    );
   });
 
   it('stubs failing requests with a service error', async () => {

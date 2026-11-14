@@ -95,8 +95,8 @@ export interface PullOptions {
 }
 
 /**
- * Options of a durable push consumer: the same as a pull consumer's, plus a delivery
- * group, so several instances share one durable and split its messages.
+ * Options of a durable push consumer: the same as a pull consumer's except `pull`, plus a
+ * delivery group, so several instances share one durable and split its messages.
  */
 export interface ConsumePushOptions extends Omit<ConsumeOptions, 'pull'> {
   /**

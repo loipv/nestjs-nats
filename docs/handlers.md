@@ -93,7 +93,7 @@ async bill(@Payload() order: OrderDto, @Ctx() ctx: NatsJetStreamContext) {
 }
 ```
 
-Takes every option of `@Consume`, and settles messages, retries and dead-letters them the same way. One more option:
+Takes every option of `@Consume` except `pull` (the server pushes, nothing is pulled), and settles messages, retries and dead-letters them the same way. One more option:
 
 | Option | Default | Description |
 |---|---|---|

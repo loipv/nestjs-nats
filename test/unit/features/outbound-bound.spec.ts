@@ -432,6 +432,29 @@ describe('NatsClient.publish error hook with plugins', () => {
     expect(error).toHaveBeenCalledExactlyOnceWith('Failed to publish to "o": undefined');
   });
 
+  it('logs both errors when the hook throws on a plugin failure', async () => {
+    const broken = new Error('hook broke');
+    const { nats, error } = setup([failingBefore], undefined, () => {
+      throw broken;
+    });
+    nats.publish('o', 1);
+    await nats.flush();
+    expect(error.mock.calls).toEqual([
+      ['Publish to "o": the publish error handler failed', broken.stack],
+      ['Failed to publish to "o": audit failed'],
+    ]);
+  });
+
+  it("prefers the call's onError on a plugin failure", async () => {
+    const hook = vi.fn();
+    const onError = vi.fn();
+    const { nats } = setup([failingBefore], undefined, hook);
+    nats.publish('o', 1, { onError });
+    await nats.flush();
+    expect(onError).toHaveBeenCalledExactlyOnceWith(boom);
+    expect(hook).not.toHaveBeenCalled();
+  });
+
   it('lets flush() wait until the hook ran', async () => {
     const hook = vi.fn();
     const { nats } = setup([failingBefore], undefined, hook);

@@ -40,6 +40,12 @@ describe('NatsTestingModule', () => {
     await moduleRef.close();
   });
 
+  it('rejects an onPublishError that is not a function, like forRoot', () => {
+    expect(() => NatsTestingModule.forRoot({ onPublishError: 'x' as never })).toThrow(
+      'NATS connection "default" has invalid onPublishError; expected a function',
+    );
+  });
+
   it('does not dispatch to a disabled handler, as bootstrap would not start it', async () => {
     @Injectable()
     class Toggled {

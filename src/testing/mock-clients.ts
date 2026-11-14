@@ -1,13 +1,13 @@
 import type { JetStreamClient as NatsJetStreamClient } from '@nats-io/jetstream';
 import type { NatsConnection } from '@nats-io/transport-node';
-import { NatsClient } from '../client/nats-client.js';
+import { assertPublishErrorHandler, NatsClient } from '../client/nats-client.js';
 import { type Codec, jsonCodec } from '../codec/codec.js';
 import type { ConnectionEntry } from '../connection/connection-registry.js';
 import { NatsConfigError, NatsModuleError } from '../errors/errors.js';
 import { type IdempotencyStore, InMemoryIdempotencyStore } from '../idempotency/store.js';
 import { JetStreamClient } from '../jetstream/jetstream-client.js';
 import { createNatsLogger } from '../module/logger.js';
-import type { NatsModuleOptions } from '../module/options.js';
+import type { NatsModuleOptions, PublishErrorHandler } from '../module/options.js';
 import { DEFAULT_CONNECTION } from '../module/tokens.js';
 import type { NatsPlugin } from '../pipeline/types.js';
 import { FakeNatsConnection, type PublishedMessage, type RequestStub } from './fake-connection.js';
@@ -19,6 +19,8 @@ export interface MockClientOptions {
   plugins?: NatsPlugin[];
   /** Defaults of the CloudEvents the client publishes. */
   cloudEvents?: { source?: string };
+  /** Receives the publish errors, as `onPublishError` of `forRoot`. */
+  onPublishError?: PublishErrorHandler;
 }
 
 /** A `NatsClient` over a fake connection: records publishes, answers requests from stubs. */
@@ -86,13 +88,15 @@ export function mockJetStreamClientOf(entry: ConnectionEntry): MockJetStreamClie
 
 /** A connection entry over a new fake connection, for a standalone mock client. */
 function mockEntry(options: MockClientOptions): ConnectionEntry {
-  const { codec, plugins, cloudEvents } = options;
+  const { codec, plugins, cloudEvents, onPublishError } = options;
+  assertPublishErrorHandler(onPublishError, DEFAULT_CONNECTION);
   const moduleOptions: NatsModuleOptions = {
     name: DEFAULT_CONNECTION,
     connection: {},
     ...(codec ? { codec } : {}),
     ...(plugins ? { plugins } : {}),
     ...(cloudEvents ? { cloudEvents } : {}),
+    ...(onPublishError ? { onPublishError } : {}),
   };
   const fake = new FakeNatsConnection(codec ?? jsonCodec());
   let store: IdempotencyStore | undefined;

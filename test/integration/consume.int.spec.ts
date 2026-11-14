@@ -241,6 +241,32 @@ describe('@Consume', () => {
     await eventually(async () => expect(await ackPending('prefetch')).toBe(0));
   });
 
+  it("consumes with pull.expires within the consumer's max_expires", async () => {
+    @Injectable()
+    class ShortPulls {
+      readonly got: number[] = [];
+
+      @Consume({
+        stream: 'ORD',
+        durable: 'short-pulls',
+        pull: { expires: 2000 },
+        config: { filter_subject: 'ord.shortpull', max_expires: 5_000_000_000 },
+      })
+      on(@Payload() n: number) {
+        this.got.push(n);
+      }
+    }
+    const shortApp = await createTestApp({ imports: [nats()], providers: [ShortPulls] });
+    try {
+      // Past several expiries of an empty pull, the consumer still receives.
+      await sleep(4500);
+      await js.publish('ord.shortpull', json(7));
+      await eventually(() => expect(shortApp.get(ShortPulls).got).toEqual([7]));
+    } finally {
+      await shortApp.close();
+    }
+  });
+
   it("fails bootstrap when a pull waits longer than the consumer's max_expires", async () => {
     @Injectable()
     class ShortExpires {

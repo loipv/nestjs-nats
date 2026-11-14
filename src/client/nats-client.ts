@@ -219,8 +219,9 @@ export class NatsClient {
       new NatsConfigError(
         `requestMany to "${subject}" has invalid ${field} ${String(value)}; expected ${expected}`,
       );
-    if (!(maxWait > 0 && maxWait <= MAX_TIMER_DELAY)) {
-      throw invalid('maxWait', maxWait, `a number of ms in (0, ${MAX_TIMER_DELAY}]`);
+    // nats.js refuses a maxWait below 1 ms.
+    if (!(maxWait >= 1 && maxWait <= MAX_TIMER_DELAY)) {
+      throw invalid('maxWait', maxWait, `a number of ms in [1, ${MAX_TIMER_DELAY}]`);
     }
     if (maxMessages !== undefined && !(Number.isInteger(maxMessages) && maxMessages >= 1)) {
       throw invalid('maxMessages', maxMessages, 'an integer >= 1');
@@ -280,10 +281,14 @@ export class NatsClient {
   }
 }
 
-/** A reply of `requestMany`: its decoded data, or why it has none. */
+/**
+ * A reply of `requestMany`: its decoded data and headers, or why it has none. Replies all
+ * arrive on one inbox, so they carry no subject telling the responders apart: put an id in
+ * the reply's data or headers for that.
+ */
 export type RequestManyReply<T> =
-  | { data: T; subject: string; headers: Record<string, string | string[]> }
-  | { error: NatsRequestError | NatsDecodeError; subject: string };
+  | { data: T; headers: Record<string, string | string[]> }
+  | { error: NatsRequestError | NatsDecodeError };
 
 /** The service error a reply carries (`Nats-Service-Error-Code`), if any. */
 function serviceError(reply: Msg, subject: string): NatsRequestError | undefined {
@@ -305,12 +310,20 @@ function serviceError(reply: Msg, subject: string): NatsRequestError | undefined
 
 function toReply<T>(reply: Msg, m: OutgoingMessage): RequestManyReply<T> {
   const failure = serviceError(reply, m.subject);
-  if (failure) return { error: failure, subject: reply.subject };
+  if (failure) return { error: failure };
   try {
     const data = decodePayload(m.codec, reply.data, reply.headers) as T;
-    return { data, subject: reply.subject, headers: fromMsgHdrs(reply.headers) };
+    return { data, headers: fromMsgHdrs(reply.headers) };
   } catch (err) {
-    if (err instanceof NatsDecodeError) return { error: err, subject: reply.subject };
+    if (err instanceof NatsDecodeError) return { error: err };
     throw err;
   }
+}
+
+/** Throws a `NatsConfigError` unless `value` is `undefined` or a function. */
+export function assertPublishErrorHandler(value: unknown, connection: string): void {
+  if (value === undefined || typeof value === 'function') return;
+  throw new NatsConfigError(
+    `NATS connection "${connection}" has invalid onPublishError; expected a function`,
+  );
 }

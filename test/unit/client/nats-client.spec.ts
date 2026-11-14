@@ -176,7 +176,7 @@ describe('NatsClient.requestMany', () => {
     ]);
     const replies = await client.requestMany('svc');
     expect(replies).toHaveLength(3);
-    expect(replies[0]).toEqual({ data: { ok: 1 }, subject: '_INBOX.x', headers: {} });
+    expect(replies[0]).toEqual({ data: { ok: 1 }, headers: {} });
     const [, failed, undecodable] = replies as Array<{ error: Error }>;
     expect(failed?.error).toBeInstanceOf(NatsRequestError);
     expect(failed?.error).toMatchObject({
@@ -251,8 +251,9 @@ describe('NatsClient.requestMany', () => {
   });
 
   it.each([
-    ['maxWait', { maxWait: 0 }, 'a number of ms in (0, 2147483647]'],
-    ['maxWait', { maxWait: 2 ** 31 }, 'a number of ms in (0, 2147483647]'],
+    ['maxWait', { maxWait: 0 }, 'a number of ms in [1, 2147483647]'],
+    ['maxWait', { maxWait: 0.5 }, 'a number of ms in [1, 2147483647]'],
+    ['maxWait', { maxWait: 2 ** 31 }, 'a number of ms in [1, 2147483647]'],
     ['maxMessages', { maxMessages: 0 }, 'an integer >= 1'],
     ['maxMessages', { maxMessages: 1.5 }, 'an integer >= 1'],
     ['stall', { stall: 0 }, 'a number of ms in (0, maxWait]'],

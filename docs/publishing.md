@@ -25,11 +25,11 @@ Invalid arguments are the exception: a bad header name or value, or an invalid `
 | `'no_responders'` | Nobody is subscribed to the subject |
 | `'service_error'` | The responder replied with an error. `serviceCode` (the `Nats-Service-Error-Code` header as a number; left unset when the header is not an integer) and `description` are filled in |
 
-Outbound plugins must pass a request on within its timeout, or `request()` rejects with a `NatsModuleError` and nothing is sent; once it is sent, `request()` settles with the reply (or the `NatsRequestError`) without waiting for the plugins to return. A message given to `publish()` that the plugins do not pass on within 5000 ms is dropped, with an error logged. See [Outbound timing](./plugins.md#outbound-timing).
+Outbound plugins must pass a request on within its timeout, or `request()` rejects with a `NatsModuleError` and nothing is sent; once it is sent, `request()` settles with the reply (or the `NatsRequestError`) without waiting for the plugins to return. A message given to `publish()` that the plugins do not pass on within 5000 ms is dropped, with an error logged, or handed to its [error handler](#publish-errors). See [Outbound timing](./plugins.md#outbound-timing).
 
 ### Publish errors
 
-`publish()` returns before the message is sent, so it cannot throw a failure to send: the connection is closed or draining, an outbound plugin failed before passing the message on, or the plugins did not pass it on within 5000 ms. By default the library logs these. To act on them (retry, keep the message in an outbox, count them), give the connection an `onPublishError`, or a single call an `onError`, which takes precedence:
+`publish()` returns before the message is sent, so it cannot throw a failure to send: the payload cannot be encoded (a circular value, a BigInt), the connection is closed or draining, an outbound plugin failed before passing the message on, or the plugins did not pass it on within 5000 ms. By default the library logs these. To act on them (retry, keep the message in an outbox, count them), give the connection an `onPublishError`, or a single call an `onError`, which takes precedence:
 
 ```ts
 import { NatsModule, type NatsClient } from '@loipv/nestjs-nats';
@@ -71,7 +71,7 @@ for (const reply of replies) {
 }
 ```
 
-It stops when `maxWait` ends, when `maxMessages` replies arrived, or, with `stall`, when no reply came for `stall` ms after the last one; never later than `maxWait`. Each reply is `{ data, subject, headers }`, or `{ error, subject }` when it carries a service error (a `NatsRequestError` with `code: 'service_error'`) or cannot be decoded (a `NatsDecodeError`): one failing responder does not hide the others. When nobody is subscribed to the subject, it resolves `[]`. Other failures, such as a closed connection, reject. `headers`, `codec` and `cloudEvent` work as for `request()`, and the request goes through the outbound plugins like one, which have `maxWait` to pass it on.
+It stops when `maxWait` ends, when `maxMessages` replies arrived, or, with `stall`, when no reply came for `stall` ms after the last one; never later than `maxWait`. Each reply is `{ data, headers }`, or `{ error }` when it carries a service error (a `NatsRequestError` with `code: 'service_error'`) or cannot be decoded (a `NatsDecodeError`): one failing responder does not hide the others. Replies all arrive on one inbox, so they do not tell the responders apart: put an id in the reply's data or headers for that. `maxWait` is at least 1 ms. When nobody is subscribed to the subject, it resolves `[]`. Other failures, such as a closed connection, reject. `headers`, `codec` and `cloudEvent` work as for `request()`, and the request goes through the outbound plugins like one, which have `maxWait` to pass it on.
 
 ## `JetStreamClient`
 
@@ -131,7 +131,7 @@ Each message is `{ subject, data?, headers?, codec?, cloudEvent? }`. The result 
 
 ## Codecs
 
-Payloads are JSON by default. A `Uint8Array` is always sent as-is, `undefined` is sent as an empty payload, and an empty payload decodes to `undefined`. A value JSON cannot represent (a function, a symbol, a `toJSON()` returning `undefined`, as well as circular values and BigInts) is not sent: encoding throws a `TypeError`, which `request()` and `JetStreamClient.publish()` reject with and `NatsClient.publish()` logs. You can provide your own codec per connection (`codec` in `forRoot`), per handler, or per publish call:
+Payloads are JSON by default. A `Uint8Array` is always sent as-is, `undefined` is sent as an empty payload, and an empty payload decodes to `undefined`. A value JSON cannot represent (a function, a symbol, a `toJSON()` returning `undefined`, as well as circular values and BigInts) is not sent: encoding throws a `TypeError`, which `request()` and `JetStreamClient.publish()` reject with and `NatsClient.publish()` logs (or hands to its [error handler](#publish-errors)). You can provide your own codec per connection (`codec` in `forRoot`), per handler, or per publish call:
 
 ```ts
 import type { Codec } from '@loipv/nestjs-nats';

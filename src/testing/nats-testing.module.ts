@@ -9,7 +9,7 @@ import {
   type Provider,
 } from '@nestjs/common';
 import { DiscoveryModule } from '@nestjs/core';
-import { NatsClient } from '../client/nats-client.js';
+import { assertPublishErrorHandler, NatsClient } from '../client/nats-client.js';
 import { jsonCodec } from '../codec/codec.js';
 import { NatsConnectionManager } from '../connection/connection-manager.js';
 import { ConnectionRegistry } from '../connection/connection-registry.js';
@@ -91,6 +91,7 @@ export class NatsTestingModule {
    */
   static forRoot(options: Omit<NatsModuleOptions, 'connection'> = {}): DynamicModule {
     const name = options.name ?? DEFAULT_CONNECTION;
+    assertPublishErrorHandler(options.onPublishError, name);
     const optionsToken = getModuleOptionsToken(name);
     const connectionToken = getConnectionToken(name);
     const clientToken = getNatsClientToken(name);
