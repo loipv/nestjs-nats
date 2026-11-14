@@ -75,6 +75,11 @@ export class NatsLifecycle
       for (const name of this.manager.names()) {
         const { options } = this.manager.get(name);
         assertTimeout(options.handlerTimeout, `NATS connection "${name}"`, 'handlerTimeout');
+        if (options.onPublishError !== undefined && typeof options.onPublishError !== 'function') {
+          throw new NatsConfigError(
+            `NATS connection "${name}" has invalid onPublishError; expected a function`,
+          );
+        }
         rejectRemovedFieldsReset(name, options);
       }
       // Once per (store, connection) pair, before anything else uses the stores.

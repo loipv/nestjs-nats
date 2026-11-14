@@ -29,6 +29,7 @@ import type {
   NatsHeadersInit,
   NatsServiceOptions,
   OrderedDeliverPolicy,
+  PublishErrorHandler,
   PublishManyResult,
   PullOptions,
   RequestManyReply,
@@ -195,6 +196,9 @@ it('exports the reliability types', () => {
   expectTypeOf<InMemoryIdempotencyStoreOptions>().toHaveProperty('maxKeys');
   expectTypeOf<BatchOptions>().toHaveProperty('maxSize');
   expectTypeOf<PullOptions>().toHaveProperty('prefetch');
+  expectTypeOf<PublishErrorHandler>().parameters.toEqualTypeOf<
+    [Error, { subject: string; connection: string }]
+  >();
   expectTypeOf<
     Extract<RequestManyReply<number>, { data: number }>['data']
   >().toEqualTypeOf<number>();

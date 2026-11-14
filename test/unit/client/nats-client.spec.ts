@@ -248,3 +248,60 @@ describe('NatsClient.requestMany', () => {
     expect(requestMany).not.toHaveBeenCalled();
   });
 });
+
+describe('NatsClient.publish error hook', () => {
+  function setup(onPublishError?: unknown) {
+    const error = vi.fn();
+    const entry = {
+      name: 'default',
+      options: { connection: {}, onPublishError },
+      nc: {
+        publish: vi.fn(() => {
+          throw new Error('closed');
+        }),
+        flush: vi.fn(async () => {}),
+      },
+      logger: { log: vi.fn(), warn: vi.fn(), error },
+      onClose: () => () => {},
+    } as unknown as ConnectionEntry;
+    return { client: new NatsClient(entry), nc: entry.nc, error };
+  }
+
+  it("hands a failure to the connection's hook before publish() returns, without logging it", () => {
+    const hook = vi.fn();
+    const { client, error } = setup(hook);
+    client.publish('o', 1);
+    expect(hook).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: 'closed' }), {
+      subject: 'o',
+      connection: 'default',
+    });
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  it('prefers the onError of the call', () => {
+    const hook = vi.fn();
+    const onError = vi.fn();
+    const { client } = setup(hook);
+    client.publish('o', 1, { onError });
+    expect(onError).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: 'closed' }));
+    expect(hook).not.toHaveBeenCalled();
+  });
+
+  it('logs both errors when the hook throws, and never throws itself', () => {
+    const broken = new Error('hook broke');
+    const { client, error } = setup(() => {
+      throw broken;
+    });
+    expect(() => client.publish('o', 1)).not.toThrow();
+    expect(error.mock.calls).toEqual([
+      ['Publish to "o": the publish error handler failed', broken.stack],
+      ['Failed to publish to "o": closed'],
+    ]);
+  });
+
+  it('rejects an onError that is not a function before sending anything', () => {
+    const { client, nc } = setup();
+    expect(() => client.publish('o', 1, { onError: 'x' as never })).toThrow(NatsConfigError);
+    expect(nc.publish).not.toHaveBeenCalled();
+  });
+});

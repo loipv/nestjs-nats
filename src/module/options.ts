@@ -10,6 +10,12 @@ import type { RetryOptions } from '../settlement/retry.js';
 
 type WithRequired<T, K extends keyof T> = T & { [P in K]-?: T[P] };
 
+/** What `onPublishError` receives: the error, and which publish failed. */
+export type PublishErrorHandler = (
+  error: Error,
+  info: { subject: string; connection: string },
+) => void;
+
 export type StreamSyncMode = 'create-or-update' | 'create-only' | 'verify' | 'none';
 
 export type StreamDeclaration = WithRequired<Partial<StreamConfig>, 'name'>;
@@ -43,6 +49,12 @@ export interface NatsModuleOptions {
    * failed. A handler's own `timeout` (or `false`) wins. Default: none.
    */
   handlerTimeout?: number | false;
+  /**
+   * Receives the errors of `NatsClient.publish()` on this connection instead of the log: the
+   * connection is closed, an outbound plugin failed, or the plugins did not pass the message
+   * on in time. A call's own `onError` takes precedence.
+   */
+  onPublishError?: PublishErrorHandler;
   shutdown?: { drainTimeout?: number };
   logger?: false | LoggerService;
 }

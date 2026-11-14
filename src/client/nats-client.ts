@@ -17,7 +17,7 @@ import {
   sendOutbound,
 } from '../pipeline/outbound.js';
 import type { OutgoingMessage } from '../pipeline/types.js';
-import { isNoResponders } from '../util/errors.js';
+import { errorTrace, isNoResponders } from '../util/errors.js';
 import { MAX_TIMER_DELAY } from '../util/timer.js';
 
 /** The default timeout (ms) of a request, and how long the outbound plugins have to pass a publish on. */
@@ -49,8 +49,17 @@ export class NatsClient {
       reply?: string;
       /** Publishes a CloudEvent: its attributes go in `ce-*` headers or a JSON envelope. */
       cloudEvent?: CloudEventInit;
+      /**
+       * Receives the error if the message cannot be published, instead of the connection's
+       * `onPublishError` (or the log).
+       */
+      onError?: (error: Error) => void;
     } = {},
   ): void {
+    const { onError } = opts;
+    if (onError !== undefined && typeof onError !== 'function') {
+      throw new NatsConfigError(`Publish to "${subject}": onError must be a function`);
+    }
     const message = createOutgoingMessage(this.entry, 'publish', subject, data, opts);
     const send = (m: OutgoingMessage): void => {
       const payload = encodeOutgoing(m);
@@ -59,10 +68,35 @@ export class NatsClient {
       if (opts.reply !== undefined) publishOpts.reply = opts.reply;
       this.entry.nc.publish(m.subject, payload, publishOpts);
     };
-    const failed = (err: unknown): void => {
+    const logFailure = (err: unknown): void => {
+      if (err === dropped) {
+        this.entry.logger.error((err as Error).message);
+        return;
+      }
       const reason = redactText(err instanceof Error ? err.message : String(err));
       this.entry.logger.error(`Failed to publish to "${subject}": ${reason}`);
     };
+    /** Hands `err` to the error handler, else logs it; a failing handler is logged too. */
+    const failed = (err: unknown): void => {
+      const error = err instanceof Error ? err : new Error(String(err));
+      const { onPublishError } = this.entry.options;
+      try {
+        const handler: ((e: Error) => void) | undefined =
+          onError ??
+          (onPublishError && ((e) => onPublishError(e, { subject, connection: this.entry.name })));
+        if (handler) {
+          handler(error);
+          return;
+        }
+      } catch (handlerErr) {
+        this.entry.logger.error(
+          `Publish to "${subject}": the publish error handler failed`,
+          errorTrace(handlerErr),
+        );
+      }
+      logFailure(err);
+    };
+    let dropped: Error | undefined;
     // Without plugins nothing is pending: publish at once, with no promise to track.
     if (!hasOutboundPlugins(this.entry)) {
       try {
@@ -72,7 +106,6 @@ export class NatsClient {
       }
       return;
     }
-    let dropped: Error | undefined;
     // Settles once the message is published (not waiting for the plugins), so `flush()` and
     // shutdown are not held by a plugin that never settles.
     const task = sendOutbound(this.entry, message, send, {
@@ -90,8 +123,7 @@ export class NatsClient {
       },
       (err: unknown) => {
         this.inflight.delete(task);
-        if (dropped && err === dropped) this.entry.logger.error(dropped.message);
-        else failed(err);
+        failed(err);
       },
     );
     this.inflight.add(task);

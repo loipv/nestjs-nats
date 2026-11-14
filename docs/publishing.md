@@ -5,7 +5,7 @@
 ## `NatsClient`: core NATS
 
 ```ts
-// Fire-and-forget. Delivery errors are logged, never thrown.
+// Fire-and-forget. Delivery errors are logged (or handed to onError), never thrown.
 client.publish('orders.created', { id: 42, total: 99.5 }, { headers: { 'x-tenant': 't1' } });
 
 // Request/reply. The default timeout is 5000 ms.
@@ -26,6 +26,31 @@ Invalid arguments are the exception: a bad header name or value, or an invalid `
 | `'service_error'` | The responder replied with an error. `serviceCode` (the `Nats-Service-Error-Code` header as a number; left unset when the header is not an integer) and `description` are filled in |
 
 Outbound plugins must pass a request on within its timeout, or `request()` rejects with a `NatsModuleError` and nothing is sent; once it is sent, `request()` settles with the reply (or the `NatsRequestError`) without waiting for the plugins to return. A message given to `publish()` that the plugins do not pass on within 5000 ms is dropped, with an error logged. See [Outbound timing](./plugins.md#outbound-timing).
+
+### Publish errors
+
+`publish()` returns before the message is sent, so it cannot throw a failure to send: the connection is closed or draining, an outbound plugin failed before passing the message on, or the plugins did not pass it on within 5000 ms. By default the library logs these. To act on them (retry, keep the message in an outbox, count them), give the connection an `onPublishError`, or a single call an `onError`, which takes precedence:
+
+```ts
+import { NatsModule, type NatsClient } from '@loipv/nestjs-nats';
+
+NatsModule.forRoot({
+  connection: { servers: 'nats://localhost:4222' },
+  onPublishError: (error, { subject, connection }) => {
+    console.warn(`publish to ${subject} on ${connection} failed: ${error.message}`);
+  },
+});
+
+declare const client: NatsClient;
+declare const outbox: { save(subject: string, data: unknown): void };
+const event = { id: 42 };
+client.publish('audit.order', event, { onError: () => outbox.save('audit.order', event) });
+```
+
+- **Instead of the log.** An error handed to a handler is not logged. If the handler throws, the library logs that (`the publish error handler failed`) and then the original error, and `publish()` still does not throw.
+- **When.** On a connection without outbound plugins, the handler runs before `publish()` returns. With plugins, it runs when the failure happens, and `flush()` waits for it.
+- **Not errors.** A plugin that drops a message on purpose (returns without calling `next()`), or fails after the message was sent, does not call the handler: the message was not lost to a failure. Invalid arguments still make `publish()` throw synchronously.
+- **Unmasked.** The handler gets the error itself. Logs mask credentials; mask them yourself if you log the error.
 
 ### Many replies
 

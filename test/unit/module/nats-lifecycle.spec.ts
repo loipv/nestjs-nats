@@ -451,6 +451,19 @@ describe('NatsLifecycle declarations', () => {
     );
   }
 
+  it('rejects an onPublishError that is not a function before syncing anything', async () => {
+    const ensureStream = vi.spyOn(NatsStreamManager.prototype, 'ensureStream');
+    const { manager } = fakeManager({
+      default: { onPublishError: 'x' as never, streams: [{ name: 'S', subjects: ['s.>'] }] },
+    });
+    await expect(lifecycleWith(manager).onModuleInit()).rejects.toThrow(
+      new NatsConfigError(
+        'NATS connection "default" has invalid onPublishError; expected a function',
+      ),
+    );
+    expect(ensureStream).not.toHaveBeenCalled();
+  });
+
   it("rejects removedFields 'reset' before syncing anything", async () => {
     const ensureStream = vi.spyOn(NatsStreamManager.prototype, 'ensureStream');
     const { manager } = fakeManager({

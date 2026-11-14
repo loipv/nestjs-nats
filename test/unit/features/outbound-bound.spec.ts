@@ -12,6 +12,7 @@ import {
 import { InMemoryIdempotencyStore } from '../../../src/idempotency/store.js';
 import { JetStreamClient } from '../../../src/jetstream/jetstream-client.js';
 import { createNatsLogger } from '../../../src/module/logger.js';
+import type { PublishErrorHandler } from '../../../src/module/options.js';
 import type { NatsPlugin, OutgoingMessage } from '../../../src/pipeline/types.js';
 import { FakeNatsConnection } from '../../../src/testing/fake-connection.js';
 import { never } from '../../support/async.js';
@@ -19,7 +20,11 @@ import { never } from '../../support/async.js';
 type FakeJs = ReturnType<FakeNatsConnection['jetstream']>;
 
 /** Clients over a fake connection whose outbound plugins are `plugins`. */
-function setup(plugins: NatsPlugin[] = [], jsTimeout?: number) {
+function setup(
+  plugins: NatsPlugin[] = [],
+  jsTimeout?: number,
+  onPublishError?: PublishErrorHandler,
+) {
   const fake = new FakeNatsConnection(jsonCodec());
   const fakeJs: FakeJs = fake.jetstream();
   if (jsTimeout !== undefined)
@@ -28,7 +33,7 @@ function setup(plugins: NatsPlugin[] = [], jsTimeout?: number) {
   const logger = createNatsLogger(false, 'test');
   const entry: ConnectionEntry = {
     name: 'default',
-    options: { name: 'default', connection: {}, plugins },
+    options: { name: 'default', connection: {}, plugins, onPublishError },
     nc: fake as unknown as NatsConnection,
     logger,
     js: () => fakeJs as unknown as NatsJetStreamClient,
@@ -364,6 +369,64 @@ describe('NatsClient.request outbound bound', () => {
     const { nats, fake } = setup([failingBefore]);
     await expect(nats.request('svc', 'ping')).rejects.toBe(boom);
     expect(fake.published).toEqual([]);
+  });
+});
+
+describe('NatsClient.publish error hook with plugins', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('hands a plugin failure before next() to the hook instead of logging it', async () => {
+    const hook = vi.fn();
+    const { nats, fake, error } = setup([failingBefore], undefined, hook);
+    nats.publish('o', 1);
+    await nats.flush();
+    expect(fake.published).toEqual([]);
+    expect(hook).toHaveBeenCalledExactlyOnceWith(boom, { subject: 'o', connection: 'default' });
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  it('hands a message the plugins did not pass on in time to the hook', async () => {
+    vi.useFakeTimers();
+    const hook = vi.fn();
+    const { nats, error } = setup([stuck], undefined, hook);
+    nats.publish('o', 1);
+    await settlesAfter(nats.flush(), 5000);
+    expect(hook).toHaveBeenCalledOnce();
+    const [err] = hook.mock.calls[0] as [Error];
+    expect(err).toBeInstanceOf(NatsModuleError);
+    expect(err.message).toBe(
+      'Publish to "o": the outbound plugins did not pass the message on within 5000 ms; dropped',
+    );
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  it('does not call the hook for a message a plugin dropped on purpose', async () => {
+    const hook = vi.fn();
+    const { nats, fake } = setup([plugin(async () => {})], undefined, hook);
+    nats.publish('o', 1);
+    await nats.flush();
+    expect(fake.published).toEqual([]);
+    expect(hook).not.toHaveBeenCalled();
+  });
+
+  it('does not call the hook for a plugin failing after the message was sent', async () => {
+    const hook = vi.fn();
+    const { nats, fake, error } = setup([failingAfter], undefined, hook);
+    nats.publish('o', 1);
+    await nats.flush();
+    expect(fake.published).toHaveLength(1);
+    await vi.waitFor(() => expect(error).toHaveBeenCalled());
+    expect(hook).not.toHaveBeenCalled();
+  });
+
+  it('lets flush() wait until the hook ran', async () => {
+    const hook = vi.fn();
+    const { nats } = setup([failingBefore], undefined, hook);
+    nats.publish('o', 1);
+    await nats.flush();
+    expect(hook).toHaveBeenCalledOnce();
   });
 });
 
