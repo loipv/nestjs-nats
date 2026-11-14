@@ -254,162 +254,33 @@ describe('CoreSubscriptionAdapter', () => {
     await adapter.idle();
   });
 
+  it('forceStop drops queued messages and warns with their count', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const invoke = vi.fn(() => gate);
+    const { adapter, fake, logger } = setup(invoke);
+    await adapter.start();
+    fake.push(fakeMsg(1));
+    fake.push(fakeMsg(2));
+    await tick();
+    expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0, abandonedRuns: 0 });
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Dropped 1 unstarted message for C.m on "a.b" at forced stop',
+    );
+    release();
+    await adapter.stop();
+    await adapter.idle();
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
   it('forceStop has no messages to nak', async () => {
     const { adapter } = setup(() => Promise.resolve());
     await adapter.start();
     await adapter.stop();
     await adapter.idle();
     expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0, abandonedRuns: 0 });
-  });
-
-  describe('batch', () => {
-    it('delivers batches of maxSize', async () => {
-      const batches: unknown[] = [];
-      const { adapter, fake } = setup(
-        async (payload) => {
-          batches.push(payload);
-        },
-        [],
-        {},
-        { batch: { maxSize: 2, maxWait: 60_000 } },
-      );
-      await adapter.start();
-      for (const n of [1, 2, 3, 4]) fake.push(fakeMsg(n));
-      await tick();
-      await tick();
-      expect(batches).toEqual([
-        [1, 2],
-        [3, 4],
-      ]);
-      await adapter.stop();
-      await adapter.idle();
-    });
-
-    it('rejects requests with a 400 reply without handling them, warning once', async () => {
-      const batches: unknown[] = [];
-      const { adapter, fake, logger } = setup(
-        async (payload) => {
-          batches.push(payload);
-          return 'reply';
-        },
-        [],
-        {},
-        { batch: { maxSize: 2, maxWait: 60_000 } },
-      );
-      await adapter.start();
-      const requests = [1, 2].map((n) => ({ ...fakeMsg(n), reply: `_INBOX.${n}` }));
-      fake.push(requests[0]);
-      fake.push(fakeMsg(3));
-      fake.push(requests[1]);
-      fake.push(fakeMsg(4));
-      await tick();
-      await tick();
-      expect(batches).toEqual([[3, 4]]);
-      for (const request of requests) {
-        expect(request.respond).toHaveBeenCalledTimes(1);
-        const [data, opts] = request.respond.mock.calls[0] as unknown as [
-          Uint8Array,
-          { headers: { get(k: string): string } },
-        ];
-        expect(data).toHaveLength(0);
-        expect(opts.headers.get('Nats-Service-Error-Code')).toBe('400');
-        expect(opts.headers.get('Nats-Service-Error')).toBe(
-          'NATS handler C.m handles batches and does not reply to requests',
-        );
-      }
-      expect(logger.warn).toHaveBeenCalledTimes(1);
-      expect(logger.warn).toHaveBeenCalledWith(
-        'Rejected a request on "a.b" for C.m on "a.b" with 400: batch handlers do not reply to requests',
-      );
-      await adapter.stop();
-      await adapter.idle();
-    });
-
-    it('flushes the pending batch when the subscription drains', async () => {
-      const batches: unknown[] = [];
-      const { adapter, fake } = setup(
-        async (payload) => {
-          batches.push(payload);
-        },
-        [],
-        {},
-        { batch: { maxSize: 10, maxWait: 60_000 } },
-      );
-      await adapter.start();
-      fake.push(fakeMsg(1));
-      fake.push(fakeMsg(2));
-      await tick();
-      expect(batches).toEqual([]);
-      await adapter.stop();
-      await adapter.idle();
-      expect(batches).toEqual([[1, 2]]);
-    });
-
-    it('retries a failed item in a later batch with the next attempt', async () => {
-      const seen: Array<Array<[unknown, number]>> = [];
-      const plugin = {
-        inbound: {
-          async handle(
-            d: { messages: Array<{ attempt: number; data: Uint8Array }> },
-            next: () => Promise<void>,
-          ) {
-            seen.push(
-              d.messages.map((m) => [JSON.parse(new TextDecoder().decode(m.data)), m.attempt]),
-            );
-            await next();
-          },
-        },
-      };
-      let first = true;
-      const { adapter, fake } = setup(
-        async (_payload, ctx) => {
-          if (first) {
-            first = false;
-            (ctx as { fail(i: number, e: unknown): void }).fail(1, new Error('x'));
-          }
-        },
-        [plugin],
-        { retry: { initialDelay: 10, jitter: 0 } },
-        { batch: { maxSize: 2, maxWait: 30 } },
-      );
-      await adapter.start();
-      fake.push(fakeMsg(1));
-      fake.push(fakeMsg(2));
-      await vi.waitFor(() =>
-        expect(seen).toEqual([
-          [
-            [1, 1],
-            [2, 1],
-          ],
-          [[2, 2]],
-        ]),
-      );
-      await adapter.stop();
-      await adapter.idle();
-    });
-
-    it('forceStop drops collected messages and warns with their count', async () => {
-      const invoke = vi.fn(() => Promise.resolve());
-      const { adapter, fake, logger } = setup(
-        invoke,
-        [],
-        {},
-        {
-          batch: { maxSize: 10, maxWait: 60_000 },
-        },
-      );
-      await adapter.start();
-      fake.push(fakeMsg(1));
-      fake.push(fakeMsg(2));
-      await tick();
-      expect(adapter.forceStop()).toEqual({ nakked: 0, cancelledRetries: 0, abandonedRuns: 0 });
-      expect(logger.warn).toHaveBeenCalledWith(
-        'Dropped 2 unstarted messages (collected or queued) for C.m on "a.b" at forced stop',
-      );
-      await adapter.stop();
-      await adapter.idle();
-      expect(invoke).not.toHaveBeenCalled();
-    });
   });
 });
 

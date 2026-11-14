@@ -1,6 +1,5 @@
 import { ServiceErrorCodeHeader, ServiceErrorHeader } from '@nats-io/services';
 import { headers, type Msg, type Subscription } from '@nats-io/transport-node';
-import { type ResolvedBatchOptions, resolveBatchOptions } from '../batch/collector.js';
 import { type Codec, encodePayload } from '../codec/codec.js';
 import type { ConnectionEntry } from '../connection/connection-registry.js';
 import { NatsContext } from '../context/nats-context.js';
@@ -13,7 +12,7 @@ import {
   type InternalDelivery,
   LINGERING,
 } from '../pipeline/delivery.js';
-import { batchRequestError, type ServiceError, toServiceError } from '../pipeline/reply.js';
+import { type ServiceError, toServiceError } from '../pipeline/reply.js';
 import { errorMessage, errorTrace } from '../util/errors.js';
 import {
   type ForceStopResult,
@@ -38,7 +37,6 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
   private readonly run: (d: InternalDelivery) => Promise<void>;
   private readonly info: HandlerInfo;
   private readonly label: string;
-  private readonly batch?: ResolvedBatchOptions;
   /** Resolves once every run that outlived the handler's timeout has ended. */
   private readonly lingering: () => Promise<void>;
   private readonly lingeringRuns: () => number;
@@ -50,8 +48,6 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
   /** Whether the loop of the current subscription is still running. */
   private loopRunning = false;
   private readonly supervisor: RestartSupervisor;
-  /** Whether a request rejected by this batch handler was already logged. */
-  private warnedBatchRequest = false;
 
   constructor(
     private readonly def: SubscribeDefinition,
@@ -66,7 +62,6 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
     this.lingeringRuns = pipeline.lingeringRuns;
     this.idempotent = pipeline.idempotent;
     this.label = `${def.className}.${def.methodName} on "${def.subject}"`;
-    this.batch = resolveBatchOptions(def.options.batch);
     this.supervisor = new RestartSupervisor({
       policy: restart.policy,
       label: this.label,
@@ -77,14 +72,13 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
         const track = restart.track(this.label);
         return (state) => {
           track(state);
-          // Nothing will be pushed anymore: let pending retries and batches settle.
+          // Nothing will be pushed anymore: let pending retries settle.
           if (state === 'failed') void this.dispatcher.stop();
         };
       })(),
     });
     this.dispatcher = new Dispatcher<Msg>({
       concurrency: def.options.concurrency ?? 1,
-      ...(this.batch ? { batch: this.batch } : {}),
       process: (items) => this.process(items),
       logger: entry.logger,
       label: this.label,
@@ -159,7 +153,7 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
     const dropped = this.dispatcher.abandon().length;
     if (dropped > 0) {
       this.entry.logger.warn(
-        `Dropped ${dropped} unstarted message${dropped === 1 ? '' : 's'} (collected or queued) for ${this.label} at forced stop`,
+        `Dropped ${dropped} unstarted message${dropped === 1 ? '' : 's'} for ${this.label} at forced stop`,
       );
     }
     return {
@@ -174,8 +168,7 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
     let failed = false;
     try {
       for await (const msg of sub) {
-        if (this.batch && msg.reply) this.rejectBatchRequest(msg);
-        else await this.dispatcher.push(msg);
+        await this.dispatcher.push(msg);
       }
     } catch (err) {
       failed = true;
@@ -193,13 +186,11 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
       }
       this.supervisor.ended(error);
     }
-    // Nothing more will be pushed unless the subscription is reopened. The batch being
-    // collected is handed to the handler; `idle()` waits for it.
+    // Nothing more will be pushed unless the subscription is reopened.
     if (this.stopping || this.supervisor.state === 'failed') void this.dispatcher.stop();
   }
 
   private async process(items: DispatchItem<Msg>[]): Promise<void> {
-    if (this.batch) return this.handleBatch(items);
     for (const item of items) await this.handle(item);
   }
 
@@ -210,13 +201,13 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
     };
   }
 
-  private delivery(parts: DeliveryPart[], batch: boolean): InternalDelivery {
+  private delivery(part: DeliveryPart): InternalDelivery {
     const d: InternalDelivery = createDelivery({
       definition: this.def,
       handler: this.info,
       connection: this.entry.name,
-      batch,
-      parts,
+      batch: false,
+      parts: [part],
       codec: this.codec,
       logger: this.entry.logger,
       retry: (msg: InboundMessage, delayMs: number) => this.retryLater(d, msg, delayMs),
@@ -242,34 +233,11 @@ export class CoreSubscriptionAdapter implements HandlerAdapter {
     });
   }
 
-  /**
-   * A batch handler cannot answer a request: the request is not handled and gets a `400`
-   * at once, instead of its requester waiting for a reply that never comes.
-   */
-  private rejectBatchRequest(msg: Msg): void {
-    this.respondWith(msg, batchRequestError(this.def));
-    if (this.warnedBatchRequest) return;
-    this.warnedBatchRequest = true;
-    this.entry.logger.warn(
-      `Rejected a request on "${msg.subject}" for ${this.label} with 400: batch handlers do not reply to requests`,
-    );
-  }
-
-  private async handleBatch(items: DispatchItem<Msg>[]): Promise<void> {
-    const parts = items.map((item) => this.part(item));
-    try {
-      await this.run(this.delivery(parts, true));
-    } catch (err) {
-      // Reached only when the pipeline failed outside settlement (e.g. a plugin threw).
-      this.entry.logger.error(`Handler ${this.label} failed`, errorTrace(err));
-    }
-  }
-
   private async handle(item: DispatchItem<Msg>): Promise<void> {
     const { msg } = item;
     const part = this.part(item);
     const { context } = part;
-    const d = this.delivery([part], false);
+    const d = this.delivery(part);
     try {
       await this.run(d);
     } catch (err) {

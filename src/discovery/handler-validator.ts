@@ -39,7 +39,10 @@ export function validateHandlers(defs: HandlerDefinition[], mgr: ConnectionRegis
       validateDlq(def, mgr);
       validateIdempotency(def, mgr);
     }
-    if (def.kind === 'subscribe') validateSlowConsumer(def);
+    if (def.kind === 'subscribe') {
+      validateSlowConsumer(def);
+      rejectSubscribeBatch(def);
+    }
     if (def.kind === 'subscribe' || def.kind === 'consume') {
       validateBatch(def);
       const { concurrency } = def.options;
@@ -62,6 +65,14 @@ export function validateHandlers(defs: HandlerDefinition[], mgr: ConnectionRegis
       durables.set(key, def);
     }
   }
+}
+
+/** `batch` on `@Subscribe` was removed in 0.3.0; a JavaScript caller can still pass it. */
+function rejectSubscribeBatch(def: HandlerDefinition & { kind: 'subscribe' }): void {
+  if ((def.options as { batch?: unknown }).batch === undefined) return;
+  throw new NatsConfigError(
+    `NATS handler ${label(def)} sets batch on @Subscribe, which was removed in 0.3.0; use @Consume with batch, or handle messages one at a time`,
+  );
 }
 
 /** `slowConsumer` is a number of messages, or `false`. */
@@ -222,12 +233,12 @@ function validateIdempotency(def: HandlerDefinition, mgr: ConnectionRegistry): v
   }
 }
 
-/** Validates the batch options of a handler; a batch cannot be acked manually. */
+/** Validates the batch options of a consumer; a batch cannot be acked manually. */
 function validateBatch(def: HandlerDefinition): void {
-  if (def.kind === 'service-endpoint' || def.kind === 'ordered') return;
+  if (def.kind !== 'consume') return;
   const { batch } = def.options;
   if (batch === undefined) return;
-  if (def.kind === 'consume' && def.options.ack === 'manual') {
+  if (def.options.ack === 'manual') {
     throw new NatsConfigError(
       `NATS handler ${label(def)} combines batch with ack: 'manual'; batches are settled per message by the library (use ctx.fail() for partial failures)`,
     );

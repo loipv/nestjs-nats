@@ -465,3 +465,19 @@ describe('validateHandlers slowConsumer', () => {
     expect(() => validateHandlers([def({ options: { slowConsumer: value } })], mgr)).not.toThrow();
   });
 });
+
+describe('validateHandlers batch on @Subscribe', () => {
+  it('rejects it, pointing at @Consume', () => {
+    const check = () => validateHandlers([def({ options: { batch: { maxSize: 10 } } })], mgr);
+    expect(check).toThrow(NatsConfigError);
+    expect(check).toThrow(
+      'NATS handler H.on sets batch on @Subscribe, which was removed in 0.3.0; use @Consume with batch, or handle messages one at a time',
+    );
+  });
+
+  it('still accepts batch on @Consume', () => {
+    expect(() =>
+      validateHandlers([consumeDef('S', 'd', { options: { batch: { maxSize: 10 } } })], mgr),
+    ).not.toThrow();
+  });
+});

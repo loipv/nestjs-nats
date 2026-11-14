@@ -38,14 +38,6 @@ export interface SubscribeOptions {
   dlq?: DlqOptions | boolean;
   idempotency?: boolean | IdempotencyOptions;
   /**
-   * Hands the handler messages in batches (`@Payload() items: T[]`,
-   * `@Ctx() ctx: NatsBatchContext`); a batch never replies.
-   *
-   * @experimental On `@Subscribe`, may change or be removed before 1.0 (see Stability in the
-   * README).
-   */
-  batch?: BatchOptions;
-  /**
    * Longest run of the handler, in ms; past it the run counts as failed and `ctx.signal` is
    * aborted (see "Handler timeout" in docs/handlers.md). `false` turns off the module's
    * `handlerTimeout`. Default: the module's `handlerTimeout`, else none.

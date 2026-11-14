@@ -91,39 +91,6 @@ function jsBatch(bodies: string[], invoke: Invoke, attempts: number[] = [], msgI
   return { d, raws, def, log, invoke: def.invoke as unknown as ReturnType<typeof vi.fn> };
 }
 
-function coreBatch(bodies: string[], invoke: Invoke) {
-  const raws = bodies.map((b) => coreRaw(b));
-  const schedule = vi.fn();
-  const def = {
-    kind: 'subscribe',
-    connection: 'default',
-    className: 'H',
-    methodName: 'on',
-    subject: 'orders.*',
-    options: { batch: {} },
-    invoke: vi.fn(invoke),
-  } as unknown as HandlerDefinition;
-  const d = createDelivery({
-    definition: def,
-    connection: 'default',
-    batch: true,
-    codec: jsonCodec(),
-    logger: mockLogger(),
-    retry: schedule,
-    parts: raws.map((raw) => ({
-      message: {
-        subject: raw.subject,
-        data: raw.data,
-        headers: raw.headers,
-        raw: raw as never,
-        attempt: 1,
-      },
-      context: new NatsContext({ kind: 'core', connection: 'default', raw: raw as never }),
-    })),
-  });
-  return { d, raws, schedule, invoke: def.invoke as unknown as ReturnType<typeof vi.fn> };
-}
-
 const fakeEntry = () =>
   ({ name: 'default', options: {}, logger: mockLogger() }) as unknown as ConnectionEntry;
 
@@ -343,23 +310,6 @@ describe('batch settlement', () => {
     expect(raws[0]?.ack).toHaveBeenCalledTimes(1);
     expect(raws[2]?.ack).toHaveBeenCalledTimes(1);
   });
-
-  it('retries failed core messages in process, one by one', async () => {
-    const { d, schedule } = coreBatch(['1', '2', '3'], async (_p, ctx) => {
-      (ctx as NatsBatchContext).fail(2, new Error('x'));
-    });
-    await pipeline(toMw(settlement()))(d);
-    expect(schedule).toHaveBeenCalledExactlyOnceWith(d.messages[2], 100);
-  });
-
-  it('retries every core message when the handler throws', async () => {
-    const { d, schedule } = coreBatch(['1', '2'], () => Promise.reject(new Error('x')));
-    await pipeline(toMw(settlement()))(d);
-    expect(schedule.mock.calls).toEqual([
-      [d.messages[0], 100],
-      [d.messages[1], 100],
-    ]);
-  });
 });
 
 describe('batch idempotency', () => {
@@ -453,10 +403,6 @@ describe('batch validation', () => {
     } as never;
   }
 
-  function subscribeDef(options: Record<string, unknown>): HandlerDefinition {
-    return { ...consumeDef({}), kind: 'subscribe', subject: 'a', options } as never;
-  }
-
   it('rejects batch with manual ack', () =>
     expect(() => validateHandlers([consumeDef({ ack: 'manual', batch: {} })], mgr)).toThrow(
       NatsConfigError,
@@ -470,13 +416,15 @@ describe('batch validation', () => {
     ['maxWait beyond the timer range', { maxWait: 2 ** 31 }],
   ])('rejects %s', (_, batch) => {
     expect(() => validateHandlers([consumeDef({ batch })], mgr)).toThrow(NatsConfigError);
-    expect(() => validateHandlers([subscribeDef({ batch })], mgr)).toThrow(NatsConfigError);
   });
 
   it('accepts valid batch options', () => {
     expect(() =>
       validateHandlers(
-        [consumeDef({ batch: { maxSize: 1, maxWait: 0 } }), subscribeDef({ batch: {} })],
+        [
+          consumeDef({ batch: { maxSize: 1, maxWait: 0 } }),
+          consumeDef({ durable: 'e', batch: {} }),
+        ],
         mgr,
       ),
     ).not.toThrow();

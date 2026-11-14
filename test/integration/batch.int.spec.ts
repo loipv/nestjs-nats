@@ -10,7 +10,7 @@ import type { TestingModule } from '@nestjs/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { NatsBatchContext } from '../../src/context/nats-batch-context.js';
 import type { NatsJetStreamContext } from '../../src/context/nats-context.js';
-import { Consume, Subscribe } from '../../src/decorators/handler.decorators.js';
+import { Consume } from '../../src/decorators/handler.decorators.js';
 import { Ctx, Payload } from '../../src/decorators/param.decorators.js';
 import { NatsModule } from '../../src/module/nats.module.js';
 import { createTestApp } from './support/app.js';
@@ -32,8 +32,6 @@ class Handlers {
   readonly partial: Array<{ items: Item[]; at: number }> = [];
   readonly retried: Array<Array<[number, number]>> = [];
   readonly mixed: Item[][] = [];
-  readonly core: Item[][] = [];
-  readonly coreRequests: Item[][] = [];
   private failedOnce = false;
 
   @Consume({
@@ -80,17 +78,6 @@ class Handlers {
   })
   onMixed(@Payload() items: Item[]) {
     this.mixed.push(items);
-  }
-
-  @Subscribe('batch.core', { batch: { maxSize: 3, maxWait: 5000 } })
-  onCore(@Payload() items: Item[]) {
-    this.core.push(items);
-  }
-
-  // Outside every stream, so a request is not answered by a stream's PubAck.
-  @Subscribe('core-batch.req', { batch: { maxSize: 3, maxWait: 5000 } })
-  onCoreRequests(@Payload() items: Item[]) {
-    this.coreRequests.push(items);
   }
 }
 
@@ -195,26 +182,6 @@ describe('batch processing', () => {
     await sleep(500);
     expect(handlers.mixed).toEqual([[{ n: 0 }, { n: 2 }]]);
     expect((await consumerInfo('mixed')).num_redelivered).toBe(0);
-  });
-
-  it('batches core subscriptions', async () => {
-    for (let n = 0; n < 6; n++) rawNc.publish('batch.core', json({ n }));
-    await rawNc.flush();
-    await eventually(() => expect(handlers.core.map((b) => b.length)).toEqual([3, 3]));
-    expect(handlers.core.flat().map((i) => i.n)).toEqual([0, 1, 2, 3, 4, 5]);
-  });
-
-  it('answers a request to a core batch handler with a 400, without handling it', async () => {
-    const reply = await rawNc.request('core-batch.req', json({ n: 99 }), { timeout: 2000 });
-    expect(reply.headers?.get('Nats-Service-Error-Code')).toBe('400');
-    expect(reply.headers?.get('Nats-Service-Error')).toBe(
-      'NATS handler Handlers.onCoreRequests handles batches and does not reply to requests',
-    );
-    for (let n = 10; n < 13; n++) rawNc.publish('core-batch.req', json({ n }));
-    await rawNc.flush();
-    await eventually(() =>
-      expect(handlers.coreRequests).toEqual([[{ n: 10 }, { n: 11 }, { n: 12 }]]),
-    );
   });
 
   it('flushes the pending batch on shutdown', async () => {

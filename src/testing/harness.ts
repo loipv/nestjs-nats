@@ -24,7 +24,6 @@ import {
 } from '../pipeline/delivery.js';
 import { assertTimeout } from '../pipeline/handler-timeout.js';
 import {
-  batchRequestError,
   isReplyDelivery,
   type ServiceError,
   toServiceError,
@@ -181,23 +180,13 @@ export class NatsTestHarness {
     const def = this.resolve(target);
     const entry = this.registry.get(def.connection);
     const pipeline = this.pipelineOf(def, entry);
-    const batch =
-      (def.kind === 'subscribe' || def.kind === 'consume') && def.options.batch !== undefined;
+    const batch = def.kind === 'consume' && def.options.batch !== undefined;
     if (batch && (!Array.isArray(payload) || payload.length === 0)) {
       throw new NatsConfigError(
         `${label(def)} is a batch handler: dispatch a non-empty array of payloads, one per message`,
       );
     }
     const payloads: unknown[] = batch ? (payload as unknown[]) : [payload];
-    // As the adapter does: a batch handler answers a request with a 400, unhandled.
-    if (batch && def.kind === 'subscribe' && options.request) {
-      return {
-        settlement: 'none',
-        outcomes: payloads.map(() => ({ action: 'none' })),
-        reply: { error: batchRequestError(def) },
-        dlq: [],
-      };
-    }
     const subject =
       options.subject ?? ('subject' in target ? target.subject : this.defaultSubject(def));
     const parts = payloads.map((p, index) =>

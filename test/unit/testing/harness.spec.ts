@@ -97,11 +97,6 @@ class Handlers {
     return { got: p };
   }
 
-  @Subscribe('core.batch', { batch: { maxSize: 10 } })
-  coreBatch(@Payload() items: number[]) {
-    calls.push(`coreBatch:${items.join(',')}`);
-  }
-
   @Subscribe('fail.core')
   failCore() {
     calls.push('failCore');
@@ -303,26 +298,6 @@ describe('NatsTestHarness', () => {
     expect(r.outcomes.map((o) => o.action)).toEqual(['ack', 'retry', 'ack']);
     expect(r.settlement).toBe('ack');
     await expect(h.dispatch({ handler: 'Handlers.batch' }, 1)).rejects.toThrow(NatsConfigError);
-  });
-
-  it('rejects a request to a core batch handler with a 400 without handling it', async () => {
-    calls.length = 0;
-    const r = await h.dispatch({ handler: 'Handlers.coreBatch' }, [1, 2], { request: true });
-    expect(r).toEqual({
-      settlement: 'none',
-      outcomes: [{ action: 'none' }, { action: 'none' }],
-      reply: {
-        error: {
-          code: 400,
-          description:
-            'NATS handler Handlers.coreBatch handles batches and does not reply to requests',
-        },
-      },
-      dlq: [],
-    });
-    expect(calls).toEqual([]);
-    await h.dispatch({ handler: 'Handlers.coreBatch' }, [1, 2]);
-    expect(calls).toEqual(['coreBatch:1,2']);
   });
 
   it('gives each message of a batch its own stream sequence, from streamSequence on', async () => {

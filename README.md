@@ -14,7 +14,7 @@ Decorator-driven [NATS](https://nats.io) integration for [NestJS](https://nestjs
 - Parameter decorators (`@Payload`, `@Headers`, `@Subject`, `@Msg`, `@Ctx`) that work with pipes, including a global `ValidationPipe`, and with guards, interceptors and exception filters. See [Parameters, pipes and Nest enhancers](./docs/handlers.md#parameters-pipes-and-nest-enhancers).
 - `NatsClient` for fire-and-forget publish and request/reply, and `JetStreamClient` for publishing with acknowledgements and de-duplication. See [Publishing](./docs/publishing.md).
 - Declarative streams and consumers, synced at startup with four modes from create-or-update to read-only verification. See [Streams and consumers](./docs/streams.md).
-- Retry with exponential backoff and an optional dead-letter queue (DLQ), idempotency with a pluggable store (in memory, or shared through a JetStream KV bucket with `@loipv/nestjs-nats/kv`), and batch processing for `@Subscribe`, `@Consume` and `@ConsumePush`. See [Retry and dead-letter queue](./docs/retry-and-dlq.md), [Idempotency](./docs/idempotency.md) and [Batch processing](./docs/batching.md#batch-processing).
+- Retry with exponential backoff and an optional dead-letter queue (DLQ), idempotency with a pluggable store (in memory, or shared through a JetStream KV bucket with `@loipv/nestjs-nats/kv`), and batch processing for `@Consume` and `@ConsumePush`. See [Retry and dead-letter queue](./docs/retry-and-dlq.md), [Idempotency](./docs/idempotency.md) and [Batch processing](./docs/batching.md#batch-processing).
 - Handler timeouts (`timeout`, `handlerTimeout`): a handler that runs too long fails like any error, frees its slot and sees `ctx.signal` aborted. See [Handler timeout](./docs/handlers.md#handler-timeout).
 - Batched JetStream publishing with `publishMany()` and an auto-flushing `batcher()`. See [Batch publishing](./docs/batching.md#batch-publishing).
 - All-or-nothing publishing with `publishAtomic()`: several messages stored as one atomic batch. See [Atomic batches](./docs/publishing.md#atomic-batches).
@@ -129,7 +129,6 @@ Until 1.0, any API may change in a minor release, as the warning above says. The
 |---|---|
 | [`publishMany()` and `batcher()`](./docs/batching.md#batch-publishing) | `publish()` in a loop, or `Promise.all` over a bounded set |
 | [`@ConsumePush`](./docs/consumers.md#push-consumepush) | `@Consume` (pull), which NATS recommends |
-| [`batch` on `@Subscribe`](./docs/batching.md#batch-processing) | `batch` on `@Consume` (stable) |
 | [Idempotency on `@ConsumeOrdered`](./docs/idempotency.md), with the KV store's `instanceId` | Idempotency on `@Consume` |
 | [CloudEvents structured mode](./docs/cloudevents.md#publishing-cloudevents) and [wildcard type patterns](./docs/cloudevents.md#receiving-cloudevents) (`*`, `>`) | Binary mode, and exact types in `@OnCloudEvent` |
 

@@ -23,7 +23,6 @@ onOrderEvent(@Payload() event: OrderEvent, @Subject() subject: string) {
 | `retry` | module's, else on | Retry policy, or `false`. See [Retry and dead-letter queue](./retry-and-dlq.md) |
 | `dlq` | module's, else off | Dead-letter queue: `true`, or `{ subject?, mode? }` |
 | `idempotency` | off | `true` or `{ ttl?, keyExtractor? }`. See [Idempotency](./idempotency.md) |
-| `batch` | off | `{ maxSize?, maxWait? }`. See [Batch processing](./batching.md#batch-processing) |
 | `disabled` | `false` | `true`, or a function returning a boolean, to skip the handler. See [Disabling a handler](#disabling-a-handler) |
 
 **Request/reply.** If the incoming message has a reply subject and the handler returns something other than `undefined`, the return value is encoded and sent back. If the handler throws, the requester gets an error reply and the message is not retried. See [Errors](./errors.md).
@@ -60,7 +59,8 @@ async bill(@Payload() order: OrderDto, @Ctx() ctx: NatsJetStreamContext) {
 | `ack` | `'auto'` | `'auto'` or `'manual'` |
 | `concurrency` | `1` | Maximum number of messages processed at once. The library asks the server for `concurrency` messages at a time (`max(batch.maxSize, concurrency)` with `batch`), and pulls more as it hands them to free slots |
 | `connection`, `codec`, `disabled` | | As for `@Subscribe` |
-| `retry`, `dlq`, `idempotency`, `batch` | | As for `@Subscribe`. `batch` cannot be combined with `ack: 'manual'` |
+| `retry`, `dlq`, `idempotency` | | As for `@Subscribe` |
+| `batch` | off | `{ maxSize?, maxWait? }`. Cannot be combined with `ack: 'manual'`. See [Batch processing](./batching.md#batch-processing) |
 
 A consumer the library creates defaults to `ack_policy: 'explicit'` and `max_deliver: -1`, unless you set them. These defaults are never applied to a consumer that already exists.
 

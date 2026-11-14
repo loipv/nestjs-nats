@@ -23,6 +23,23 @@ describe('NatsTestingModule', () => {
     await moduleRef.close();
   });
 
+  it('rejects a @Subscribe handler with batch, as bootstrap does', async () => {
+    @Injectable()
+    class Bad {
+      @Subscribe('a', { batch: { maxSize: 2 } } as never)
+      on() {}
+    }
+    const moduleRef = await Test.createTestingModule({
+      imports: [NatsTestingModule.forRoot()],
+      providers: [Bad],
+    }).compile();
+    const h = NatsTestHarness.create(moduleRef);
+    await expect(h.dispatch({ handler: 'Bad.on' }, [1, 2], { request: true })).rejects.toThrow(
+      /sets batch on @Subscribe, which was removed in 0\.3\.0/,
+    );
+    await moduleRef.close();
+  });
+
   it('does not dispatch to a disabled handler, as bootstrap would not start it', async () => {
     @Injectable()
     class Toggled {
