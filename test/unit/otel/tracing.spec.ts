@@ -12,6 +12,8 @@ import { W3CTraceContextPropagator } from '@opentelemetry/core';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { afterAll, afterEach, beforeAll, describe, expect, expectTypeOf, it } from 'vitest';
 import { jsonCodec } from '../../../src/codec/codec.js';
+import type { ConnectionEntry } from '../../../src/connection/connection-registry.js';
+import { JetStreamClient } from '../../../src/jetstream/jetstream-client.js';
 import * as otelApi from '../../../src/otel/index.js';
 import { type TracingOptions, tracing } from '../../../src/otel/index.js';
 import type {
@@ -28,6 +30,7 @@ import {
   delivery,
   endpointHandler,
   jsPart,
+  logger,
   orderedPart,
   subscribeHandler,
 } from '../../support/deliveries.js';
@@ -465,6 +468,47 @@ describe('tracing()', () => {
     });
     await inbound(delivery(subscribeHandler, [part]));
     expect(only().spanContext().traceId).toBe(other);
+  });
+
+  describe('JetStream publishMany', () => {
+    function jsEntry() {
+      const published: MsgHdrs[] = [];
+      const entry = {
+        name: 'default',
+        options: { connection: {}, plugins: [plugin] },
+        logger,
+        js: () => ({
+          publish: async (_subject: string, _data: Uint8Array, opts: { headers: MsgHdrs }) => {
+            published.push(opts.headers);
+            return { stream: 'S', seq: published.length, duplicate: false };
+          },
+        }),
+      } as unknown as ConnectionEntry;
+      return { entry, published };
+    }
+
+    it('runs publishMany items in the caller context', async () => {
+      const { entry, published } = jsEntry();
+      const js = new JetStreamClient(entry);
+      const parent = trace.getTracer('test').startSpan('P');
+      await context.with(trace.setSpan(ROOT_CONTEXT, parent), () =>
+        js.publishMany([
+          { subject: 'o.c', data: 1, opts: { msgId: 'm-0' } },
+          { subject: 'o.c', data: 2, opts: { msgId: 'm-1' } },
+        ]),
+      );
+      parent.end();
+      const { traceId, spanId } = parent.spanContext();
+      const publishes = spans().filter((s) => s.name === 'publish o.c');
+      expect(publishes).toHaveLength(2);
+      for (const i of [0, 1]) {
+        const span = publishes.find((s) => s.attributes['messaging.message.id'] === `m-${i}`);
+        expect(span?.parentSpanContext?.spanId).toBe(spanId);
+        expect(span?.spanContext().traceId).toBe(traceId);
+        const tp = published.find((h) => h.get('Nats-Msg-Id') === `m-${i}`)?.get('traceparent');
+        expect(tp).toBe(`00-${traceId}-${span?.spanContext().spanId}-01`);
+      }
+    });
   });
 
   it('is a no-op without an SDK', async () => {
