@@ -111,6 +111,7 @@ Handlers can live in any provider or controller, in any module. The library find
 | [Streams and consumers](./docs/streams.md) | Declarative streams and consumers, sync modes |
 | [Retry and dead-letter queue](./docs/retry-and-dlq.md) | Retry options, failure handling, DLQ |
 | [Idempotency](./docs/idempotency.md) | Keys and stores |
+| [KV buckets](./docs/kv.md) | Declaring and injecting JetStream KV buckets |
 | [Batching](./docs/batching.md) | Batch processing and `publishMany()` |
 | [CloudEvents](./docs/cloudevents.md) | Publishing and receiving CloudEvents |
 | [Plugins](./docs/plugins.md) | Inbound and outbound plugins, observing outcomes |

@@ -169,7 +169,7 @@ export class NatsModule {
  * rethrowing. A failure during dependency injection runs no lifecycle hook, so nothing
  * else would close them.
  */
-async function abortOnFailure<T>(
+export async function abortOnFailure<T>(
   manager: ConnectionRegistry,
   factory: () => T | Promise<T>,
 ): Promise<T> {

@@ -39,6 +39,7 @@ import type {
   SubscribeOptions,
 } from '../../../src/index.js';
 import * as api from '../../../src/index.js';
+import * as kv from '../../../src/kv/index.js';
 import * as otel from '../../../src/otel/index.js';
 import * as testing from '../../../src/testing/index.js';
 
@@ -297,6 +298,14 @@ it('exports MessageOutcome as the outcome type of Delivery.outcomes', () => {
 it('exports the subpath entries', () => {
   expect(Object.keys(otel).sort()).toEqual(['metrics', 'tracing']);
   expect(Object.keys(health).sort()).toEqual(['NatsHealthIndicator', 'NatsHealthModule']);
+  expect(Object.keys(kv).sort()).toEqual([
+    'InjectKv',
+    'KvIdempotencyStore',
+    'NatsKvModule',
+    'getKvToken',
+  ]);
+  expectTypeOf<kv.KvBucketDeclaration>().toHaveProperty('bucket');
+  expectTypeOf<kv.NatsKvFeatureOptions>().toHaveProperty('buckets');
   expect(Object.keys(testing).sort()).toEqual([
     'NatsTestHarness',
     'NatsTestingModule',

@@ -48,6 +48,8 @@ class Billing {
 | `prefetch` | `0` | Messages asked for beyond the slots, an integer `>= 0`. Fewer round trips to the server for small, fast messages |
 | `expires` | `30000` | How long one pull request waits for messages, in ms, at least `1000` |
 
+There is no limit in bytes: nats.js cannot bound a pull by both size and count, and pulling by size alone stalls whenever the budget left for a request is smaller than the next message.
+
 **Consumer limits.** A consumer's `max_batch` and `max_expires` bound what one pull may ask for, and the server refuses a pull beyond them. Opening the consumer fails with a `NatsConfigError` when `concurrency` (or `batch.maxSize`) plus `prefetch` exceeds `max_batch`, or when `expires` (30000 when unset) exceeds `max_expires`, instead of the handler silently receiving nothing.
 
 **`prefetch` and redeliveries.** Prefetched messages wait in the NATS client until a slot is free, and the library cannot heartbeat them there (see [Heartbeats](./retry-and-dlq.md#what-happens-to-a-failed-message)). If working through them takes longer than the consumer's `ack_wait`, the server redelivers them, and they can be processed twice. When the handler has a [`timeout`](./handlers.md#handler-timeout), the library warns at startup when `(prefetch / concurrency + 1) × timeout` exceeds `ack_wait`. Keep `prefetch` small, or raise `ack_wait`.
