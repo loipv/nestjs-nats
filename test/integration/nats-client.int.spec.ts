@@ -200,6 +200,27 @@ describe('NatsClient', () => {
     }
   });
 
+  it('stops at maxMessages with stall too', async () => {
+    const subs = [1, 2, 3, 4, 5].map((n) =>
+      rawNc.subscribe('rm.stall', {
+        callback: (_err, msg) => {
+          msg.respond(JSON.stringify({ n }));
+        },
+      }),
+    );
+    await rawNc.flush();
+    try {
+      const replies = await client.requestMany('rm.stall', undefined, {
+        maxWait: 1000,
+        stall: 100,
+        maxMessages: 2,
+      });
+      expect(replies).toHaveLength(2);
+    } finally {
+      for (const sub of subs) sub.unsubscribe();
+    }
+  });
+
   it('resolves [] at once when nobody answers', async () => {
     const start = Date.now();
     await expect(client.requestMany('rm.none', undefined, { maxWait: 2000 })).resolves.toEqual([]);

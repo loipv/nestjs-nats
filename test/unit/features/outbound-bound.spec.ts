@@ -421,6 +421,17 @@ describe('NatsClient.publish error hook with plugins', () => {
     expect(hook).not.toHaveBeenCalled();
   });
 
+  it('logs a plugin that rejects with undefined, like any failure', async () => {
+    const { nats, error } = setup([
+      plugin(async () => {
+        throw undefined;
+      }),
+    ]);
+    nats.publish('o', 1);
+    await nats.flush();
+    expect(error).toHaveBeenCalledExactlyOnceWith('Failed to publish to "o": undefined');
+  });
+
   it('lets flush() wait until the hook ran', async () => {
     const hook = vi.fn();
     const { nats } = setup([failingBefore], undefined, hook);

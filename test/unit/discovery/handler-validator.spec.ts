@@ -489,8 +489,6 @@ describe('validateHandlers pull', () => {
     ['prefetch', -1, 'an integer >= 0'],
     ['prefetch', 1.5, 'an integer >= 0'],
     ['prefetch', '2', 'an integer >= 0'],
-    ['maxBytes', 0, 'an integer >= 1'],
-    ['maxBytes', 1.5, 'an integer >= 1'],
     ['expires', 999, 'a number of ms in [1000, 2147483647]'],
     ['expires', 2 ** 31, 'a number of ms in [1000, 2147483647]'],
     ['expires', Number.NaN, 'a number of ms in [1000, 2147483647]'],
@@ -502,7 +500,13 @@ describe('validateHandlers pull', () => {
     );
   });
 
-  it.each([[{ prefetch: 0, maxBytes: 1, expires: 1000 }], [{ expires: 2147483647 }], [{}]])(
+  it('rejects pull.maxBytes, which nats.js cannot combine with a bounded message count', () => {
+    expect(() => validateHandlers([pull({ maxBytes: 1024 })], mgr)).toThrow(
+      'NATS handler H.on does not support pull.maxBytes',
+    );
+  });
+
+  it.each([[{ prefetch: 0, expires: 1000 }], [{ expires: 2147483647 }], [{}]])(
     'accepts %j',
     (value) => {
       expect(() => validateHandlers([pull(value)], mgr)).not.toThrow();

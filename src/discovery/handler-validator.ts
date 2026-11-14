@@ -92,12 +92,14 @@ function validatePull(def: HandlerDefinition & { kind: 'consume' }): void {
     new NatsConfigError(
       `NATS handler ${label(def)} has invalid pull.${field} ${String(value)}; expected ${expected}`,
     );
-  const { prefetch, maxBytes, expires } = pull;
+  // nats.js refuses max_bytes next to max_messages, and without a message count it pulls far
+  // more than the heartbeat covers: not supported.
+  if ((pull as { maxBytes?: unknown }).maxBytes !== undefined) {
+    throw new NatsConfigError(`NATS handler ${label(def)} does not support pull.maxBytes`);
+  }
+  const { prefetch, expires } = pull;
   if (prefetch !== undefined && !(Number.isInteger(prefetch) && prefetch >= 0)) {
     throw invalid('prefetch', prefetch, 'an integer >= 0');
-  }
-  if (maxBytes !== undefined && !(Number.isInteger(maxBytes) && maxBytes >= 1)) {
-    throw invalid('maxBytes', maxBytes, 'an integer >= 1');
   }
   if (expires !== undefined && !(expires >= 1000 && expires <= MAX_TIMER_DELAY)) {
     throw invalid('expires', expires, `a number of ms in [1000, ${MAX_TIMER_DELAY}]`);

@@ -90,8 +90,6 @@ export interface PullOptions {
    * they are not heartbeated: keep `ack_wait` above the time to work through them.
    */
   prefetch?: number;
-  /** Largest size of one pull request, in bytes (default: no limit). */
-  maxBytes?: number;
   /** How long one pull request waits for messages, in ms, at least 1000 (default 30_000). */
   expires?: number;
 }

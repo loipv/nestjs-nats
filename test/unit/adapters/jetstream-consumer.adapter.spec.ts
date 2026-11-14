@@ -102,6 +102,8 @@ function setup(
       deliver_subject?: string;
       deliver_group?: string;
       max_ack_pending?: number;
+      max_batch?: number;
+      max_expires?: number;
     };
     delivery?: 'pull' | 'push';
     /** `js().consumers.getPushConsumer()`, by default resolving the fake consumer. */
@@ -196,7 +198,6 @@ describe('JetStreamConsumerAdapter pull options', () => {
       { concurrency: 2, batch: { maxSize: 5 }, pull: { prefetch: 3 } },
       { max_messages: 8 },
     ],
-    ['maxBytes', { pull: { maxBytes: 1024 } }, { max_messages: 1, max_bytes: 1024 }],
     ['expires', { pull: { expires: 5000 } }, { max_messages: 1, expires: 5000 }],
   ])('pulls with %s', async (_, opts, expected) => {
     expect((await consumeArgs(opts)).args).toEqual(expected);
@@ -221,6 +222,57 @@ describe('JetStreamConsumerAdapter pull options', () => {
       handlerTimeout: 20_000,
     });
     expect(logger.warn).toHaveBeenCalledExactlyOnceWith(WARNING);
+  });
+
+  async function openError(opts: Parameters<typeof setup>[1]) {
+    const { adapter } = setup(() => Promise.resolve(), opts);
+    const err = await adapter.start().then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    await adapter.stop();
+    expect(err).toBeInstanceOf(NatsConfigError);
+    return (err as Error).message;
+  }
+
+  it("fails to open when it would pull more messages than the consumer's max_batch", async () => {
+    expect(
+      await openError({
+        concurrency: 4,
+        pull: { prefetch: 8 },
+        consumerConfig: { ack_wait: 30_000_000_000, max_deliver: -1, max_batch: 10 },
+      }),
+    ).toBe(
+      'Consumer of C.m on "ORD/d" pulls 12 messages at a time, more than its max_batch 10; lower concurrency, batch.maxSize or pull.prefetch, or raise max_batch',
+    );
+  });
+
+  it.each([
+    ['pull.expires', { expires: 20_000 }, 20_000],
+    ["nats.js's default", {}, 30_000],
+  ])("fails to open when %s outlasts the consumer's max_expires", async (_, pull, wait) => {
+    expect(
+      await openError({
+        pull,
+        consumerConfig: { ack_wait: 30_000_000_000, max_deliver: -1, max_expires: 5_000_000_000 },
+      }),
+    ).toBe(
+      `Consumer of C.m on "ORD/d" pull requests wait ${wait} ms, longer than its max_expires 5000 ms; set pull.expires to at most 5000`,
+    );
+  });
+
+  it('opens within the limits of the consumer', async () => {
+    const { args } = await consumeArgs({
+      concurrency: 2,
+      pull: { prefetch: 8, expires: 5000 },
+      consumerConfig: {
+        ack_wait: 30_000_000_000,
+        max_deliver: -1,
+        max_batch: 10,
+        max_expires: 5_000_000_000,
+      },
+    });
+    expect(args).toEqual({ max_messages: 10, expires: 5000 });
   });
 
   it.each([

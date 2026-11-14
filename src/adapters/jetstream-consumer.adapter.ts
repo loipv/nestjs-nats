@@ -38,6 +38,8 @@ import { RestartSupervisor } from './restart-supervisor.js';
 type ConsumeDefinition = HandlerDefinition & { kind: 'consume' };
 
 /** nats.js's refusal to bind a push consumer that another subscriber already bound. */
+/** How long nats.js keeps a pull request open by default, ms. */
+const DEFAULT_PULL_EXPIRES = 30_000;
 const isAlreadyBound = (err: unknown): err is Error =>
   err instanceof Error &&
   err.name === 'InvalidOperationError' &&
@@ -235,6 +237,21 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
       config !== undefined,
     );
     const { config: actual } = await consumer.info(true);
+    const maxMessages = this.capacity + (pull.prefetch ?? 0);
+    const expires = pull.expires ?? DEFAULT_PULL_EXPIRES;
+    // The server refuses a pull beyond these limits, and nats.js only reports it as a status:
+    // the consumer would receive nothing, silently.
+    if (actual.max_batch && maxMessages > actual.max_batch) {
+      throw new NatsConfigError(
+        `Consumer of ${this.label} pulls ${maxMessages} messages at a time, more than its max_batch ${actual.max_batch}; lower concurrency, batch.maxSize or pull.prefetch, or raise max_batch`,
+      );
+    }
+    const maxExpiresMs = (actual.max_expires ?? 0) / 1e6;
+    if (maxExpiresMs > 0 && expires > maxExpiresMs) {
+      throw new NatsConfigError(
+        `Consumer of ${this.label} pull requests wait ${expires} ms, longer than its max_expires ${maxExpiresMs} ms; set pull.expires to at most ${maxExpiresMs}`,
+      );
+    }
     return {
       config: actual,
       // Just enough pulled messages to keep every slot busy, or to fill a batch: they wait
@@ -244,8 +261,7 @@ export class JetStreamConsumerAdapter implements HandlerAdapter {
       // `pull.prefetch` more wait in the client's buffer too.
       consume: () =>
         consumer.consume({
-          max_messages: this.capacity + (pull.prefetch ?? 0),
-          ...(pull.maxBytes !== undefined ? { max_bytes: pull.maxBytes } : {}),
+          max_messages: maxMessages,
           ...(pull.expires !== undefined ? { expires: pull.expires } : {}),
           ...(this.abortOnMissing ? { abort_on_missing_resource: true } : {}),
         }),

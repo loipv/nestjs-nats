@@ -187,6 +187,58 @@ describe('NatsClient.requestMany', () => {
     expect(undecodable?.error).toBeInstanceOf(NatsDecodeError);
   });
 
+  /** Replies that keep coming every `every` ms until stopped, as nats.js's iterator does. */
+  function endless(every: number) {
+    let stopped = false;
+    const stop = vi.fn(() => {
+      stopped = true;
+    });
+    const iterable = {
+      stop,
+      async *[Symbol.asyncIterator]() {
+        let n = 0;
+        while (!stopped) {
+          await new Promise((r) => setTimeout(r, every));
+          if (!stopped) yield reply(enc.encode(String(n++)));
+        }
+      },
+    };
+    return { iterable, stop };
+  }
+
+  function clientOver(iterable: unknown) {
+    const entry = {
+      name: 'default',
+      options: { connection: {} },
+      nc: { requestMany: vi.fn(async () => iterable) },
+      logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      onClose: () => () => {},
+    } as unknown as ConnectionEntry;
+    return new NatsClient(entry);
+  }
+
+  it('stops at maxMessages whatever the strategy, and ends the replies', async () => {
+    const { iterable, stop } = endless(1);
+    const replies = await clientOver(iterable).requestMany('svc', undefined, {
+      stall: 100,
+      maxMessages: 2,
+    });
+    expect(replies.map((r) => ('data' in r ? r.data : r))).toEqual([0, 1]);
+    expect(stop).toHaveBeenCalled();
+  });
+
+  it('never waits longer than maxWait, even while replies keep coming', async () => {
+    const { iterable, stop } = endless(10);
+    const start = Date.now();
+    const replies = await clientOver(iterable).requestMany('svc', undefined, {
+      maxWait: 100,
+      stall: 50,
+    });
+    expect(Date.now() - start).toBeLessThan(300);
+    expect(replies.length).toBeGreaterThan(0);
+    expect(stop).toHaveBeenCalled();
+  });
+
   it('resolves [] when nobody answers', async () => {
     const { client } = setup([], new NoRespondersError('svc'));
     await expect(client.requestMany('svc')).resolves.toEqual([]);
@@ -293,6 +345,20 @@ describe('NatsClient.publish error hook', () => {
       throw broken;
     });
     expect(() => client.publish('o', 1)).not.toThrow();
+    expect(error.mock.calls).toEqual([
+      ['Publish to "o": the publish error handler failed', broken.stack],
+      ['Failed to publish to "o": closed'],
+    ]);
+  });
+
+  it('logs both errors when an async hook rejects, and flush() waits for it', async () => {
+    const broken = new Error('outbox down');
+    const { client, error } = setup(async () => {
+      await Promise.resolve();
+      throw broken;
+    });
+    client.publish('o', 1);
+    await client.flush();
     expect(error.mock.calls).toEqual([
       ['Publish to "o": the publish error handler failed', broken.stack],
       ['Failed to publish to "o": closed'],

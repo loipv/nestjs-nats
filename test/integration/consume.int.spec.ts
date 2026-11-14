@@ -241,6 +241,21 @@ describe('@Consume', () => {
     await eventually(async () => expect(await ackPending('prefetch')).toBe(0));
   });
 
+  it("fails bootstrap when a pull waits longer than the consumer's max_expires", async () => {
+    @Injectable()
+    class ShortExpires {
+      @Consume({
+        stream: 'ORD',
+        durable: 'short-expires',
+        config: { filter_subject: 'ord.short', max_expires: 5_000_000_000 },
+      })
+      on() {}
+    }
+    await expect(
+      createTestApp({ imports: [nats()], providers: [ShortExpires] }, { silent: true }),
+    ).rejects.toThrow(/pull requests wait 30000 ms, longer than its max_expires 5000 ms/);
+  });
+
   it('consumes a pre-created consumer without config', async () => {
     await jsm.consumers.add('ORD', {
       durable_name: 'precreated',

@@ -47,7 +47,7 @@ const event = { id: 42 };
 client.publish('audit.order', event, { onError: () => outbox.save('audit.order', event) });
 ```
 
-- **Instead of the log.** An error handed to a handler is not logged. If the handler throws, the library logs that (`the publish error handler failed`) and then the original error, and `publish()` still does not throw.
+- **Instead of the log.** An error handed to a handler is not logged. If the handler throws, or returns a promise that rejects, the library logs that (`the publish error handler failed`) and then the original error, and `publish()` still does not throw. `flush()` waits for a promise the handler returns.
 - **When.** On a connection without outbound plugins, the handler runs before `publish()` returns. With plugins, it runs when the failure happens, and `flush()` waits for it.
 - **Not errors.** A plugin that drops a message on purpose (returns without calling `next()`), or fails after the message was sent, does not call the handler: the message was not lost to a failure. Invalid arguments still make `publish()` throw synchronously.
 - **Unmasked.** The handler gets the error itself. Logs mask credentials; mask them yourself if you log the error.

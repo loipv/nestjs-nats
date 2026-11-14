@@ -69,7 +69,7 @@ export class NatsClient {
       this.entry.nc.publish(m.subject, payload, publishOpts);
     };
     const logFailure = (err: unknown): void => {
-      if (err === dropped) {
+      if (dropped !== undefined && err === dropped) {
         this.entry.logger.error((err as Error).message);
         return;
       }
@@ -77,24 +77,45 @@ export class NatsClient {
       this.entry.logger.error(`Failed to publish to "${subject}": ${reason}`);
     };
     /** Hands `err` to the error handler, else logs it; a failing handler is logged too. */
+    const handlerFailed = (handlerErr: unknown, err: unknown): void => {
+      this.entry.logger.error(
+        `Publish to "${subject}": the publish error handler failed`,
+        errorTrace(handlerErr),
+      );
+      logFailure(err);
+    };
+    /**
+     * Hands `err` to the error handler, else logs it. A handler that fails, or returns a
+     * promise that rejects, is logged with `err`; `flush()` waits for a returned promise.
+     */
     const failed = (err: unknown): void => {
       const error = err instanceof Error ? err : new Error(String(err));
       const { onPublishError } = this.entry.options;
-      try {
-        const handler: ((e: Error) => void) | undefined =
-          onError ??
-          (onPublishError && ((e) => onPublishError(e, { subject, connection: this.entry.name })));
-        if (handler) {
-          handler(error);
-          return;
-        }
-      } catch (handlerErr) {
-        this.entry.logger.error(
-          `Publish to "${subject}": the publish error handler failed`,
-          errorTrace(handlerErr),
-        );
+      const handler: ((e: Error) => unknown) | undefined =
+        onError ??
+        (onPublishError && ((e) => onPublishError(e, { subject, connection: this.entry.name })));
+      if (!handler) {
+        logFailure(err);
+        return;
       }
-      logFailure(err);
+      let result: unknown;
+      try {
+        result = handler(error);
+      } catch (handlerErr) {
+        handlerFailed(handlerErr, err);
+        return;
+      }
+      if (typeof (result as PromiseLike<unknown> | undefined)?.then !== 'function') return;
+      const settled: Promise<void> = Promise.resolve(result as PromiseLike<unknown>).then(
+        () => {
+          this.inflight.delete(settled);
+        },
+        (handlerErr: unknown) => {
+          this.inflight.delete(settled);
+          handlerFailed(handlerErr, err);
+        },
+      );
+      this.inflight.add(settled);
     };
     let dropped: Error | undefined;
     // Without plugins nothing is pending: publish at once, with no promise to track.
@@ -218,7 +239,21 @@ export class NatsClient {
           ...(stall !== undefined ? { stall } : {}),
           ...(m.headers.keys().length > 0 ? { headers: m.headers } : {}),
         });
-        for await (const reply of iterator) replies.push(toReply<T>(reply, m));
+        // nats.js counts replies only under 'count', and under 'stall' each reply replaces
+        // the maxWait timer: both bounds are kept here.
+        const stop = () => (iterator as { stop?: () => void }).stop?.();
+        const deadline = setTimeout(stop, maxWait);
+        try {
+          for await (const reply of iterator) {
+            replies.push(toReply<T>(reply, m));
+            if (replies.length === maxMessages) {
+              stop();
+              break;
+            }
+          }
+        } finally {
+          clearTimeout(deadline);
+        }
       } catch (err) {
         // Nobody answered: an empty result, not a failure.
         if (!isNoResponders(err)) throw err;
