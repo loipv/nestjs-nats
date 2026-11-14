@@ -180,4 +180,29 @@ describe('NatsClient', () => {
       await failing.close();
     }
   });
+
+  it('gathers a reply from each responder', async () => {
+    const subs = [1, 2, 3].map((n) =>
+      rawNc.subscribe('rm.svc', {
+        callback: (_err, msg) => {
+          msg.respond(JSON.stringify({ n }));
+        },
+      }),
+    );
+    await rawNc.flush();
+    try {
+      const all = await client.requestMany<{ n: number }>('rm.svc', undefined, { maxWait: 500 });
+      expect(all.map((r) => ('data' in r ? r.data.n : 0)).sort()).toEqual([1, 2, 3]);
+      const two = await client.requestMany('rm.svc', undefined, { maxWait: 500, maxMessages: 2 });
+      expect(two).toHaveLength(2);
+    } finally {
+      for (const sub of subs) sub.unsubscribe();
+    }
+  });
+
+  it('resolves [] at once when nobody answers', async () => {
+    const start = Date.now();
+    await expect(client.requestMany('rm.none', undefined, { maxWait: 2000 })).resolves.toEqual([]);
+    expect(Date.now() - start).toBeLessThan(500);
+  });
 });

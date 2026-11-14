@@ -31,6 +31,7 @@ import type {
   OrderedDeliverPolicy,
   PublishManyResult,
   PullOptions,
+  RequestManyReply,
   RetryOptions,
   StartupContext,
   StartupValue,
@@ -194,6 +195,9 @@ it('exports the reliability types', () => {
   expectTypeOf<InMemoryIdempotencyStoreOptions>().toHaveProperty('maxKeys');
   expectTypeOf<BatchOptions>().toHaveProperty('maxSize');
   expectTypeOf<PullOptions>().toHaveProperty('prefetch');
+  expectTypeOf<
+    Extract<RequestManyReply<number>, { data: number }>['data']
+  >().toEqualTypeOf<number>();
   expectTypeOf<JetStreamPublishOptions>().not.toBeAny();
   expectTypeOf<PublishManyResult>().toHaveProperty('ok');
   expectTypeOf<AtomicMessage>().toHaveProperty('subject');

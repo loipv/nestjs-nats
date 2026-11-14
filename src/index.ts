@@ -1,4 +1,5 @@
 export type { BatchOptions } from './batch/collector.js';
+export type { RequestManyReply } from './client/nats-client.js';
 export { NatsClient } from './client/nats-client.js';
 export type { CloudEventInit, CloudEventMeta } from './cloudevents/types.js';
 export type { Codec } from './codec/codec.js';

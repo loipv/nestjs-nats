@@ -42,6 +42,7 @@ assert.equal(js.published.length, 2);
 | `published` | The recorded messages, in order. Each has `subject`, `data` (decoded with the codec, the event's data for a CloudEvent), `raw` (the bytes), `headers`, `cloudEvent` (when the message is one), `reply` (for a request) and `atomic` (see below). On the core client, requests are included |
 | `whenRequest(subject).reply(value)` | Answers requests to `subject` (a NATS subject pattern) with `value`. The latest matching stub wins |
 | `whenRequest(subject).fail({ code, description })` | Answers with a service error |
+| `requestMany()` on the mock | Gets the reply of the latest matching stub as its only reply, or `[]` without a stub |
 
 Options: `codec`, `plugins` and `cloudEvents` (`{ source? }`). The JetStream mock acks with `{ stream: 'mock', seq, duplicate }`, where `duplicate` is `true` for a repeated `Nats-Msg-Id`. `publishAtomic()` of the JetStream mock runs the same checks and outbound plugins as the real one and records the messages of a batch of more than one message when it commits, each with `atomic: { batch, index, count }`. Its ack has `count` and a fake `batch` id (unset for a single message, which is published as usual). It does not check that a stream has `allow_atomic`.
 

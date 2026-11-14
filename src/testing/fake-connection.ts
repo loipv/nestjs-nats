@@ -191,6 +191,23 @@ export class FakeNatsConnection {
     return Promise.resolve(replyMsg(inbox, EMPTY, h));
   }
 
+  /**
+   * Answers with the reply of the latest matching `whenRequest` stub, or as nobody would:
+   * without a stub, the replies end with a no-responders error.
+   */
+  requestMany(
+    subject: string,
+    payload?: Payload,
+    options?: { headers?: MsgHdrs },
+  ): Promise<AsyncIterable<Msg>> {
+    const reply = this.request(subject, payload, options);
+    return Promise.resolve({
+      async *[Symbol.asyncIterator]() {
+        yield await reply;
+      },
+    });
+  }
+
   subscribe(): never {
     throw new NatsConfigError(
       'Subscriptions are not available on a fake NATS connection; dispatch messages with NatsTestHarness',

@@ -27,6 +27,27 @@ Invalid arguments are the exception: a bad header name or value, or an invalid `
 
 Outbound plugins must pass a request on within its timeout, or `request()` rejects with a `NatsModuleError` and nothing is sent; once it is sent, `request()` settles with the reply (or the `NatsRequestError`) without waiting for the plugins to return. A message given to `publish()` that the plugins do not pass on within 5000 ms is dropped, with an error logged. See [Outbound timing](./plugins.md#outbound-timing).
 
+### Many replies
+
+`requestMany()` sends one request and gathers every reply, for scatter-gather: asking each instance of a service for its status, or each shard for its part of an answer.
+
+```ts
+import type { NatsClient } from '@loipv/nestjs-nats';
+
+declare const client: NatsClient;
+
+const replies = await client.requestMany<{ healthy: boolean }>('svc.status', undefined, {
+  maxWait: 500, // stop after 500 ms (default 1000)
+  maxMessages: 10, // or once 10 replies arrived
+});
+for (const reply of replies) {
+  if ('error' in reply) console.warn(reply.error.message);
+  else console.log(reply.data.healthy);
+}
+```
+
+It stops when `maxWait` ends, when `maxMessages` replies arrived, or, with `stall`, when no reply came for `stall` ms after the last one; never later than `maxWait`. Each reply is `{ data, subject, headers }`, or `{ error, subject }` when it carries a service error (a `NatsRequestError` with `code: 'service_error'`) or cannot be decoded (a `NatsDecodeError`): one failing responder does not hide the others. When nobody is subscribed to the subject, it resolves `[]`. Other failures, such as a closed connection, reject. `headers`, `codec` and `cloudEvent` work as for `request()`, and the request goes through the outbound plugins like one, which have `maxWait` to pass it on.
+
 ## `JetStreamClient`
 
 ```ts

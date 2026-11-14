@@ -55,6 +55,15 @@ describe('createMockNatsClient', () => {
     expect(err).toMatchObject({ code: 'no_responders', subject: 'other' });
   });
 
+  it('answers requestMany with the reply of the stub, or none', async () => {
+    const mock = createMockNatsClient();
+    mock.whenRequest('svc').reply({ a: 1 });
+    await expect(mock.requestMany('svc')).resolves.toEqual([
+      { data: { a: 1 }, subject: expect.any(String), headers: {} },
+    ]);
+    await expect(mock.requestMany('other')).resolves.toEqual([]);
+  });
+
   it('stubs failing requests with a service error', async () => {
     const mock = createMockNatsClient();
     mock.whenRequest('q').fail({ code: 409, description: 'Conflict' });

@@ -1,10 +1,15 @@
 import { type Msg, type PublishOptions, TimeoutError } from '@nats-io/transport-node';
 import type { CloudEventInit } from '../cloudevents/types.js';
 import { type Codec, decodePayload } from '../codec/codec.js';
-import type { NatsHeadersInit } from '../codec/headers.js';
+import { fromMsgHdrs, type NatsHeadersInit } from '../codec/headers.js';
 import type { ConnectionEntry } from '../connection/connection-registry.js';
 import { redactText } from '../connection/redact.js';
-import { NatsModuleError, NatsRequestError } from '../errors/errors.js';
+import {
+  NatsConfigError,
+  NatsDecodeError,
+  NatsModuleError,
+  NatsRequestError,
+} from '../errors/errors.js';
 import {
   createOutgoingMessage,
   encodeOutgoing,
@@ -13,11 +18,14 @@ import {
 } from '../pipeline/outbound.js';
 import type { OutgoingMessage } from '../pipeline/types.js';
 import { isNoResponders } from '../util/errors.js';
+import { MAX_TIMER_DELAY } from '../util/timer.js';
 
 /** The default timeout (ms) of a request, and how long the outbound plugins have to pass a publish on. */
 export const DEFAULT_REQUEST_TIMEOUT = 5000;
 const SERVICE_ERROR_CODE_HEADER = 'Nats-Service-Error-Code';
 const SERVICE_ERROR_HEADER = 'Nats-Service-Error';
+/** How long `requestMany` waits for replies by default, ms. */
+const DEFAULT_REQUEST_MANY_WAIT = 1000;
 
 export class NatsClient {
   private readonly inflight = new Set<Promise<void>>();
@@ -121,21 +129,8 @@ export class NatsClient {
         }
         throw err;
       }
-      const serviceCode = reply.headers?.get(SERVICE_ERROR_CODE_HEADER);
-      if (serviceCode) {
-        // A non-integer header leaves `serviceCode` unset; its raw text is in the message.
-        const numeric = Number(serviceCode);
-        const description = reply.headers?.get(SERVICE_ERROR_HEADER) || undefined;
-        throw new NatsRequestError(
-          `Service error ${serviceCode} from "${m.subject}"${description ? `: ${description}` : ''}`,
-          {
-            code: 'service_error',
-            subject: m.subject,
-            serviceCode: Number.isInteger(numeric) ? numeric : undefined,
-            description,
-          },
-        );
-      }
+      const failure = serviceError(reply, m.subject);
+      if (failure) throw failure;
       return decodePayload(m.codec, reply.data, reply.headers) as T;
     };
     // The plugins must pass the request on within its timeout; once it is sent, the result is
@@ -144,6 +139,63 @@ export class NatsClient {
       what: `Request to "${subject}"`,
       // nats.js replaces a timeout of 0 with its own default.
       timeout: timeout || DEFAULT_REQUEST_TIMEOUT,
+      skipped: () => new NatsModuleError(`Request to "${subject}" produced no reply`),
+    });
+  }
+
+  /**
+   * Sends one request and gathers every reply until `maxWait` (default 1000 ms) ends, or
+   * `maxMessages` replies arrived, or, with `stall`, no reply came for `stall` ms. A reply
+   * that carries a service error, or cannot be decoded, is in the result as its `error`.
+   * Resolves `[]` when nobody answers.
+   */
+  async requestMany<T = unknown>(
+    subject: string,
+    data?: unknown,
+    opts: {
+      maxWait?: number;
+      maxMessages?: number;
+      stall?: number;
+      headers?: NatsHeadersInit;
+      codec?: Codec;
+      cloudEvent?: CloudEventInit;
+    } = {},
+  ): Promise<Array<RequestManyReply<T>>> {
+    const { maxWait = DEFAULT_REQUEST_MANY_WAIT, maxMessages, stall } = opts;
+    const invalid = (field: string, value: unknown, expected: string) =>
+      new NatsConfigError(
+        `requestMany to "${subject}" has invalid ${field} ${String(value)}; expected ${expected}`,
+      );
+    if (!(maxWait > 0 && maxWait <= MAX_TIMER_DELAY)) {
+      throw invalid('maxWait', maxWait, `a number of ms in (0, ${MAX_TIMER_DELAY}]`);
+    }
+    if (maxMessages !== undefined && !(Number.isInteger(maxMessages) && maxMessages >= 1)) {
+      throw invalid('maxMessages', maxMessages, 'an integer >= 1');
+    }
+    if (stall !== undefined && !(stall > 0 && stall <= maxWait)) {
+      throw invalid('stall', stall, 'a number of ms in (0, maxWait]');
+    }
+    const message = createOutgoingMessage(this.entry, 'request', subject, data, opts);
+    const send = async (m: OutgoingMessage): Promise<Array<RequestManyReply<T>>> => {
+      const replies: Array<RequestManyReply<T>> = [];
+      try {
+        const iterator = await this.entry.nc.requestMany(m.subject, encodeOutgoing(m), {
+          strategy: stall !== undefined ? 'stall' : maxMessages !== undefined ? 'count' : 'timer',
+          maxWait,
+          ...(maxMessages !== undefined ? { maxMessages } : {}),
+          ...(stall !== undefined ? { stall } : {}),
+          ...(m.headers.keys().length > 0 ? { headers: m.headers } : {}),
+        });
+        for await (const reply of iterator) replies.push(toReply<T>(reply, m));
+      } catch (err) {
+        // Nobody answered: an empty result, not a failure.
+        if (!isNoResponders(err)) throw err;
+      }
+      return replies;
+    };
+    return sendOutbound(this.entry, message, send, {
+      what: `Request to "${subject}"`,
+      timeout: maxWait,
       skipped: () => new NatsModuleError(`Request to "${subject}" produced no reply`),
     });
   }
@@ -158,5 +210,40 @@ export class NatsClient {
     while (this.inflight.size > 0) {
       await Promise.allSettled([...this.inflight]);
     }
+  }
+}
+
+/** A reply of `requestMany`: its decoded data, or why it has none. */
+export type RequestManyReply<T> =
+  | { data: T; subject: string; headers: Record<string, string | string[]> }
+  | { error: NatsRequestError | NatsDecodeError; subject: string };
+
+/** The service error a reply carries (`Nats-Service-Error-Code`), if any. */
+function serviceError(reply: Msg, subject: string): NatsRequestError | undefined {
+  const serviceCode = reply.headers?.get(SERVICE_ERROR_CODE_HEADER);
+  if (!serviceCode) return undefined;
+  // A non-integer header leaves `serviceCode` unset; its raw text is in the message.
+  const numeric = Number(serviceCode);
+  const description = reply.headers?.get(SERVICE_ERROR_HEADER) || undefined;
+  return new NatsRequestError(
+    `Service error ${serviceCode} from "${subject}"${description ? `: ${description}` : ''}`,
+    {
+      code: 'service_error',
+      subject,
+      serviceCode: Number.isInteger(numeric) ? numeric : undefined,
+      description,
+    },
+  );
+}
+
+function toReply<T>(reply: Msg, m: OutgoingMessage): RequestManyReply<T> {
+  const failure = serviceError(reply, m.subject);
+  if (failure) return { error: failure, subject: reply.subject };
+  try {
+    const data = decodePayload(m.codec, reply.data, reply.headers) as T;
+    return { data, subject: reply.subject, headers: fromMsgHdrs(reply.headers) };
+  } catch (err) {
+    if (err instanceof NatsDecodeError) return { error: err, subject: reply.subject };
+    throw err;
   }
 }
