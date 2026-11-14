@@ -6,7 +6,7 @@ import { UnmatchedCloudEventError } from '../cloudevents/errors.js';
 import { decodePayload } from '../codec/codec.js';
 import { NatsBatchContext } from '../context/nats-batch-context.js';
 import { ABORT_HANDLER, CLOUD_EVENT, type NatsContext } from '../context/nats-context.js';
-import type { CloudEventRouting } from '../discovery/handler-explorer.js';
+import type { CloudEventRouting } from '../discovery/handler-definition.js';
 import { NatsModuleError } from '../errors/errors.js';
 import { errorMessage } from '../util/errors.js';
 import {

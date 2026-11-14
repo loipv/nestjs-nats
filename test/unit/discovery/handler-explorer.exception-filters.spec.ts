@@ -18,10 +18,8 @@ import { Test, type TestingModule } from '@nestjs/testing';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { NatsContext } from '../../../src/context/nats-context.js';
 import { Subscribe } from '../../../src/decorators/handler.decorators.js';
-import {
-  type HandlerDefinition,
-  HandlerExplorer,
-} from '../../../src/discovery/handler-explorer.js';
+import type { HandlerDefinition } from '../../../src/discovery/handler-definition.js';
+import { HandlerExplorer } from '../../../src/discovery/handler-explorer.js';
 
 class MineError extends Error {}
 class GlobalError extends Error {}

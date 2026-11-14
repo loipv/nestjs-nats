@@ -4,7 +4,7 @@ import { jsonCodec } from '../../../src/codec/codec.js';
 import type { ConnectionEntry } from '../../../src/connection/connection-registry.js';
 import type { NatsBatchContext } from '../../../src/context/nats-batch-context.js';
 import { NatsContext, NatsJetStreamContext } from '../../../src/context/nats-context.js';
-import type { HandlerDefinition } from '../../../src/discovery/handler-explorer.js';
+import type { HandlerDefinition } from '../../../src/discovery/handler-definition.js';
 import { createIdempotency } from '../../../src/idempotency/idempotency.js';
 import type { ClaimResult, IdempotencyStore } from '../../../src/idempotency/store.js';
 import { compose } from '../../../src/pipeline/compose.js';

@@ -39,10 +39,8 @@ import {
   Payload,
   Subject,
 } from '../../../src/decorators/param.decorators.js';
-import {
-  type HandlerDefinition,
-  HandlerExplorer,
-} from '../../../src/discovery/handler-explorer.js';
+import type { HandlerDefinition } from '../../../src/discovery/handler-definition.js';
+import { HandlerExplorer } from '../../../src/discovery/handler-explorer.js';
 
 class Dto {
   @IsString()

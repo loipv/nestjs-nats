@@ -3,7 +3,7 @@ import { headers, type Msg, type Subscription } from '@nats-io/transport-node';
 import { type Codec, encodePayload } from '../codec/codec.js';
 import type { ConnectionEntry } from '../connection/connection-registry.js';
 import { NatsContext } from '../context/nats-context.js';
-import type { HandlerDefinition } from '../discovery/handler-explorer.js';
+import type { HandlerDefinition } from '../discovery/handler-definition.js';
 import {
   createDelivery,
   type DeliveryPart,

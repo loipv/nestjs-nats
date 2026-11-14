@@ -10,10 +10,8 @@ import {
   ConsumePush,
   Subscribe,
 } from '../../../src/decorators/handler.decorators.js';
-import {
-  type HandlerDefinition,
-  HandlerExplorer,
-} from '../../../src/discovery/handler-explorer.js';
+import type { HandlerDefinition } from '../../../src/discovery/handler-definition.js';
+import { HandlerExplorer } from '../../../src/discovery/handler-explorer.js';
 import { NatsConfigError } from '../../../src/errors/errors.js';
 import { toHandlerInfo } from '../../../src/pipeline/delivery.js';
 

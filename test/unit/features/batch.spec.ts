@@ -8,7 +8,7 @@ import type {
 import { NatsBatchContext } from '../../../src/context/nats-batch-context.js';
 import { NatsContext, NatsJetStreamContext } from '../../../src/context/nats-context.js';
 import { NatsParamType } from '../../../src/decorators/param.decorators.js';
-import type { HandlerDefinition } from '../../../src/discovery/handler-explorer.js';
+import type { HandlerDefinition } from '../../../src/discovery/handler-definition.js';
 import { validateHandlers } from '../../../src/discovery/handler-validator.js';
 import { NatsParamsFactory } from '../../../src/discovery/nats-params-factory.js';
 import { NatsConfigError, NatsDecodeError } from '../../../src/errors/errors.js';

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HandlerState, RestartBinding } from '../../../src/adapters/adapter.js';
 import { CoreSubscriptionAdapter } from '../../../src/adapters/core-subscription.adapter.js';
 import type { ConnectionEntry } from '../../../src/connection/connection-registry.js';
-import type { HandlerDefinition } from '../../../src/discovery/handler-explorer.js';
+import type { HandlerDefinition } from '../../../src/discovery/handler-definition.js';
 import { InMemoryIdempotencyStore } from '../../../src/idempotency/store.js';
 import { never, tick } from '../../support/async.js';
 

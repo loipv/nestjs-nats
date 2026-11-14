@@ -1,6 +1,6 @@
 import { type Codec, jsonCodec } from '../codec/codec.js';
 import type { ConnectionEntry } from '../connection/connection-registry.js';
-import type { HandlerDefinition } from '../discovery/handler-explorer.js';
+import type { HandlerDefinition } from '../discovery/handler-definition.js';
 import { resolveIdempotency } from '../idempotency/idempotency.js';
 import type { IdempotencyStore } from '../idempotency/store.js';
 import {

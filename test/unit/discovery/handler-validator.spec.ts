@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ConnectionRegistry } from '../../../src/connection/connection-registry.js';
-import type { HandlerDefinition } from '../../../src/discovery/handler-explorer.js';
+import type { HandlerDefinition } from '../../../src/discovery/handler-definition.js';
 import { validateHandlers } from '../../../src/discovery/handler-validator.js';
 import { NatsConfigError } from '../../../src/errors/errors.js';
 

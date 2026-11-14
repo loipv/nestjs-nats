@@ -13,7 +13,8 @@ import { type NatsHeadersInit, toMsgHdrs } from '../codec/headers.js';
 import { type ConnectionEntry, ConnectionRegistry } from '../connection/connection-registry.js';
 import { NatsContext, NatsJetStreamContext } from '../context/nats-context.js';
 import { NatsOrderedContext } from '../context/nats-ordered-context.js';
-import { type HandlerDefinition, HandlerExplorer } from '../discovery/handler-explorer.js';
+import type { HandlerDefinition } from '../discovery/handler-definition.js';
+import { HandlerExplorer } from '../discovery/handler-explorer.js';
 import { validateHandlers } from '../discovery/handler-validator.js';
 import { NatsConfigError } from '../errors/errors.js';
 import {

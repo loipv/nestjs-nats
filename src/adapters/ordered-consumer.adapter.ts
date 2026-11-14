@@ -14,7 +14,7 @@ import type {
   ConsumeOrderedOptions,
   OrderedDeliverPolicy,
 } from '../decorators/handler.decorators.js';
-import type { HandlerDefinition } from '../discovery/handler-explorer.js';
+import type { HandlerDefinition } from '../discovery/handler-definition.js';
 import { NatsConfigError } from '../errors/errors.js';
 import {
   createDelivery,

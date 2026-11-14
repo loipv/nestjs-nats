@@ -5,7 +5,7 @@ import type { Codec } from '../codec/codec.js';
 import { NatsBatchContext } from '../context/nats-batch-context.js';
 import type { NatsContext } from '../context/nats-context.js';
 import type { NatsServiceOptions } from '../decorators/handler.decorators.js';
-import type { HandlerDefinition } from '../discovery/handler-explorer.js';
+import type { HandlerDefinition } from '../discovery/handler-definition.js';
 import { NatsModuleError } from '../errors/errors.js';
 import { compose } from './compose.js';
 import type { InboundMiddleware, NatsPlugin, Next } from './types.js';

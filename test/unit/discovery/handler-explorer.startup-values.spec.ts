@@ -14,10 +14,8 @@ import {
   Subscribe,
 } from '../../../src/decorators/handler.decorators.js';
 import type { StartupContext } from '../../../src/decorators/startup-value.js';
-import {
-  type HandlerDefinition,
-  HandlerExplorer,
-} from '../../../src/discovery/handler-explorer.js';
+import type { HandlerDefinition } from '../../../src/discovery/handler-definition.js';
+import { HandlerExplorer } from '../../../src/discovery/handler-explorer.js';
 import { validateHandlers } from '../../../src/discovery/handler-validator.js';
 import { NatsConfigError } from '../../../src/errors/errors.js';
 

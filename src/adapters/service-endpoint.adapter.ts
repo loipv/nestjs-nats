@@ -4,7 +4,7 @@ import { type Codec, encodePayload } from '../codec/codec.js';
 import type { ConnectionEntry } from '../connection/connection-registry.js';
 import { NatsContext } from '../context/nats-context.js';
 import type { NatsServiceOptions } from '../decorators/handler.decorators.js';
-import type { HandlerDefinition } from '../discovery/handler-explorer.js';
+import type { HandlerDefinition } from '../discovery/handler-definition.js';
 import { NatsConfigError } from '../errors/errors.js';
 import { createDelivery, type HandlerInfo, type InternalDelivery } from '../pipeline/delivery.js';
 import { type ServiceError, toServiceError } from '../pipeline/reply.js';

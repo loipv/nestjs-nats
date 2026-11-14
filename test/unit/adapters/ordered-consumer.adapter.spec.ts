@@ -6,7 +6,7 @@ import type { RestartBinding } from '../../../src/adapters/adapter.js';
 import { OrderedConsumerAdapter } from '../../../src/adapters/ordered-consumer.adapter.js';
 import type { ConnectionEntry } from '../../../src/connection/connection-registry.js';
 import { NatsOrderedContext } from '../../../src/context/nats-ordered-context.js';
-import type { HandlerDefinition } from '../../../src/discovery/handler-explorer.js';
+import type { HandlerDefinition } from '../../../src/discovery/handler-definition.js';
 import { NatsConfigError } from '../../../src/errors/errors.js';
 import { InMemoryIdempotencyStore } from '../../../src/idempotency/store.js';
 import { never, tick } from '../../support/async.js';

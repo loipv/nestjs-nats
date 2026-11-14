@@ -6,7 +6,7 @@ import {
 import { type Codec, jsonCodec } from '../../../src/codec/codec.js';
 import type { ConnectionEntry } from '../../../src/connection/connection-registry.js';
 import { NatsContext, NatsJetStreamContext } from '../../../src/context/nats-context.js';
-import type { HandlerDefinition } from '../../../src/discovery/handler-explorer.js';
+import type { HandlerDefinition } from '../../../src/discovery/handler-definition.js';
 import { NatsHandlerTimeoutError } from '../../../src/errors/errors.js';
 import type { IdempotencyStore } from '../../../src/idempotency/store.js';
 import { createDelivery } from '../../../src/pipeline/delivery.js';

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { jsonCodec } from '../../../src/codec/codec.js';
 import { NatsContext } from '../../../src/context/nats-context.js';
-import type { HandlerDefinition } from '../../../src/discovery/handler-explorer.js';
+import type { HandlerDefinition } from '../../../src/discovery/handler-definition.js';
 import {
   buildInboundPipeline,
   type Delivery,

@@ -17,7 +17,7 @@ import {
 import { type ConnectionEntry, ConnectionRegistry } from '../connection/connection-registry.js';
 import { redactText } from '../connection/redact.js';
 import type { NatsServiceOptions } from '../decorators/handler.decorators.js';
-import type { DisabledHandler, HandlerDefinition } from '../discovery/handler-explorer.js';
+import type { DisabledHandler, HandlerDefinition } from '../discovery/handler-definition.js';
 import { HandlerExplorer } from '../discovery/handler-explorer.js';
 import { validateHandlers } from '../discovery/handler-validator.js';
 import { NatsConfigError } from '../errors/errors.js';

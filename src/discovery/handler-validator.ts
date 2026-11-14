@@ -6,7 +6,7 @@ import { assertTimeout } from '../pipeline/handler-timeout.js';
 import type { DlqOptions } from '../settlement/dlq.js';
 import { resolveRetryPolicy } from '../settlement/retry.js';
 import { MAX_TIMER_DELAY } from '../util/timer.js';
-import type { HandlerDefinition } from './handler-explorer.js';
+import type { HandlerDefinition } from './handler-definition.js';
 
 const label = (def: HandlerDefinition) => `${def.className}.${def.methodName}`;
 

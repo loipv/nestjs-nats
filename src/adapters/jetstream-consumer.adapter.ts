@@ -10,7 +10,7 @@ import type { Codec } from '../codec/codec.js';
 import type { ConnectionEntry } from '../connection/connection-registry.js';
 import { NatsJetStreamContext } from '../context/nats-context.js';
 import type { ConsumePushOptions } from '../decorators/handler.decorators.js';
-import type { HandlerDefinition } from '../discovery/handler-explorer.js';
+import type { HandlerDefinition } from '../discovery/handler-definition.js';
 import { NatsConfigError } from '../errors/errors.js';
 import type { NatsStreamManager } from '../jetstream/stream-manager.js';
 import { pushConsumerDefaults } from '../jetstream/stream-sync.js';
