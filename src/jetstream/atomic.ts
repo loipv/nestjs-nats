@@ -4,7 +4,7 @@ import type { CloudEventInit } from '../cloudevents/types.js';
 import type { Codec } from '../codec/codec.js';
 import type { NatsHeadersInit } from '../codec/headers.js';
 import type { ConnectionEntry } from '../connection/connection-registry.js';
-import { redactError, redactText, serverSecrets } from '../connection/redact.js';
+import { connectionSecrets, redactError, redactText } from '../connection/redact.js';
 import { NatsAtomicPublishError, NatsConfigError } from '../errors/errors.js';
 import { compose } from '../pipeline/compose.js';
 import {
@@ -92,8 +92,7 @@ export async function publishAtomic(
   const subject = outgoing[0]?.subject ?? '';
   const what = `Atomic publish of ${count} message${count === 1 ? '' : 's'} to "${subject}"`;
   const failed = (err: unknown): NatsAtomicPublishError => {
-    const { pass, token, servers } = entry.options.connection;
-    const secrets = [pass, token, ...serverSecrets(servers)];
+    const secrets = connectionSecrets(entry.options.connection);
     return new NatsAtomicPublishError(`${what} failed: ${redactText(errorMessage(err), secrets)}`, {
       subject,
       count,
